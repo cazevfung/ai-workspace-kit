@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "ticket": "AW-039",
+  "prd": "PRD-008 0.1",
+  "recorded_at": "2026-11-17T11:09:27Z",
+  "upstream_root": "D:\\agent-skills\\installed",
+  "note": "9 个借用技能的上游基线。记录时间早于任何复制动作；上游目录不动。",
+  "skills": {
+    "planning-and-task-breakdown": {
+      "upstream_dir": "D:\\agent-skills\\installed\\planning-and-task-breakdown",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "e6a610df54aa4e5eaa1ab80e8ea347c05652994143a6006979e6c15889a80705"
+        }
+      ]
+    },
+    "writing-plans": {
+      "upstream_dir": "D:\\agent-skills\\installed\\writing-plans",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c70e4fa1671056e1f1f6b8b5c29a88e37fa1088f33eda38d5c926cbccc396697"
+        }
+      ]
+    },
+    "executing-plans": {
+      "upstream_dir": "D:\\agent-skills\\installed\\executing-plans",
+      "file_count": 3,
+      "files": [
+        {
+          "path": "scripts/task-done",
+          "sha256": "8cce825bcd73c31c66fa03c401844c8991813443b0b105b6395ad119a104a720"
+        },
+        {
+          "path": "scripts/task-start",
+          "sha256": "2c1aaf95b2e6c909d4c9a8ffb37c1691e0fbb58b5e77f6082f5036417be4b4d8"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "e70ca59987d5a670a06ca6d165788e09e65393e5be49d3d7ba3732ffbe314621"
+        }
+      ]
+    },
+    "verification-before-completion": {
+      "upstream_dir": "D:\\agent-skills\\installed\\verification-before-completion",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "881911d94e6c7e9cd811e259698c479d460230a7c4b5e20e7852b2982466eff8"
+        }
+      ]
+    },
+    "code-review-and-quality": {
+      "upstream_dir": "D:\\agent-skills\\installed\\code-review-and-quality",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "629382fa0229df8de607270e8e563e2d80a028751cedd723657c6558e0698c00"
+        }
+      ]
+    },
+    "dispatching-parallel-agents": {
+      "upstream_dir": "D:\\agent-skills\\installed\\dispatching-parallel-agents",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ac84cffb4fa169f31dd5a4edc001993d3638354a59beb5a94542a7522050d14a"
+        }
+      ]
+    },
+    "subagent-driven-development": {
+      "upstream_dir": "D:\\agent-skills\\installed\\subagent-driven-development",
+      "file_count": 15,
+      "files": [
+        {
+          "path": "implementer-prompt.md",
+          "sha256": "81dd9d5a3fb0b09b96b5829f03b9796842f3199ef7591d1ba1c2db2a515f64d0"
+        },
+        {
+          "path": "re-review-prompt.md",
+          "sha256": "ad54d0a10f1c2c8e656456e0a46e654af5dfe5ee6bcef63428cfd69b8dcd9311"
+        },
+        {
+          "path": "references/batching.md",
+          "sha256": "b54dc7e23dbfb90db89bcb2fb3af591aabf6a271a165fbc0da4c6f9439980eac"
+        },
+        {
+          "path": "references/cannot-verify.md",
+          "sha256": "e698713a15e0eabf1a2ab26ffe1bb04bf70c9d6d2e2060d44a0f9a1bdd4408bf"
+        },
+        {
+          "path": "references/final-review.md",
+          "sha256": "6c9e12093e46c4ad0a203bc07709c17e3470f855f1b78e55c5e7b722a012a32c"
+        },
+        {
+          "path": "references/fix-loop.md",
+          "sha256": "1938ce707915efc44021e563ebc29666329e20ad861b6c50b89f305b8f4e8d8b"
+        },
+        {
+          "path": "references/handling-reports.md",
+          "sha256": "8f759cdd4936220c38aab05b6d6c48c6df8ac8f146b0f37a6d2facbf87133c67"
+        },
+        {
+          "path": "references/preflight.md",
+          "sha256": "3ea21c5fc1af1a190ac8a9d19ceb0849b47bf2ffe27b87dffcc21b6a0539776c"
+        },
+        {
+          "path": "references/resuming.md",
+          "sha256": "ff6e38bde2276faa2a7e93513086caded0ea10edbf2ec7f349a7e3b0d7c668c4"
+        },
+        {
+          "path": "scripts/review-package",
+          "sha256": "1ec81e7d87d93ecbe33c282f267f9365f7bd985c360dede649715fe5a276c139"
+        },
+        {
+          "path": "scripts/sdd-repo",
+          "sha256": "8b63d61c6094502c0392d12415e3637f055ed24e3d6c1558c7ed7cbe42caebf7"
+        },
+        {
+          "path": "scripts/sdd-workspace",
+          "sha256": "ce59a387deb251e3d85f001ddf17f20f31de56dfc4b0b3ed8e9f9227d2221616"
+        },
+        {
+          "path": "scripts/task-brief",
+          "sha256": "fd342707660541e2a95efffc507c719361eb3d684862d2de96ca58c06466ebc7"
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "6f77d07daf14ce687b08b8c2cbc7ff82a3c1ee8b2fe41b306faebfc793213a10"
+        },
+        {
+          "path": "task-reviewer-prompt.md",
+          "sha256": "61a04c2fb29907887d8babee1594f5e35ae26d461e7e584f5b7c283215165e08"
+        }
+      ]
+    },
+    "resumable-implementation-contracts": {
+      "upstream_dir": "D:\\agent-skills\\installed\\resumable-implementation-contracts",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "6cc03e868a9db979af8eb67568ad54730297e76ebad3cc2c8b3b813d93502bb2"
+        }
+      ]
+    },
+    "doubt-driven-development": {
+      "upstream_dir": "D:\\agent-skills\\installed\\doubt-driven-development",
+      "file_count": 1,
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "d625e7e5bdddeab6641429bdfefe31e004ece849c79c8b312204f563cb9ed6e6"
+        }
+      ]
+    }
+  }
+}

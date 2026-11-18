@@ -1,0 +1,29 @@
+{
+  "_comment": "设计稿，不是可发布包。缺 icon、main.js、locales，未在目标 Cindy 版本上实测。按 cindy-plugin-creator 补齐后再打包。",
+  "schemaVersion": 3,
+  "id": "ai-workspace-kit",
+  "name": "AI 工作区套件",
+  "description": "安装一套带工单、证据、独立验收的 AI 工作区。",
+  "whenToUse": "用户想在本机装一套 AI 工作区/工单体系时使用；本插件只做安装引导，工作区本体在本地目录里。",
+  "version": "0.1.0",
+  "minCindyVersion": "0.1.68",
+  "author": "AI Workspace Kit contributors",
+  "entry": "main.js",
+  "command": "ai-workspace",
+  "keywords": ["AI 工作区", "工单", "workspace", "安装", "ticket"],
+  "tools": [
+    {
+      "name": "show_install_plan",
+      "description": "返回安装计划与前置条件，不执行任何写操作。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "description": "可选，用户希望安装到的目录；不传则用默认 ~/ai-workspace。"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+#!/bin/sh
+# 没有工单与已绑定的执行尝试，就不许提交。
+# 依据：AGENTS.md 硬规则四、PRD-001 §8「开工前的工单闸门」。
+#
+# 一条例外：收尾提交（tasks/closing-*.md + tasks/round.md 的状态行）。
+# 收尾包只能在「本项目没有任何在途工单」时提交，而普通改动的放行要求一张 running
+# 的工单——两者不可能同时成立，所以这一条由 tools/work_gate.py 自己认，判据与
+# 放开的三个路径见 docs/closing.md 的「谁来提交收尾包」。
+# 钩子不再自己先看 TASK_CENTER_TICKET：先看就等于例外永远触发不了。
+#
+# 关掉核对：git config --unset core.hooksPath（只关这个仓库，且要自己知道在关什么）。
+# 这个钩子只拦经过 git 的改动，也能被 --no-verify 绕过。它不是安全边界，
+# 作用是让「忘了开工单」当场失败，而不是三天后有人问「这是谁改的」。
+
+workspace=$(cd "$(dirname "$0")/.." && pwd)
+repo=$(git rev-parse --show-toplevel)
+
+python "$workspace/tools/work_gate.py" --ticket "$TASK_CENTER_TICKET" --repo "$repo" || {
+  echo "" >&2
+  if [ -z "$TASK_CENTER_TICKET" ]; then
+    cat >&2 <<'EOF'
+提交被拦：这次改动没有工单，又不符合收尾提交的三条前提。
+
+这样做（在工作区根目录）：
+  python tools/work_gate.py --list
+  # 没有活跃尝试就先走：create_ticket → claim_ticket → bind_session
+  TASK_CENTER_TICKET=<工单号> git commit -m "..."
+
+只提交一轮的收尾包时不需要工单：暂存区只含 tasks/closing-*.md / tasks/round.md
+的状态行 / tasks/rounds.md，且本项目没有在途工单，钩子会认成「收尾提交：R-00N」。
+
+仓库初始化这类确实无工单的提交，就显式关掉核对：git config --unset core.hooksPath
+EOF
+  else
+    echo "提交被拦：这张工单不能为本次改动背书（见上面的原因）。" >&2
+  fi
+  exit 1
+}

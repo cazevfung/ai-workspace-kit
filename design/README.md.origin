@@ -1,0 +1,41 @@
+# AI 工作区
+
+本工作区统一通过 Cindy 普通对话框协调、执行和验收，不使用 OmniFlow 或伙伴。
+
+## 进来先读
+
+1. [`AGENTS.md`](AGENTS.md)——项目归属、三条硬规则、已知未实现清单。
+2. [`PRD/`](PRD/)——需求依据按项目范围分三份：`PRD-001` 工单体系本体（验收标准带状态与证据），`PRD-002` 项目候选层的推导与演练，`PRD-003` 全局项目定位与派发入口。
+3. [`docs/protocol.md`](docs/protocol.md)——调用顺序与错误码。
+
+## 当前正在建设
+
+第一阶段是本机工单核心：工单集中存放在工作区，业务项目保留自己的 PRD 和成果；执行会话提交成果，独立验收会话提交结论。
+
+- [实施计划](tasks/plan.md)
+- [运行说明](AGENTS.md#常用命令)——在仓库根 `{{WORKSPACE}}` 直接跑，不用先 `cd`
+- [验证与进度记录](tasks/progress.md)
+- [结果提交协议](docs/protocol.md)
+
+代码已经合入 master（AW-011），仓库根就是代码目录：`task_center/` `tests/` `docs/` `examples/`。不用先 `cd`，在 `{{WORKSPACE}}` 直接跑：
+
+```bash
+python tools/run_tests.py
+python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 list_projects
+```
+
+`python tools/run_tests.py` 是唯一的验证入口：它依次跑 `tests/` 与 `tools/test_*.py` 两处用例，把每一处的用例数都打印出来，任一处失败就整体退出非零。不要只跑 `discover -s tests`——那会漏掉 `tools/` 下的闸门脚本用例。
+
+`.worktrees/ticket-core` 是同一仓库的 `feat/ticket-core` 工作树，仍保留，给下一个分支单独开发用。没有推送远端。正式中心库位于 `.data/task-center.sqlite3`（已登记 `ai-workspace` 与 `xingling-chuan`），运行状态以进度记录为准。
+
+## 本项目专用 skill
+
+放在 `.agents/skills/`，只对本仓库生效：
+
+| skill | 什么时候用 |
+| --- | --- |
+| `prd-authoring` | 写或改 PRD、补验收条件、处理需求变更 |
+| `pdsa-workflow` | 判断下一步、决定暂停/返工/重新规划 |
+| `ticket-dispatch` | 领取、派发、绑定会话、提交成果、发起验收、处理报错码 |
+
+真实 Cindy 会话接入、跨项目试点、看板和自动推进仍是后续阶段，不要把本机模拟测试视为已完成全栈自动化。已知缺口见 `AGENTS.md` 末节。

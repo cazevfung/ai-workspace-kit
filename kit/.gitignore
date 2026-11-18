@@ -1,0 +1,6 @@
+.worktrees/
+__pycache__/
+*.pyc
+.data/
+_sandbox/
+tasks/demo-output.jsonl

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.data/
+.worktrees/
+_sandbox/
+*.egg-info/
+.venv/
+build/
+dist/
+
+# 本机任务交接包：含本机路径与会话标识，不进公开仓库
+HANDOFF.md
