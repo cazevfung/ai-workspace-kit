@@ -5,7 +5,7 @@
 一个会话被唤醒之后以为自己该推进流程，其实它没有绑在任何活跃尝试上。
 这件事以前只能靠读库或靠人记，现在一条命令给结论。
 
-    python tools/session_roster.py --session 2a29c0f5-5f61-4c2c-8c9e-3a986122e923
+    python tools/session_roster.py --session executor-1
     python tools/session_roster.py --session <id> --db <中心库>
 
 只读：`mode=ro` 打开现有库，`PRAGMA query_only`，版本不匹配照样能查
