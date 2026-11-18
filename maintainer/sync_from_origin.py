@@ -11,8 +11,12 @@
     python maintainer/sync_from_origin.py [--origin D:/AI工作区]
 
 替换规则（只对文本文件生效）：
-    D:/AI工作区  D:\\AI工作区  D:\\AI工作区   →  {{WORKSPACE}}
-    C:/Users/<名>  C:\\Users\\<名>            →  %USERPROFILE%
+    D:/AI工作区  D:\\AI工作区（源码里的转义写法）  →  {{WORKSPACE}}
+    C:/Users/<名>  C:\\Users\\<名>                        →  %USERPROFILE%
+
+用户名不写死：`C:/Users/<名字>` 这种本机账号只属于原工作区，不该进公开仓库，
+所以按「`C:` + 分隔符 + `Users` + 分隔符 + 名字」的通用形状匹配，名字取到下一个
+路径分隔符、空白或引号为止。
 
 `{{WORKSPACE}}` 由 install.py 在安装时替换成真实的绝对路径。
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -28,15 +33,16 @@ HERE = Path(__file__).resolve().parent.parent
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
 
 
+# 用户目录：`C:\\Users\\x`（两个反斜杠）、`C:\Users\x`（一个）与 `C:/Users/x` 三种写法
+# 都要认。名字止于下一个分隔符、空白或引号——用户名允许中文、空格之外的点与横线。
+USER_HOME = re.compile(r"C:(?:\\\\|\\|/)Users(?:\\\\|\\|/)[^\\/\s`\"']+")
+
+
 def replace_paths(text: str) -> str:
-    # 先处理转义反斜杠，再处理单反斜杠，最后正斜杠；否则前缀会被吃掉一半。
     text = text.replace("D:\\\\AI工作区", "{{WORKSPACE}}")
     text = text.replace("D:\\AI工作区", "{{WORKSPACE}}")
     text = text.replace("D:/AI工作区", "{{WORKSPACE}}")
-    text = text.replace("C:\\\\Users\\\\202108-107", "%USERPROFILE%")
-    text = text.replace("C:\\Users\\202108-107", "%USERPROFILE%")
-    text = text.replace("C:/Users/202108-107", "%USERPROFILE%")
-    return text
+    return USER_HOME.sub("%USERPROFILE%", text)
 
 
 def copy_text(src: Path, dst: Path) -> bool:
