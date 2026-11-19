@@ -63,6 +63,18 @@ def main(argv=None) -> int:
         check("交接协议已复制", (agents / "intake" / "intake.md").is_file())
         check("安装清单已写", (agents / ".ai-workspace-kit.json").is_file())
 
+        leftovers = []
+        for tree in (agents / "skills", agents / "intake"):
+            for path in tree.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    if "{{WORKSPACE}}" in path.read_text(encoding="utf-8"):
+                        leftovers.append(path)
+                except (UnicodeDecodeError, OSError):
+                    continue
+        check("占位已换成真实路径", not leftovers, ", ".join(str(p) for p in leftovers[:3]))
+
         db = ws / ".data" / "task-center.sqlite3"
         result = run([sys.executable, "-m", "task_center", "--db", str(db), "list_projects"], ws, timeout=120)
         check("中心库可查询且已登记项目", result.returncode == 0 and "ai-workspace" in result.stdout,

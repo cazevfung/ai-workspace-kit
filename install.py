@@ -64,7 +64,8 @@ def fail(message: str) -> None:
 
 
 def template_text(text: str, workspace: str) -> str:
-    return text.replace("{{WORKSPACE}}", workspace)
+    """把占位换成真实路径。统一用正斜杠：`.json` 里反斜杠要转义，Markdown 里也不好读。"""
+    return text.replace("{{WORKSPACE}}", workspace.replace("\\", "/"))
 
 
 def copy_tree(src: Path, dst: Path, workspace: str, dry: bool) -> int:
@@ -116,7 +117,28 @@ def git_identity_ok(workspace: Path) -> bool:
         return False
 
 
-def install_skills(target_root: Path, names: list[str], subdir: str, dry: bool,
+def copy_skill_tree(src: Path, dst: Path, workspace: str) -> None:
+    """复制技能目录，同时把正文里的 `{{WORKSPACE}}` 换成真实安装路径。
+
+    技能里写占位而不是绝对路径，否则换台机器就指错地方；复制时直接 copytree
+    会把占位原样留在用户机器上，调用方就不知道真实的工作区在哪。
+    """
+    for path in sorted(src.rglob("*")):
+        target = dst / path.relative_to(src)
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix.lower() in TEXT_SUFFIXES:
+            try:
+                target.write_bytes(template_text(path.read_text(encoding="utf-8"), workspace).encode("utf-8"))
+                continue
+            except UnicodeDecodeError:
+                pass
+        shutil.copy2(path, target)
+
+
+def install_skills(target_root: Path, names: list[str], subdir: str, workspace: str, dry: bool,
                    overwrite: bool) -> tuple[list[str], list[str]]:
     installed, skipped = [], []
     if not dry:
@@ -130,7 +152,7 @@ def install_skills(target_root: Path, names: list[str], subdir: str, dry: bool,
         if not dry:
             if dst.exists():
                 shutil.rmtree(dst)
-            shutil.copytree(src, dst)
+            copy_skill_tree(src, dst, str(workspace))
         installed.append(name)
     return installed, skipped
 
@@ -235,7 +257,7 @@ def main(argv=None) -> int:
 
     step("2/7 安装项目内技能")
     proj_installed, _ = install_skills(workspace / ".agents" / "skills", WORKSPACE_SKILLS,
-                                       "workspace", dry, overwrite=True)
+                                       "workspace", str(workspace), dry, overwrite=True)
     say(f"   项目内技能 {len(proj_installed)} 个")
 
     step("3/7 安装用户级技能")
@@ -244,8 +266,10 @@ def main(argv=None) -> int:
         installed, skipped = [], []
     else:
         # 工作区技能与通用技能来源不同，分别处理
-        ws_ins, ws_skip = install_skills(skills_root, WORKSPACE_SKILLS, "workspace", dry, args.overwrite_skills)
-        gen_ins, gen_skip = install_skills(skills_root, GENERIC_SKILLS, "generic", dry, args.overwrite_skills)
+        ws_ins, ws_skip = install_skills(skills_root, WORKSPACE_SKILLS, "workspace", str(workspace),
+                                         dry, args.overwrite_skills)
+        gen_ins, gen_skip = install_skills(skills_root, GENERIC_SKILLS, "generic", str(workspace),
+                                           dry, args.overwrite_skills)
         installed, skipped = ws_ins + gen_ins, ws_skip + gen_skip
         say(f"   新装 {len(installed)} 个：{', '.join(installed) if installed else '（无）'}")
         if skipped:
@@ -264,7 +288,7 @@ def main(argv=None) -> int:
             backup = intake.with_name(f"intake.bak-{os.getpid()}")
             shutil.move(str(intake), str(backup))
             warn(f"已有 {intake}，已改名备份为 {backup.name}")
-        shutil.copytree(KIT / "docs", intake)
+        copy_tree(KIT / "docs", intake, str(workspace), dry)
         manifest = agents_home / ".ai-workspace-kit.json"
         manifest.write_text(json.dumps({
             "version": VERSION,
