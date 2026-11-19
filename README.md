@@ -1,5 +1,7 @@
 # AI 工作区套件（AI Workspace Kit）
 
+English version: [README.en.md](README.en.md)
+
 这套东西管一件事：AI 说自己做完了的时候，你能不能当场判断它是不是真的做完了。
 
 它由三部分组成。数据库记工单与验收，只用标准库和 SQLite，在 `task_center/`。几道检查脚本在 `tools/`，条件不满足就非零退出。规则与技能在 `AGENTS.md` 和 `skills/` 里，写给 agent 看。

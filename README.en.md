@@ -1,5 +1,7 @@
 # AI Workspace Kit
 
+中文版：[README.md](README.md)
+
 This kit serves one purpose: when an AI says it is done, you can tell on the spot whether it really is.
 
 It has three parts. A local database records tickets and reviews; it uses nothing but the standard library and SQLite, and lives in `task_center/`. A set of scripts in `tools/` check the work and exit non-zero when something is missing. The rules and skills in `AGENTS.md` and `skills/` are written for the agent to read.
