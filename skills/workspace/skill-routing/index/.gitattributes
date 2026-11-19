@@ -1,0 +1,6 @@
+# 快照是逐字节的原文副本，任何换行转换都会让「按快照还原」失效：
+# 有个被改的文件本身用 CRLF，归一化成 LF 之后，正文比对会把每一行都算成差异。
+# 所以本目录一律不做 EOL 转换。
+snapshot/** -text
+expected-terms.json -text
+README.md -text

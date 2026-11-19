@@ -21,19 +21,19 @@
 
 跑一遍仓库自带的两处测试，确认代码与本机 Python 版本匹配。
 
-- 验证：`python tools/run_tests.py` 退出 0，且 `tests/` 与 `tools/` 两处用例数都打印出来。
+- 验证：`python tools/run_tests.py` 期望输出末行「结果：全部通过」，退出码 0。
 
 ### 2. 建第一张工单并走完闭环
 
 按 `ticket-dispatch` 的顺序建单、领取、绑定一个执行会话、提交成果，再由另一个会话验收。
 
-- 证据：`create_ticket` 回执里的 `ticket_id`，以及 `get_ticket` 在提交后返回的 `state=awaiting_review`。
+- 证据（判断类）：`create_ticket` 回执里有 `ticket_id`，提交后 `get_ticket` 返回 `state=awaiting_review`。反例：提交后状态仍是 `running`，或验收会话与领单的是同一个会话。
 
 ### 3. 收尾并留下记录
 
 按 `docs/closing.md` 写七节收尾包，把 `tasks/round.md` 的状态位改成结论之一。
 
-- 验证：`python tools/close_gate.py` 退出 0；工作区干净、库里无在途单时 `python tools/close_gate.py --check` 也退出 0。
+- 验证：`python tools/close_gate.py` 期望输出无 FAIL、退出码 0；工作区干净、库里无在途单时 `python tools/close_gate.py --check` 同样退出码 0。
 
 ## 不做什么
 

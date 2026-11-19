@@ -34,7 +34,30 @@ PRD_REF = re.compile(r"PRD-\d{3}")
 VERSION = re.compile(r"(?:版本|version)[:：]?\s*v?\d+\.\d+|v\d+\.\d+", re.I)
 PLACEHOLDER = re.compile(r"\bTODO\b|\bTBD\b|\[待定\]|\{\{[^}]*\}\}")
 CLARIFY = re.compile(r"\[待澄清[:：][^\]]+\]")
-
+INLINE_CODE = re.compile(r"`([^`\n]+)`")
+# 判据 A 里可当命令的词；写成整词匹配，`python3` 不能只靠 `python` 前缀蹭过。
+EVIDENCE_COMMANDS = (
+    "python3",
+    "python",
+    "git",
+    "grep",
+    "find",
+    "wc",
+    "ls",
+    "select",
+    "curl",
+    "node",
+    "npm",
+    "pytest",
+    "bash",
+)
+COMMAND_WORD = re.compile(r"^\s*(?:sudo\s+)?(" + "|".join(EVIDENCE_COMMANDS) + r")(?=\s|$)")
+# 跑完看到什么才算过；没有其中任何一个，命令可跑但结果不可判。
+EVIDENCE_MARKERS = ("期望", "输出", "退出码", "→")
+# 判据 B：判断类的验收条件必须写出反例，写不出说明这条本身不可判定。
+JUDGEMENT_CLASS = "判断类"
+COUNTEREXAMPLES = ("反例", "会红", "什么情况")
+BASELINE_NAME = "evidence_baseline.txt"
 # 已知存在但不是本仓库自建、也不在用户技能目录里的名字，登记在这里而不是放过未知。
 EXTERNAL_SKILLS = frozenset()
 
@@ -189,7 +212,43 @@ def scan(root):
     return plans + rounds, problems
 
 
-def check(path):
+def load_baseline(path=None):
+    """读历史计划豁免清单，返回 {文件名: 该行原文}。
+
+    格式：每行 `tasks/<计划文件名>`，`#` 之后是理由；`#` 开头的整行是注释。
+    基线只豁免新增的「证据可判定」判据：六节与 skill 的检查照跑。
+    这是「不回头改写历史」的出口——判据生效前的计划是当时规矩的产物。
+    """
+    target = Path(path) if path is not None else Path(__file__).resolve().parent / BASELINE_NAME
+    names = {}
+    if not target.is_file():
+        return names
+    for line in target.read_text(encoding="utf-8").splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        names[Path(entry).name] = entry
+    return names
+
+
+def evidence_verdict(block):
+    """任务块的完成证据能不能被机器判一次。
+
+    A：有一处反引号命令，命令词在名单内，且块内写了期望输出（含退出码）。
+    B：写了 `判断类`，并且写出了反例。
+    两者都不满足就是「写了一句散文」，不算证据。
+    """
+    for code in INLINE_CODE.findall(block):
+        if not COMMAND_WORD.match(code):
+            continue
+        if any(marker in block for marker in EVIDENCE_MARKERS) or "exit" in block.lower():
+            return True
+    if JUDGEMENT_CLASS in block and any(word in block for word in COUNTEREXAMPLES):
+        return True
+    return False
+
+
+def check(path, baseline=None):
     problems = []
     text = path.read_text(encoding="utf-8")
     if not text.strip():
@@ -246,12 +305,28 @@ def check(path):
 
     body_tasks = found.get("任务", "")
     if body_tasks:
+        name = Path(path).name
+        if baseline is None:
+            baseline = load_baseline()
+        skipped = name in baseline
+        if skipped:
+            print(f"基线跳过 {name}")
         blocks = task_blocks(body_tasks)
         if not blocks:
             problems.append(f"{path}: `## 任务` 下没有任何 `###` 任务块")
         for block in blocks:
             title = block.splitlines()[0][4:].strip()
-            if "验证" not in block and "证据" not in block:
+            judgeable = evidence_verdict(block)
+            has_evidence_word = "验证" in block or "证据" in block
+            if judgeable:
+                continue
+            if JUDGEMENT_CLASS in block or has_evidence_word:
+                if not skipped:
+                    problems.append(
+                        f"{path}: 任务「{title}」的完成证据不可判定："
+                        "要么写可跑命令 + 期望输出，要么标 判断类 并写出反例"
+                    )
+            else:
                 problems.append(f"{path}: 任务「{title}」没有写完成证据（缺「验证」或「证据」）")
 
     for match in PLACEHOLDER.finditer(text):
@@ -270,6 +345,7 @@ def main(argv=None):
     if not argv:
         print(__doc__.strip())
         return 2
+    baseline = load_baseline()
     if argv[0] == "--all":
         root = Path(__file__).resolve().parent.parent
         targets, all_problems = scan(root)
@@ -288,7 +364,7 @@ def main(argv=None):
         if is_round_file(target):
             all_problems.extend(check_round(target))
         else:
-            all_problems.extend(check(target))
+            all_problems.extend(check(target, baseline))
 
     if all_problems:
         print(f"闸门未通过，{len(all_problems)} 个问题：")

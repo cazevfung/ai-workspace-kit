@@ -11,7 +11,7 @@
 1. 读 `README.md` 了解当前阶段，再读与本任务相关的 PRD（`PRD/PRD-00N-*.md`）。
 2. 动手改工单状态之前，读 `docs/protocol.md`——调用顺序与错误码在那里，不在本文件。
 3. 不确定某件事属于哪个项目时，跑 `python -m task_center.probe --roots <目录> --db <库> --explain`。它只给候选，不给你答案。
-4. 任何会话开始、以及做到需要判断的节点时，先读 `.agents/skills/skill-routing/SKILL.md`：它把 29 个判断节点各归到一个 skill 或一条确定性动作。
+4. 任何会话开始、以及做到需要判断的节点时，先读 `.agents/skills/skill-routing/SKILL.md`：它把 29 个判断节点各归到一个 skill 或一条确定性动作；归口缺失或引用了不存在的 skill，会在 `.agents/skills/skill-routing/scripts/check_routing.py` 那里当场失败。
 
 ## 做规划之前
 
@@ -59,14 +59,15 @@ skill 只有名字和描述会进提示，模型可能该用而没用；脚本�
 
 - **我自己是谁，自取。** 执行会话用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id`，取到什么写什么。
 - **协调会话是谁，只能由它在派发消息里给。** 拿到后先用 `list_sessions` 反查 title 与 workingDir，对不上就不用。
-- **做完要回两条，不是一条。** 先发回执正文（工单号 + 状态 + 提交 sha 或 review_id），再补一条只写本次 `wake_kind` 原值的短消息——那个值只出现在 `send_to_session` 的发送回执里，一条消息写不出自己这一条的结果。
+- **做完要回一条，不是两条。** 一条消息写工单号 + 状态 + 提交 sha 或 review_id，正文里不写 `wake_kind`，也不为它另发一条消息。协调会话收到后 `record_notice` 落库（`wake_kind` 填 `unknown`，并在 `detail` 里注明这是占位），再跑一次 `list_sessions` 核对：没有多出新任务即算送达。
 
 几条可判定动作：
 
 1. **派发消息里不写死 session id。** 消息先于会话存在，写进去的任何 id 都是猜的。执行会话自己取，取到后照样 `list_sessions` 反查一次。
 2. **纠错或补充之后必须核一遍队列。** `send_to_session` 只是入队：目标在跑就把你的话排在这一轮之后。发完用 `list_session_queue(session_id)` 看自己那条还在不在 `queue` 里；**目标已经过了一轮而它还在 = 「该插没插」**，立刻 `steer_session_queued_message({session_id, queued_message_id})`，回执要 `delivery=steered`。要改当前这一轮，也可以 `steer_session({session_id, message})` 直接注入。
-3. **回执只看一个字段：`wake_kind`。** 出现 `created` 就是宿主把它当成新建任务了（没发到原目标），立刻停掉误建的那条任务，再带 `target_session_id` 重发。其余任何非空取值（`queued`、`resumed`、`already-active`）都算打中已有会话。同一会话连发两条时，第二条也要单独复查。拿不到原值时填 `unknown`，并在 `record_notice` 的 `detail` 里写明这是占位。
-4. **工作区流程内的决策不用同步提问卡片。** 卡片占住本轮，别的会话连排队都进不去。要人拍板就走 `ask_ticket` 落库 + 结束本轮，靠新消息唤起。
+3. **送达看会话列表，不看投递回执。** 协调会话收到回执后跑 `cindy_helper` 的 `list_sessions`（按 `workdir`），看是否多出一条标题就是回执正文的新任务——没有多出即算送达。`queued` / `resumed` / `already-active` 都只表示消息进了原会话、没有副作用；唯一有后果的是宿主把回执当成新建任务，而这件事在会话列表里看得见。查见多出的那条就停掉它（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发。派发时别忘带 `target_session_id`：不传时 `send_to_session` 的语义是「新建任务并立刻跑一轮」，不是「投递到某个会话」。
+4. **终态只落库不唤醒。** `done` / `rework` 只落库：提交、验收、`record_notice` 都记进库，不为通知再发一条消息。唤醒只留给三种情况——`created` 误建了任务、工单 `blocked` 在等人一句话、`ask_ticket` 已经落了问题。
+5. **工作区流程内的决策不用同步提问卡片。** 卡片占住本轮，别的会话连排队都进不去。要人拍板就走 `ask_ticket` 落库 + 结束本轮，靠新消息唤起。
 
 ## 收尾（一轮怎么算说完）
 

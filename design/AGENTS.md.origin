@@ -59,7 +59,7 @@
 
 - **我自己是谁，自取。** 执行会话用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id`，取到什么写什么，不拼、不缩写、不从路径猜。
 - **协调会话是谁，只能由它在派发消息里给。** 它无法自取；拿到后先用 `list_sessions` 反查 title 与 workingDir，对不上就不用。
-- **做完要回两条，不是一条。** 完成或提交后主动发回执给协调会话：第一条写工单号 + 状态 + 提交 sha 或 review_id，第二条只写本次 `wake_kind` 原值（只写一个词，例如 `queued`）；不要等对方来问。为什么必须分两条、拿不到原值时怎么办，见下面的 b 条。
+- **做完要回一条，不是两条。** 完成或提交后主动发回执给协调会话：一条消息写工单号 + 状态 + 提交 sha 或 review_id，不写 `wake_kind`，也不为它另发一条；不要等对方来问。协调会话收到后 `record_notice` 落库（`wake_kind` 填 `unknown` 并注明是占位），再跑一次 `list_sessions` 核对会话列表，没有多出新任务即算送达。为什么一条就够、终态为什么不唤醒，见下面的 b 条。
 
 1. **派发消息里不许写死 session id。** 消息先于会话存在——协调会话写派发消息时，执行会话还没被创建，写进去的任何 id 都是猜的（AW-007 拼临时目录名就是一个）。执行会话自己用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id` 取（参数 `{"name":"get_current_session_id","args":{}}`），取到之后原样写进 `bind_session`。**它按名字在 `list_tools` 里搜不到（返回空或 `UNKNOWN_TOOL`），但 `call_tool` 能调**——搜不到不等于不存在。取到之后照样要 `list_sessions` 反查一次，见第五条。
 2. **纠错或补充之后必须核一遍队列。** `send_to_session` 只是入队：目标在跑就把你的话排在这一轮之后，这一轮已经按旧指令做完了。所以发完要用 `list_session_queue(session_id)` 看自己那条还在不在 `queue` 里；**目标已经过了一轮而它还在 = 「该插没插」**，立刻 `steer_session_queued_message({session_id, queued_message_id})`，回执要 `delivery=steered`。仍是 `delivery=queued` 说明这一轮已收尾、插不进去了，不要再反复 steer。要改当前这一轮，也可以用 `steer_session({session_id, message})` 直接注入。
@@ -67,11 +67,17 @@
 
 三档的选择判据（按「影响哪一轮产出」问）在 `PRD/PRD-005-决策通道.md` §8。
 
-### 三条可判定动作（2026-11-17 补，前六条未改；b 已改成「回执两步 + 每条都看回执」的动作写法）
+### 三条可判定动作（2026-11-17 补，前六条未改；b 于 2026-11-19 由 AW-073 改成「一条回执 + 一次落库 + 一次会话列表核对」）
 
 **a）在 `.worktrees/<工单号>/` 里干活时，`artifacts` 的路径必须带 `.worktrees/<工单号>/` 前缀。** `submit_result` 按**已登记项目根**解析路径：`task_center/core.py:247` 的 `fingerprint(project["root"], path)` 交给 `task_center/artifacts.py:23-24` 的 `base = Path(root).resolve()` / `target = (base / raw).resolve()`。不带前缀，解析到的是主检出里的同名文件。**为什么**：AW-031 第一轮提交的四条 artifacts 全不带前缀，库里的 sha256 与大小是主检出那几份的，按它去分支文件核一个也对不上；返工后四条都带 `.worktrees/AW-031/` 前缀，sha 才逐一对应分支上的文件。
 
-**b）回执分两步发；每次 `send_to_session` 发完，都要看回执里的 `wake_kind`。** 第一步发回执正文——工单号 + 状态 + 提交 sha 或 review_id；第二步补一条**只写本次 `wake_kind` 原值**的短消息（只写一个词，例如 `queued`）。为什么必须拆成两条：那个值只出现在发送回执里，一条消息写不出自己这一条的结果；压成一条时写进去的只能是按上一条表现推出来的值，而推定与宿主原话在库里长得一模一样，事后分不出来。判定只认两类——`created` 与非 `created`，不预设白名单：出现 `created` 就是没发到原目标（宿主把它当成新建任务了），立刻把新建的那条停掉（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发；其余任何非空取值都算打中已有会话（已见过 `queued`、`resumed`，以及目标当时正在跑时的 `already-active`——2026-11-18 协调会话向 `fe54a0c9` 投一条修订消息时宿主回的就是它，消息确实进了那条已有会话，没有新建任务）。**同一会话连发两条时，第二条的回执也要单独复查，不能因为第一条打中了就跳过。** 2026-11-18 实测：同一个会话、同样的入参与 `target_session_id`，连续三条消息的 `wake_kind` 依次是 `already-active`、`created`、`queued`——三值同框，所以「上一条到了」推不出「这一条也到了」；第二条回 `created` 时与第一条同办，先停掉误建的那条任务再带 `target_session_id` 重发。不传 `target_session_id` 时 `send_to_session` 的语义是「新建任务并立刻跑一轮」，不是「投递到某个会话」（工具 schema 对 `target_session_id` 的原话是「要发给已有任务时必传……省略 → create」，见 `docs/protocol.md` 的「派发的载体」一节）。口径以 `docs/protocol.md` 的「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节为准——只有 `created` 特判为失败，其余取值原样收。这个字段藏在回执 note 里，扫一眼回执很容易当成投递成功。**拿不到原值时不许挑一个像真的填。** 第二条没发或对方没收到，协调会话手里就没有原值；这时 `wake_kind` 填 `unknown`（只校验形状、不按白名单收，所以它合规矩也能入库），并在 `record_notice` 的 `detail` 里写明「本次 `wake_kind` 未取到，`unknown` 是占位」——这一列留不下「这是推定」的标记，不写进 `detail` 就再也分不出库里的值与宿主原话。**为什么要把这条写成「发完必须看那个字段」而不是只写一条禁止项**：2026-11-17 一天里误建了四条任务——`b5319467`（标题就是一句纠正消息）、`cdaf46df` 与 `5d1063ed`（标题「AW-031 已重新提交 / 状态 awaiting_review / 新 sha …」）、`ad2406ce`（标题「AW-034 已提交 / 状态 awaiting_review / submission_id b47b1af1-fc6」）。前三条促成了这条规则写进 `AGENTS.md`，第四条（10:42，AW-033 合并后的三分钟）就发生在它已经被写进来之后——可见禁止项没人读，只有「发完去核一个具体字段」才有判定点。四条回执都是 `wake_kind=created`，事后问「AW-031 到底谁在跑」时 `list_sessions` 里出现三条同名任务。
+**b）回执只发一条；送达由协调会话查一次 `list_sessions` 判定，不看投递回执里的 `wake_kind`。** 执行会话交回成果时只发一条正文——工单号 + 状态 + 提交 sha 或 review_id，正文里不写 `wake_kind`，也不为它另发一条消息。理由与做法一起换了：那个值只出现在发送回执里，一条消息写不出自己这一条的发送结果，所以这条消息本就不承担报送原值的职责；以前那条只写原值的第二条，每发一次就要多唤醒一次、多读一遍上下文，收益不抵成本。协调会话收到回执后照旧 `record_notice` 落库，`wake_kind` 填 `unknown`（只校验形状、不按白名单收，所以它合规矩也能入库），并在 `record_notice` 的 `detail` 里写明「本次 `wake_kind` 未取到，`unknown` 是占位」——这一列留不下「这是推定」的标记，不写进 `detail` 就再也分不出库里的值与宿主原话。
+
+**送达怎么判：查会话列表，不查投递回执。** 协调会话收到回执后跑 `cindy_helper` 的 `list_sessions`（按 `workdir`），确认没有多出标题就是这份回执正文的新任务——**没有多出新任务即算送达**。只看有操作后果的那一类：`queued` / `resumed` / `already-active` 都只表示消息进了原会话、没有副作用；唯一有后果的是宿主把回执当成新建任务，而这件事在会话列表里看得见。2026-11-18 实测同一会话、同样入参与 `target_session_id` 连投三条消息，`wake_kind` 依次是 `already-active`、`created`、`queued`——三值同框，所以「上一条投中了」推不出「这一条也投中了」，能推的只有当场查一遍列表。查见多出的那条就停掉它（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发。派发时别忘了带 `target_session_id`：不传时 `send_to_session` 的语义是「新建任务并立刻跑一轮」，不是「投递到某个会话」（工具 schema 对它的原话是「要发给已有任务时必传……省略 → create」，见 `docs/protocol.md` 的「派发的载体」一节）。口径以 `docs/protocol.md` 的「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节为准。
+
+**终态只落库不唤醒。** `done` / `rework` 只落库不唤醒：提交、验收、`record_notice` 都记进库，不为通知再发消息，否则每张单都要多一次唤醒、多一遍上下文重读；唤醒只留给三种情况——`created` 误建了任务、工单 `blocked` 在等人一句话、`ask_ticket` 已经落了问题。判据按「这件事要不要让别的会话现在改变动作」问，不按「有没有新状态」问。
+
+**为什么不再「发完必须看那个字段」。** 2026-11-17 一天里误建了四条任务——`b5319467`（标题就是一句纠正消息）、`cdaf46df` 与 `5d1063ed`（标题「AW-031 已重新提交 / 状态 awaiting_review / 新 sha …」）、`ad2406ce`（标题「AW-034 已提交 / 状态 awaiting_review / submission_id b47b1af1-fc6」）。当时用「发完去核 `wake_kind`」当判定点，是因为只有那个字段能当场发现误建；误建在 `list_sessions` 里同样一眼看得见，所以判定点从「发的人读回执」移到「收的人查列表」，仍是同一个可观测事实，对外唤醒的次数却从两次降到一次。四条回执当时都是 `wake_kind=created`，事后问「AW-031 到底谁在跑」时 `list_sessions` 里出现三条同名任务。
 
 **c）派发与返工消息里的任何标识（session id、attempt id、commit sha、行号）都必须当轮查出，不许凭印象写。** session id 用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id` 取（见第五条，按名字在 `list_tools` 里搜不到但直接可调），commit sha 用 `git rev-parse`，行号用 `grep -n`，取到什么写什么。**为什么**：写错的标识不带任何标记，会以真值的样子进消息、进库，后面的人按它查不到任何东西——AW-027 的派发消息里写了凭空拼的 `c1c2be32…` 当 session id，`list_sessions` 里没有这条，整单 recover（`b5319467` 的标题就是事后补发的纠正）；另一次返工消息里的 `483b…` 是编的 commit 前缀，执行会话没有照抄才没数错。
 

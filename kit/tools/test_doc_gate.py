@@ -32,7 +32,7 @@ GOOD = """# 计划：示例
 
 ### 任务 1：写检查器
 
-验证：`python tools/doc_gate.py 本文件` 通过
+验证：`python tools/doc_gate.py 本文件`，期望退出码 0
 
 ## 不做什么
 
@@ -98,7 +98,10 @@ class GateTest(unittest.TestCase):
         self.assertMentions(self.write(GOOD.replace("- 不覆盖：不做 CI 集成", "- 做完就行")), "「不覆盖」")
 
     def test_task_without_evidence_fails(self):
-        self.assertMentions(self.write(GOOD.replace("验证：`python tools/doc_gate.py 本文件` 通过", "小心写")), "没有写完成证据")
+        self.assertMentions(
+            self.write(GOOD.replace("验证：`python tools/doc_gate.py 本文件`，期望退出码 0", "小心写")),
+            "没有写完成证据",
+        )
 
     def test_bare_placeholder_fails(self):
         self.assertMentions(self.write(GOOD + "\nTODO: 补一句\n"), "裸占位符")
@@ -146,6 +149,53 @@ class GateTest(unittest.TestCase):
     def test_prd_existence_is_not_checked_without_a_prd_directory(self):
         """没有 PRD 目录的项目（比如只引用外部需求）不报这个错，避免误伤。"""
         self.assertEqual([], self.write(GOOD.replace("PRD-001", "PRD-999")))
+
+    def evidence_plan(self, block):
+        """把任务块换成给定正文的合规计划，用来单独试「完成证据能不能判」。"""
+        text = GOOD.replace("验证：`python tools/doc_gate.py 本文件`，期望退出码 0", block)
+        self.path.write_text(text, encoding="utf-8")
+        return self.path
+
+    def test_prose_evidence_is_rejected_evidence(self):
+        """散文证据（「完成后我会检查」）不可判定，必须非零；只有命令、没写期望输出也一样。"""
+        problems = doc_gate.check(self.evidence_plan("验证：完成后我会检查文档准确"))
+        self.assertMentions(problems, "完成证据不可判定")
+        self.assertMentions(problems, "任务「任务 1：写检查器」")
+        bare_command = doc_gate.check(self.evidence_plan("验证：`python tools/run_tests.py`"))
+        self.assertMentions(bare_command, "完成证据不可判定")
+
+    def test_command_with_expected_output_passes_evidence(self):
+        """判据 A：反引号命令 + 期望输出，算可判定。"""
+        self.assertEqual(
+            [], doc_gate.check(self.evidence_plan("验证：`grep -c \"^tasks/\" tools/evidence_baseline.txt` → 期望 14"))
+        )
+
+    def test_judgement_class_with_counterexample_passes_evidence(self):
+        """判据 B：判断类 + 反例，算可判定。"""
+        self.assertEqual(
+            [],
+            doc_gate.check(self.evidence_plan("判断类：口径是否一致；反例：两处写了不同口径")),
+        )
+
+    def test_judgement_class_without_counterexample_fails_evidence(self):
+        """标了 判断类 却写不出反例，说明这条验收条件本身就不可判。"""
+        problems = doc_gate.check(self.evidence_plan("判断类：口径是否一致"))
+        self.assertMentions(problems, "完成证据不可判定")
+
+    def test_baseline_skips_only_the_evidence_check_evidence(self):
+        """基线只豁免新判据：六节与 skill 的既有检查照跑，且打印跳过行。"""
+        text = GOOD.replace(
+            "验证：`python tools/doc_gate.py 本文件`，期望退出码 0",
+            "验证：完成后我会检查文档准确",
+        ).replace("- 不覆盖：不做 CI 集成", "- 做完就行")
+        baseline_plan = Path(self.tmp.name) / "plan-baseline.md"
+        baseline_plan.write_text(text, encoding="utf-8")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            problems = doc_gate.check(baseline_plan, baseline={"plan-baseline.md": "tasks/plan-baseline.md"})
+        self.assertMentions(problems, "「不覆盖」")
+        self.assertFalse([p for p in problems if "完成证据不可判定" in p], problems)
+        self.assertIn("基线跳过 plan-baseline.md", buffer.getvalue())
 
     def test_real_plan_file_passes(self):
         plan = Path(__file__).resolve().parent.parent / "tasks" / "plan-002-planning-gate.md"

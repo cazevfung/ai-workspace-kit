@@ -1,0 +1,209 @@
+{
+  "version": 2,
+  "prd": "PRD/PRD-006-通用技能索引词.md",
+  "scope_from": ".agents/skills/skill-routing/installed-skills.md（本机通用 / 接入）",
+  "max_chars": 240,
+  "skills": [
+    {
+      "name": "project-routing",
+      "node": "N01",
+      "path": "~/.agents/skills/project-routing/SKILL.md",
+      "required_terms": [
+        "这是哪个项目",
+        "该不该问",
+        "先弄清归属"
+      ],
+      "approved": "在任意会话里判断这次任务属于哪个项目、该不该问人，并据此开单推进。用户说「这是哪个项目的事」「该不该问」「先弄清归属再动手」，或在没有项目名的对话里让你改某个项目的文件时使用。只定归属，不定一次改动怎么做。"
+    },
+    {
+      "name": "handoff-to-workspace",
+      "node": "N01",
+      "path": "~/.agents/skills/handoff-to-workspace/SKILL.md",
+      "required_terms": [
+        "找 AI 工作区",
+        "交给工作区"
+      ],
+      "approved": "把一件长线任务交给 {{WORKSPACE}} 的工单体系接手，而不是自己一路做到黑。用户在别的项目里说「找 AI 工作区」「交给工作区」「让工作区帮我规划和管理这件事」时直接交接；说「拆成任务」「开个工单」「这活得排个顺序」而这件事要跨多步、要交付可验收的东西、一轮做不完时也用它。只定「要不要交给工作区」；「这件事属于哪个项目」用 project-routing。"
+    },
+    {
+      "name": "planning-and-task-breakdown",
+      "node": "N08",
+      "path": "~/.agents/skills/planning-and-task-breakdown/SKILL.md",
+      "required_terms": [
+        "拆任务",
+        "排顺序"
+      ],
+      "approved": "把需求拆成有先后顺序的任务，定谁先谁后、彼此有什么依赖。用户说「拆任务」「排顺序」「从哪开始」「这几件事能不能一起做」时使用；只切任务顺序，不写每步的完成标准（那一步用 writing-plans）。"
+    },
+    {
+      "name": "writing-plans",
+      "node": "N08",
+      "path": "~/.agents/skills/writing-plans/SKILL.md",
+      "required_terms": [
+        "写计划",
+        "怎么算完"
+      ],
+      "approved": "把方案写成一份能照着执行的计划，每步写清做到什么算完、拿什么当证据。用户说「写计划」「计划落盘」「每步怎么算完」时使用；只管计划长什么样，不管任务怎么切。"
+    },
+    {
+      "name": "brainstorming",
+      "node": "N09",
+      "path": "~/.agents/skills/brainstorming/SKILL.md",
+      "required_terms": [
+        "想不清",
+        "要不要做"
+      ],
+      "approved": "目标本身不清楚、或者好几个方案难选时，先问清再落笔。用户说「想不清要不要做」「好几个方案选哪个」「先别写，帮我想想」时使用；已有明确需求、只需排顺序时不用它。"
+    },
+    {
+      "name": "test-driven-development",
+      "node": "N14",
+      "path": "~/.agents/skills/test-driven-development/SKILL.md",
+      "required_terms": [
+        "先写测试",
+        "先红后绿"
+      ],
+      "approved": "写实现之前先写一条会失败的测试，跑红了再让它变绿。用户问「先写测试还是先写实现」「先红后绿」「补个用例再改这段」时使用。"
+    },
+    {
+      "name": "executing-plans",
+      "node": "N14",
+      "path": "~/.agents/skills/executing-plans/SKILL.md",
+      "required_terms": [
+        "按计划做",
+        "做到一半"
+      ],
+      "approved": "计划已经定了，就在当前会话里照它一个任务一个任务地做。用户说「按计划做」「逐任务执行」「做到一半接不上」时使用；计划本身要重写，回去用 writing-plans。"
+    },
+    {
+      "name": "systematic-debugging",
+      "node": "N15",
+      "path": "~/.agents/skills/systematic-debugging/SKILL.md",
+      "required_terms": [
+        "测试红了",
+        "找不到原因"
+      ],
+      "approved": "测试红了、命令报错、行为不对时，先复现再改，不猜着改。用户说「测试红了」「找不到原因」「这段跑起来就不对」时使用；连复现都做不到，就先补一条能复现的用例。"
+    },
+    {
+      "name": "verification-before-completion",
+      "node": "N16",
+      "path": "~/.agents/skills/verification-before-completion/SKILL.md",
+      "required_terms": [
+        "做完了",
+        "要证据"
+      ],
+      "approved": "在说「做完了」「修好了」之前，把验证命令真跑一遍并贴上输出。用户问「这能算做完了吗」「提交前还差什么」「别只说已验证，要证据」时使用；拿不出输出的不算完成。"
+    },
+    {
+      "name": "code-review-and-quality",
+      "node": "N19",
+      "path": "~/.agents/skills/code-review-and-quality/SKILL.md",
+      "required_terms": [
+        "审一遍",
+        "多轴审查"
+      ],
+      "approved": "按维度分块审一份产出：正确性、证据、边界、可维护性，每块至少指出一处具体位置。用户说「审一遍」「多轴审查」「合之前该看什么」时使用；发起审查用 requesting-code-review，高风险取舍用 doubt-driven-development。"
+    },
+    {
+      "name": "requesting-code-review",
+      "node": "N19",
+      "path": "~/.agents/skills/requesting-code-review/SKILL.md",
+      "required_terms": [
+        "找人审",
+        "发起审查"
+      ],
+      "approved": "要请别人审查之前，先把材料备齐：改了什么、怎么验证、自己卡在哪。用户说「找人审」「发起审查」「谁来看这段」时使用；它负责发起，不下审查结论。"
+    },
+    {
+      "name": "receiving-code-review",
+      "node": "N20",
+      "path": "~/.agents/skills/receiving-code-review/SKILL.md",
+      "required_terms": [
+        "收到审查意见",
+        "要不要照改"
+      ],
+      "approved": "收到审查意见之后，先逐条独立验证再答复。用户说「收到审查意见了」「这条要不要照改」「他说得对不对」时使用；必须写明照改、或是不改加理由，不许嘴上同意代码不动。"
+    },
+    {
+      "name": "merge-latest-branches",
+      "node": "N22",
+      "path": "~/.agents/skills/merge-latest-branches/SKILL.md",
+      "required_terms": [
+        "验收完了要不要合",
+        "合进 master"
+      ],
+      "approved": "验收通过之后把工单分支合进 master。用户问「验收完了要不要合」「合进 master」「冲突了怎么办」时使用；合并前工作区要干净、用例要全绿，有冲突先停下问人，不许自动解完直接合。"
+    },
+    {
+      "name": "writing-skills",
+      "node": "N25",
+      "path": "~/.agents/skills/writing-skills/SKILL.md",
+      "required_terms": [
+        "新建 skill",
+        "改 skill"
+      ],
+      "approved": "新建或修改 skill：写 frontmatter、定真的会被说出口的触发词、验证它确实能被命中。用户说「新建 skill」「改 skill」「description 写不好」时使用；发布到 Cindy SkillHub 另走 cindy-skill-creator。"
+    },
+    {
+      "name": "shuo-ren-hua",
+      "node": "N26",
+      "path": "~/.agents/skills/shuo-ren-hua/SKILL.md",
+      "required_terms": [
+        "不像人话",
+        "AI 味"
+      ],
+      "approved": "把中文改成人读得下去的样子：句子写完整、不省主语、不把话压成标签堆叠。用户说「不像人话」「AI 味太重」「写得像标签」时使用；也用于写稿、公告、口播稿的语言打磨。"
+    },
+    {
+      "name": "dispatching-parallel-agents",
+      "node": "N27",
+      "path": "~/.agents/skills/dispatching-parallel-agents/SKILL.md",
+      "required_terms": [
+        "能不能并行",
+        "会不会撞文件"
+      ],
+      "approved": "几件事互不依赖时，判断能不能并行分派、怎么分。用户问「能不能并行」「同时做几件」「会不会撞文件」时使用；先确认没有共享文件，有共享状态就串行。"
+    },
+    {
+      "name": "subagent-driven-development",
+      "node": "N27",
+      "path": "~/.agents/skills/subagent-driven-development/SKILL.md",
+      "required_terms": [
+        "派子代理",
+        "一个任务一个 agent"
+      ],
+      "approved": "用子代理去执行计划里的独立任务，管好上下文隔离和做完怎么收。用户说「派子代理」「一个任务一个 agent」「子代理做完怎么接回来」时使用；该不该并行看 dispatching-parallel-agents。"
+    },
+    {
+      "name": "resumable-implementation-contracts",
+      "node": "N27",
+      "path": "~/.agents/skills/resumable-implementation-contracts/SKILL.md",
+      "required_terms": [
+        "断点续跑",
+        "换会话接手"
+      ],
+      "approved": "长任务做到一半要断的时候，把稳定任务号、证据和续跑点写进仓库，好让另一个会话接着做。用户说「断点续跑」「换会话接手」「上下文丢了怎么办」时使用。"
+    },
+    {
+      "name": "using-git-worktrees",
+      "node": "N28",
+      "path": "~/.agents/skills/using-git-worktrees/SKILL.md",
+      "required_terms": [
+        "工作树",
+        "共享检出被占"
+      ],
+      "approved": "开工前先给自己弄一个隔离的工作树，免得和别人并写同一批文件。用户说「开个工作树」「共享检出被占了吗」「要不要隔离」时使用；建不出来就停下问人。"
+    },
+    {
+      "name": "doubt-driven-development",
+      "node": "N19",
+      "path": "~/.agents/skills/doubt-driven-development/SKILL.md",
+      "required_terms": [
+        "高风险",
+        "对抗性复核"
+      ],
+      "approved": "改动高风险或不可逆时，先让一个不带上下文包袱的视角把判断对抗性复核一遍。用户说「这是高风险改动」「对抗性复核一下」「两个方案都说得通」时使用；常规改动不用。"
+    }
+  ]
+}

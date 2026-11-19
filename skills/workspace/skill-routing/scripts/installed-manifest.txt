@@ -1,0 +1,7 @@
+# Cindy 托管 skill（会话提示里列出，路径随会话变化，名字固化在这里）
+# 格式：名字 <Tab> 来源说明
+cindy-skill-creator	cindy-managed-skills（会话提示）
+learn	cindy-managed-skills（会话提示）
+cindy-plugin-creator	cindy-managed-skills（会话提示）
+cindy-theme-creator	cindy-managed-skills（会话提示）
+pr	cindy-managed-skills（会话提示）

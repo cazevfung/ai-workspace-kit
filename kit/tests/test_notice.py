@@ -498,7 +498,7 @@ class NoticeToolsTest(unittest.TestCase):
         self.assertNotIn("NOT_BOUND", done.stdout)
 
     def test_session_roster_reports_not_bound_for_a_session_with_no_ticket(self):
-        ghost = "ghost-session"
+        ghost = "<session-id>"
         done = self.run_tool("session_roster.py", "--session", ghost, "--db", str(self.db))
         self.assertEqual(1, done.returncode, done.stdout + done.stderr)
         self.assertIn("NOT_BOUND", done.stdout)

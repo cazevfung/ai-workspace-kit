@@ -33,7 +33,7 @@
 要求：**Python 3.10+**；**Git** 建议装（没有也能用，只是少了「没工单不许提交」这道默认路径）。
 
 ```bash
-git clone <本仓库地址> ai-workspace-kit
+git clone https://github.com/cazevfung/ai-workspace-kit ai-workspace-kit
 cd ai-workspace-kit
 python install.py
 ```
@@ -80,7 +80,7 @@ ai-workspace/
 ├── tasks/                 # round.md（本轮目标）、rounds.md（历史）、plan-*.md
 ├── task_center/           # 工单核心（纯标准库，SQLite）
 ├── tools/                 # 四道闸门 + auto_merge + run_tests
-├── tests/                 # 376 项用例，证明装出来的东西是对的
+├── tests/                 # 381 项用例，证明装出来的东西是对的
 ├── docs/                  # protocol / closing / probe / intake / skill-loading
 ├── examples/
 ├── .agents/skills/        # 5 个工作区技能
@@ -122,6 +122,24 @@ python uninstall.py --skills                            # 只从 ~/.agents/skill
 
 默认**不删** `~/.agents/center.json` 和 `~/.agents/intake/`（可能还有别的项目在用），
 要一起删加 `--all`。工作区里的 `.data/` 是你的进度数据，卸载时默认保留。
+
+---
+
+## 维护者：把上游的更新同步进来
+
+`kit/`、`skills/`、`design/` 来自一个上游工作区。上游改动之后，按三步重建，不要手工复制：
+
+```bash
+python maintainer/sync_from_origin.py        # 1. 从上游同步，并把绝对路径换成 {{WORKSPACE}}
+python maintainer/redact_for_public.py       # 2. 清掉同步带进来的用户名与会话 id
+python verify/verify_install.py              # 3. 临时目录里真装一遍，13 项全过再发版
+```
+
+第 2 步不能省：`kit/tests/fixtures` 是有意**原样复制**的（夹具里的绝对路径是判据的一部分），
+所以同步会把真实用户名和会话 id 一起带进来。`redact_for_public.py --check` 可以单独做发布前检查。
+
+`README`、`install.py`、`uninstall.py`、`kit/AGENTS.md`、`kit/PRD/`、`docs/*.md` 是人工维护件，
+同步不会覆盖它们；上游规则改了要手工对齐。发版时记得升 `VERSION` 并写 `CHANGELOG.md`。
 
 ---
 

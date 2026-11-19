@@ -11,7 +11,7 @@
 ## 安装
 
 ```bash
-git clone <本仓库地址> ai-workspace-kit
+git clone https://github.com/cazevfung/ai-workspace-kit ai-workspace-kit
 cd ai-workspace-kit
 python install.py
 ```
@@ -86,4 +86,4 @@ python uninstall.py --purge-data     # 连 .data/ 进度库一起删
 **技能在 agent 里看不到。** 确认技能装在 `~/.agents/skills/<名字>/SKILL.md`；
 Cindy 每次以 `--no-approve` 启动，项目级技能目录不参与启动，用户级目录才可靠。
 
-**测试很慢。** 376 项用例大约 1–2 分钟；第一次跑会创建临时库，之后更快。
+**测试很慢。** 381 项用例大约 1–2 分钟；第一次跑会创建临时库，之后更快。

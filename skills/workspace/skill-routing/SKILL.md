@@ -23,16 +23,20 @@ description: 本工作区任何会话开工时、以及做到任何一个需要�
 
 ## 装了什么、没接什么
 
-`installed-skills.md` 是套件自带 skill 的处置表：要么接到某个节点，要么写明「明确不接」并指出它属于哪个项目面。
-新增一个 skill 后在那张表加一行、并在 `nodes.md` 里补归口，避免「装了但没接」的静默失效。
+`installed-skills.md` 是本机全部已装 skill 的处置表：要么接到某个节点，要么写明「明确不接」并指出它属于哪个项目面。
+新增一个 skill 后必须在那张表加一行并重跑校验，否则脚本会以「已装未处置」失败。
 
 `gaps.md` 是没有 skill 可归口的 7 个节点：兜底动作 + 这轮不新建 skill 的理由。**不要为了表好看编一个 skill 名顶上。**
 
 ## 校验
 
-本套件不附带 `check_routing.py` 这类校验脚本。原因是它们校验的是「某台机器上已装的全部 skill」——同一个脚本在原工作区能过，换一台装了别的 skill 的机器就会报「已装未处置」，容易被误读成安装失败。
+```bash
+python .agents/skills/skill-routing/scripts/check_routing.py
+python .agents/skills/skill-routing/scripts/test_check_routing.py
+```
 
-在这份套件里，路由表本身（`nodes.md` / `roles.md` / `gaps.md` / `installed-skills.md`）就是交付物：它告诉你每个判断节点该打开哪个 skill。装了新的 skill 之后，照着 `installed-skills.md` 的维护规则加一行、并在 `nodes.md` 里补归口即可。
+第一条查四件事：节点是否齐 N01–N29、归口里的 skill 名是否真在磁盘上、已装 skill 是否都有处置、角色表引用的编号是否存在。非零退出就是有问题，输出里带 `文件:行号`。
+第二条是脚本自己的反例用例，四类错误各造一次，必须都失败。
 
 ## 边界
 
