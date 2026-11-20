@@ -2,9 +2,9 @@
 
 中文版：[README.md](README.md)
 
-This kit serves one purpose: when an AI says it is done, you can tell on the spot whether it really is.
+**Every piece of work an AI does gets a ticket, evidence, an independent review, and a record you can still query ten steps later.**
 
-It has three parts. A local database records tickets and reviews; it uses nothing but the standard library and SQLite, and lives in `task_center/`. A set of scripts in `tools/` check the work and exit non-zero when something is missing. The rules and skills in `AGENTS.md` and `skills/` are written for the agent to read.
+[What it solves](#what-problem-it-solves) · [Four core capabilities](#four-core-capabilities) · [What you can use it for](#what-you-can-use-it-for-six-situations) · [How one ticket runs](#the-life-of-one-ticket) · [Run it once](#run-it-once-after-installing) · [Install](#install)
 
 The workflow has run dozens of tickets in a real project. Everything specific to that project has been stripped out, and what remains is packaged here. You need Python 3.10 and an agent that reads `AGENTS.md`. Cindy, Claude Code and Codex all work.
 
@@ -26,6 +26,31 @@ This workspace puts all three things into one local SQLite file:
 Sessions can be thrown away. The database cannot. That is the most basic design decision here.
 
 So there are two layers. One is the process: how a requirement comes in, who does the work, who reviews it, how it lands on the main branch. The other is the decision points: which steps refuse to be vague, and fail on the spot when they are. The rest of this document covers the process first, then the decision points.
+
+---
+
+## Four core capabilities
+
+**One database covers every project.** Tickets, attempts, submissions, reviews and merge records live in one local SQLite file. Close the session, change the person, come back two weeks later: the record is still there, and one command tells you what a project is working on, where it is stuck, and who is on it.
+
+**One line runs from PRD to merge.** A requirement carries an ID and a version, the plan passes a gate, the person who did the work does not review it, and the merge is previewed and tested first. None of this depends on a single conversation staying alive.
+
+**Verdicts are exit codes, not good intentions.** A set of checks covers commits, plans, closing, handoffs, stated numbers, citations and merges. When something is missing they exit non-zero, and "needs your confirmation" does not count as done.
+
+**Other projects can hand long-running work in.** Another project writes a six-section handoff packet, passes the gate, and opens a workspace session. This workspace then coordinates the work, and the background is not left behind in the old chat.
+
+---
+
+## What you can use it for: six situations
+
+| What you are doing | What you end up with |
+| --- | --- |
+| Taking a feature from requirement to production | Criteria come from a versioned PRD, the plan passes a gate, doer and reviewer are separate, tests run before merge, and the database keeps the record |
+| Pushing several projects at once | One central database shows every project's ticket state, without digging through separate chats |
+| Receiving long-running work from another project | A six-section packet passes the gate and the task lands here; the original session stops and only relays the receipt |
+| Changing a requirement mid-flight | The PRD hash no longer matches the ticket, submission is blocked by `STALE_PRD`, and the ticket has to be revised explicitly |
+| Feeling unsure before a merge | `auto_merge` previews conflicts, runs tests, tags a rollback point, and returns to it when something fails |
+| Coming back the next day | State lives in the database, so a new session or a new person can see where it stopped and whose turn it is |
 
 ---
 
@@ -195,6 +220,25 @@ python tools/doc_gate.py --all       # should exit 0
 ```
 
 The number of tests is whatever `run_tests.py` reports in its summary line, and it changes between tags. `v0.3.0` installs 453 of them.
+
+### Run it once after installing
+
+`examples/demo.py` walks the whole loop in a temporary database: create a ticket, dispatch, submit, review. It connects to no real session, writes nothing into your workspace, and deletes the temporary database when it ends.
+
+```bash
+cd ~/ai-workspace
+PYTHONPATH=. python examples/demo.py            # macOS / Linux
+$env:PYTHONPATH="."; python examples/demo.py    # Windows PowerShell
+```
+
+The output is the real receipt for every step. The review part is worth a look: the first submission carries one item and comes back as rework, and only the second one passes.
+
+```text
+{"operation": "review_result", "result": {"state": "rework", "reason": "只有一项，需要返工", ...}}
+{"operation": "review_result", "result": {"state": "done", "reason": "满足两项要求", ...}}
+```
+
+That is an excerpt; the full output is one JSON object per line, ending with a line that says, in Chinese, one rejection, one rework, one pass.
 
 ---
 
