@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.3.0
+
+同步到原工作区 2026-11-20 13:32（master `6bc6d32`），对应上游 R-007 到 R-009 三轮。
+
+- 中心库 schema 8 → 9：提交时记下被验收那棵树的 head sha，合并前与被合并的树比对，合错树会被挡下。
+- 新增 `tools/claims_gate.py` 与 `docs/claims-format.md`：把文档里写的数（计数、合计、比例、摘要、字节数、行号锚点、清单条数）变成一次能失败的复算。`--coverage` 只列没有 claim 覆盖的活数位置，退出码恒为 0。
+- 新增 `tools/ref_gate.py`：行号引用与「见 某文件 的「某标题」」锤点，指向不存在就非零退出。
+- `tools/auto_merge.py` 随 schema 变化更新；`ticket-dispatch` 技能补上新的验收与合并口径。
+- 用例数 381 → 453。
+- 已知：在侢架目录直接跑 `python tools/run_tests.py` 会有 7 项 `test_doc_gate` 失败，因为那些用例要求项目里存在 `.agents/skills`。安装之后跑是全绿的，`verify_install.py` 验的就是安装后的状态。
+
 ## 0.2.1
 
 - 修安装器：技能与交接协议里的 `{{WORKSPACE}}` 以前会原样留在用户机器上，现在复制时就换成真实路径。注入统一用正斜杠，因为 `.json` 里的反斜杠要转义，直接塞 Windows 路径会把 JSON 弄坏。

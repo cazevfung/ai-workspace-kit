@@ -28,6 +28,11 @@
    当前分支）；**已跟踪文件**无改动（`git status --porcelain` 里除 `??` 之外为空）；
    目标分支存在、源分支存在、源分支领先目标（`rev-list --count target..branch > 0`）。
    未跟踪文件本身不拦（它们不参与这次合并），但会逐个列出，并注明「这些文件没有被合进去」。
+   第 2 步收尾第一件事是**比对两棵树**：工单最新一次提交的 `head_sha`（被验收的那棵树）
+   与分支 tip（`git rev-parse refs/heads/<源分支>`，要合的那棵树）不等就一步不动地失败。
+   它以前不存在，所以验收之后再提交一次也能合进去，而库里查不出来（R-009 目标第 2 条）。
+   老提交没有 `head_sha`（NULL）时不堵死也不静默放行：输出一条警告，合并记录按
+   `unverified` 落库，事后查得到这单没核过。见 `guard_reviewed_sha`。
    第 2 步收尾还要预检一件事：**这次合并要新增的路径**若与某个未跟踪文件同名
    （分隔符与大小写按 Windows 口径归一，内容相同也算），merge 必然会以
    `untracked working tree file would be overwritten` 拒绝，所以在这里就停下、
@@ -101,6 +106,7 @@ STEP_LOCK = "第 0 步 · 合并互斥锁"
 STEP_TICKET = "第 1 步 · 读工单"
 STEP_NOTICE = "第 1 步 · 回执预检"
 STEP_CHECKS = "第 2 步 · 前置检查"
+STEP_SHA = "第 2 步 · 被验收的 sha 与要合的 sha"
 STEP_UNTRACKED = "第 2 步 · 未跟踪文件预检"
 STEP_CONFLICT = "第 3 步 · 冲突预演"
 STEP_TAG = "第 4 步 · 打回退点 tag"
@@ -1023,6 +1029,62 @@ def _step_checks(repo, target, branch, env, emit, *, require_ahead=True) -> dict
     return {"base": base, "tip": tip, "ahead": ahead, "untracked": untracked}
 
 
+# --- 被验收的树与要合的树 -------------------------------------------------
+#
+# 这一道比较以前不存在：`merges` 只记「合到了哪个提交」，不记「验收的是哪棵树」。于是验收
+# 之后又往分支上提一次，合并照样通过，而库里查不出来——R-008 那次合并两棵树刚好相同，
+# 是因为验收后没人再提交，不是因为闸门查过。
+#
+# 比对的两侧分属两个世界，所以只能在这里做：git 侧是分支 tip（`git rev-parse`），库侧是
+# 提交时写下的 `submissions.head_sha`。`task_center` 不跑 git，它只做库内比对。
+
+UNVERIFIED = "unverified"
+
+
+def reviewed_head_sha(ticket) -> str | None:
+    """工单最新一次提交记下的 head sha；旧数据或没有提交时返回 None。
+
+    `get_ticket` 的 `submissions` 按写入顺序返回，所以「最新」是最后一条。
+    """
+    submissions = ticket.get("submissions") or []
+    if not submissions:
+        return None
+    return (submissions[-1] or {}).get("head_sha")
+
+
+def guard_reviewed_sha(ticket, ticket_id, branch, tip, emit) -> str:
+    """比对「被验收的 sha」与「现在要合的 tip」，返回要交给 `merge_ticket` 的 reviewed_sha。
+
+    三种情形都对得上，因为它们说的是三件不同的事：
+
+    - 相等：合的就是验收过的那棵树，写那个 sha。
+    - 不等：验收之后分支又动了。这是**一步不动**的失败：master、回退点、journal、
+      临时工作树与分支一样都没动，因为这一步在它们之前。
+    - 库里是 NULL（schema 8 以前的老提交）：没有可比的值，不阻止合并，但也不静默放行——
+      输出里明说这单没记录 sha，合并记录按 `unverified` 落库，于是事后查得到它没核过。
+    """
+    head = reviewed_head_sha(ticket)
+    if head is None:
+        emit(
+            f"警告：工单 {ticket_id} 最新一次提交没有记录 head sha（schema 9 之前的提交），"
+            f"没有可比的值。这次照常合并，合并记录按 `{UNVERIFIED}` 落库——"
+            "事后查得到它没被核对过，而不是被当成「核对过」。"
+        )
+        return UNVERIFIED
+    head = str(head).casefold()
+    if head != tip.casefold():
+        raise Fail(
+            STEP_SHA,
+            f"被验收的 {head} 与现在要合的 {tip} 不是同一个提交：验收之后 {branch} 又变动过了。",
+            f"要让这一次合并成立，得让被验收的就是要合的那棵树：要么把 {branch} 退回被验收的"
+            f"那个提交（{head[:12]}）再合，要么让独立验收会话对现在的 tip 重新验收一次"
+            f"（提交一次带 head_sha 的成果，再 review_result）。此刻 {ticket_id} 的合并记录没写、"
+            "回退点 tag 没打、临时工作树没建，目标分支一指头没动。",
+        )
+    emit(f"被验收的树：{head}（与 {branch} 的 tip 一致）。")
+    return head
+
+
 # --- --record-only：收口「合并已成功、记录还没写」的半截状态 -----------------
 #
 # AW-058 断在这里：`git merge` 已经成功、master 上已经有那次合并提交，`merges` 里没有
@@ -1182,6 +1244,9 @@ def _record_only_steps(
     checks = _step_checks(repo, target, branch, env, emit, require_ahead=False)
     tip = checks["tip"]
 
+    # 同一道比对：`--record-only` 比的是源分支 tip，也就是那次合并合进来的那一支。
+    reviewed_sha = guard_reviewed_sha(ticket, ticket_id, branch, tip, emit)
+
     commit = find_merge_commit(repo, target, tip, env=env)
     if commit is None:
         raise Fail(
@@ -1210,6 +1275,7 @@ def _record_only_steps(
         "commit": commit,
         "target_branch": target,
         "tests": summary,
+        "reviewed_sha": reviewed_sha,
     }
     receipt = merge_recorder(payload)
     emit(f"合并记录：{json.dumps(receipt, ensure_ascii=False)}")
@@ -1245,6 +1311,11 @@ def _merge_steps(
     # 第 2 步：前置检查，全部在动目标分支之前完成
     checks = _step_checks(repo, target, branch, env, emit)
     base = checks["base"]
+
+    # 第 2 步收尾之二：被验收的树是不是要合的那棵树。
+    # 放在打回退点与预演之前——它只读库与一个 ref，拒的时候什举都没动，
+    # 而不是先花一场全量测试再在真合并前失败。
+    reviewed_sha = guard_reviewed_sha(ticket, ticket_id, branch, checks["tip"], emit)
 
     # 第 2 步收尾：合并要写进工作区的新路径，有没有撞上未跟踪文件。
     # 放在打回退点与预演之前，是为了让这句失败不代价一场全量测试；
@@ -1363,6 +1434,7 @@ def _merge_steps(
         "commit": commit,
         "target_branch": target,
         "tests": summary,
+        "reviewed_sha": reviewed_sha,
     }
     receipt = merge_recorder(payload)
     emit(f"合并记录：{json.dumps(receipt, ensure_ascii=False)}")

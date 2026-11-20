@@ -23,11 +23,12 @@ FIELDS = {
     "claim_ticket": {"project_id", "ticket_id", "expected_revision", "coordinator_session_id",
                      "coordinator_workdir", "allow_parallel"},
     "bind_session": {"project_id", "ticket_id", "attempt_id", "session_id", "project_root"},
-    "submit_result": {"project_id", "ticket_id", "attempt_id", "session_id", "summary", "artifacts", "evidence", "risks"},
+    "submit_result": {"project_id", "ticket_id", "attempt_id", "session_id", "summary", "artifacts", "evidence", "risks",
+                      "head_sha"},
     "recover_ticket": {"project_id", "ticket_id", "attempt_id", "expected_revision", "reason"},
     "revise_ticket": {"project_id", "ticket_id", "expected_revision", "reason", "prd_path", "criteria", "deliverable", "reopen"},
     "cancel_ticket": {"project_id", "ticket_id", "expected_revision", "reason"},
-    "merge_ticket": {"project_id", "ticket_id", "commit", "target_branch", "tests"},
+    "merge_ticket": {"project_id", "ticket_id", "commit", "target_branch", "tests", "reviewed_sha"},
     "list_unmerged": {"project_id"},
     "ask_ticket": {"project_id", "ticket_id", "attempt_id", "session_id", "question", "options"},
     "answer_ticket": {"project_id", "ticket_id", "question_id", "answer", "answered_by",
@@ -120,6 +121,36 @@ def digest_text(data, key):
     require(len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value),
             "INVALID_INPUT", f"{key} must be 64 hexadecimal characters")
     return value
+
+
+# 老提交（schema 8 以前写下、没有 head_sha 那一列）合并时唯一能填的值。
+# 它不是白名单里的「另一种 sha」，而是「这句话我没法核对」的如实标注。
+UNVERIFIED = "unverified"
+
+
+def sha_text(data, key, max_length=40):
+    """提交 sha：40 位十六进制，大小写都收，存小写。
+
+    只校形状。sha 本身对不对这里验不了（本工具不跑 git），也不该猜：验收会话拿它去
+    `git rev-parse HEAD` 核，`tools/auto_merge.py` 拿它去比分支 tip。
+    """
+    value = text(data, key, max_length)
+    require(len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value),
+            "INVALID_INPUT", f"{key} must be 40 hexadecimal characters")
+    return value.lower()
+
+
+def latest_head_sha(conn, ticket_id):
+    """这张单最新一次提交记下的 head sha；没有提交或那行是旧数据时返回 None。
+
+    取「最新」而不是「和这次尝试对得上的那条」：验收通过之后又提交一次时，被验收的是
+    当时那条，而合并时要比的就是它——把较旧的一条拿来比，恰好会把那次多出来的提交放过。
+    """
+    row = conn.execute(
+        "SELECT s.head_sha FROM submissions s JOIN attempts a ON a.id=s.attempt_id"
+        " WHERE a.ticket_id=? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1",
+        (ticket_id,)).fetchone()
+    return None if row is None else row["head_sha"]
 
 
 def ticket_dict(row):
@@ -388,12 +419,16 @@ class Center:
                 "INVALID_INPUT", "Duplicate artifact paths")
         summary = text(data, "summary")
         evidence, risks = string_list(data, "evidence", minimum=1), string_list(data, "risks")
+        # 被验收的那棵树要能事后核对：记下提交时的 head sha，合并时拿它比分支 tip。
+        head_sha = sha_text(data, "head_sha")
         sid = str(uuid4())
-        conn.execute("INSERT INTO submissions VALUES (?,?,?,?,?,?,?)",
-                     (sid, attempt["id"], summary, packed(artifacts), packed(evidence), packed(risks), now()))
+        conn.execute("INSERT INTO submissions(id,attempt_id,summary,artifacts,evidence,risks,created_at,head_sha)"
+                     " VALUES (?,?,?,?,?,?,?,?)",
+                     (sid, attempt["id"], summary, packed(artifacts), packed(evidence), packed(risks), now(), head_sha))
         conn.execute("UPDATE attempts SET state='submitted' WHERE id=?", (attempt["id"],))
         conn.execute("UPDATE tickets SET state='awaiting_review' WHERE id=?", (ticket["id"],))
-        return {"submission_id": sid, "attempt_id": attempt["id"], "state": "awaiting_review", "artifacts": artifacts}
+        return {"submission_id": sid, "attempt_id": attempt["id"], "state": "awaiting_review",
+                "artifacts": artifacts, "head_sha": head_sha}
 
     def _ask_ticket(self, conn, data):
         # 提问也要走 _active：它同时挡住旧尝试（STALE_ATTEMPT）与换了标识的会话（SESSION_MISMATCH）。
@@ -629,10 +664,43 @@ class Center:
                 "NO_NOTICE", "This ticket has no notice record; record a sent notice, or a failed one with its "
                              "reason, before merging")
         merge_id = str(uuid4())
-        conn.execute("INSERT INTO merges VALUES (?,?,?,?,?,?)",
-                     (merge_id, ticket["id"], commit, target_branch, tests, now()))
+        reviewed_sha = self._reviewed_sha(conn, ticket, data)
+        conn.execute("INSERT INTO merges(id,ticket_id,commit_sha,target_branch,tests,created_at,reviewed_sha)"
+                     " VALUES (?,?,?,?,?,?,?)",
+                     (merge_id, ticket["id"], commit, target_branch, tests, now(), reviewed_sha))
         return {"merge_id": merge_id, "ticket_id": ticket["id"], "project_id": ticket["project_id"],
-                "commit": commit, "target_branch": target_branch, "tests": tests}
+                "commit": commit, "target_branch": target_branch, "tests": tests,
+                "reviewed_sha": reviewed_sha}
+
+    def _reviewed_sha(self, conn, ticket, data):
+        """合并时写下「被验收的那棵树」，并对得上才算数。
+
+        三种情形各自不同，因为它们对应三种不同的事实：
+
+        - 库里有 head_sha 且等于传进来的：那棵树就是被验收的，照写。
+        - 库里有 head_sha 但不相等：验收之后又提交了，合进去的不是被验收的那棵树——
+          报 `SHA_MISMATCH` 且一行不写。这正是这张单要堵的缝。
+        - 库里是 NULL（schema 8 以前的老提交）：没有可比的值，所以不收任何 sha，也不许
+          自称「核对过」——必须传字面量 `unverified`，并按这个字原样入库。老单因此既
+          不会被静默放行，也不会被全堵死。
+        """
+        head_sha = latest_head_sha(conn, ticket["id"])
+        value = text(data, "reviewed_sha", 40)
+        if head_sha is None:
+            # 传一个 sha 来也不能收：库里没有能和它比的东西，收了就是把「没核对」写成数值。
+            require(value == UNVERIFIED, "INVALID_INPUT",
+                    f"This ticket's newest submission has no head_sha (written before schema 9); "
+                    f"pass the literal `{UNVERIFIED}` as reviewed_sha instead of a sha")
+            return UNVERIFIED
+        require(value != UNVERIFIED, "INVALID_INPUT",
+                f"This ticket's submission recorded head_sha {head_sha}; `{UNVERIFIED}` would claim it was "
+                "never checked")
+        reviewed = sha_text(data, "reviewed_sha")
+        require(reviewed == head_sha.lower(), "SHA_MISMATCH",
+                f"The tree being merged was not the tree that was accepted: reviewed {value.lower()}, "
+                f"latest submission {head_sha.lower()}. Commit on the branch was added after the review; "
+                "revise the ticket and get it reviewed again, or merge the reviewed tree")
+        return reviewed
 
     def _list_unmerged(self, conn, data):
         # 只读清单：已验收（done）但没有合并记录。历史工单直接在 master 上做、没有 merges 行，

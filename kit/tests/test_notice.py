@@ -132,7 +132,7 @@ class NoticeTest(unittest.TestCase):
     def test_schema_eight_has_notices_with_target_and_wake_kind(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(8, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(9, conn.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 ["id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail",
                  "created_at", "target_session_id", "wake_kind"],
@@ -515,6 +515,7 @@ class NoticeToolsTest(unittest.TestCase):
             "project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
             "session_id": "executor-1", "artifacts": ["t1-result.md"], "summary": "清单已完成",
             "evidence": ["人工检查条目"], "risks": [],
+            "head_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
             "project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],

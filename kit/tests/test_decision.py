@@ -92,8 +92,10 @@ class DecisionChannelTest(unittest.TestCase):
 
     def result_payload(self, attempt, session="executor-1"):
         (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
+        # head_sha 是提交的必填项（schema 9）：这里给一个合法值，验的不是它。
         return self.scope(attempt_id=attempt, session_id=session, artifacts=["result.md"],
-                          summary="清单已完成", evidence=["人工检查条目"], risks=[])
+                          summary="清单已完成", evidence=["人工检查条目"], risks=[],
+                          head_sha="0123456789abcdef0123456789abcdef01234567")
 
     def sql(self, *statements):
         """直接改库，只用于造出不一致行来测兜底码；正常路径靠 API 走不到这些状态。"""
@@ -395,7 +397,7 @@ class DecisionChannelTest(unittest.TestCase):
     def test_schema_six_has_question_tables_and_a_blocked_wide_index(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(8, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(9, conn.execute("PRAGMA user_version").fetchone()[0])
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertLessEqual({"questions", "answers"}, tables)
             indexes = {row[0]: row[1] for row in conn.execute(

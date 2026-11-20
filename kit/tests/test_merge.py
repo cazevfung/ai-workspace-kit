@@ -49,6 +49,10 @@ CREATE TABLE requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response T
 
 V4_TABLES = ("projects", "tickets", "attempts", "submissions", "reviews", "events", "requests")
 STAMP = "2026-11-17T00:00:00+00:00"
+# 本文件里「被验收的那棵树」的 sha。真值由 `git rev-parse HEAD` 给，这里只要合法：
+# 用例验的是「提交记下来了、合并时比对得上/对不上」，不是 sha 本身对不对。
+HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 
 
 def build_v4(path, project_root):
@@ -162,7 +166,7 @@ class MergeTest(unittest.TestCase):
         submission = self.ok("submit_result", {
             **scope, "attempt_id": claim["attempt_id"], "session_id": executor,
             "artifacts": [f"{ticket_id}-result.md"], "summary": "清单已完成",
-            "evidence": ["人工检查条目"], "risks": [],
+            "evidence": ["人工检查条目"], "risks": [], "head_sha": HEAD_SHA,
         })
         return self.ok("review_result", {
             **scope, "attempt_id": claim["attempt_id"], "submission_id": submission["submission_id"],
@@ -173,7 +177,8 @@ class MergeTest(unittest.TestCase):
 
     def merge_payload(self, **extra):
         return {"project_id": "p1", "ticket_id": "t1", "commit": "a1b2c3d",
-                "target_branch": "master", "tests": "python tools/run_tests.py：全绿", **extra}
+                "target_branch": "master", "tests": "python tools/run_tests.py：全绿",
+                "reviewed_sha": HEAD_SHA, **extra}
 
     def notice(self, ticket_id="t1", project_id="p1", status="sent", wake="queued"):
         """给已交付的工单记一条回执：schema 8 起没过回执的单写不进合并记录。"""
@@ -260,6 +265,67 @@ class MergeTest(unittest.TestCase):
         # 已有合并记录的单行为不变：先报 ALREADY_MERGED，不是 NO_NOTICE。
         self.error("ALREADY_MERGED", "merge_ticket", self.merge_payload())
 
+    # --- AW-078：被验收的树与要合的树对齐 -------------------------------
+
+    def test_merge_records_the_reviewed_sha(self):
+        """C4 第一种：相等就放行，并把被验收的 sha 写进 merges。"""
+        self.done()
+        self.notice()
+        self.ok("merge_ticket", self.merge_payload(), "merge-with-sha")
+        merges = self.ok("get_ticket", self.scope())["merges"]
+        self.assertEqual(1, len(merges))
+        self.assertEqual(HEAD_SHA, merges[0]["reviewed_sha"])
+        # 提交上写下的 sha 也读得回：这就是验收会话拿去 `git rev-parse HEAD` 核的那个值。
+        self.assertEqual(HEAD_SHA, self.ok("get_ticket", self.scope())["submissions"][0]["head_sha"])
+
+    def test_merge_refuses_a_sha_that_is_not_the_submitted_one(self):
+        """C4 第二种：不等报 SHA_MISMATCH，且一行不写。
+
+        这张单存在的理由就是这个场景：验收之后又提交了一次，合并照样通过，而库里查不出来。
+        """
+        self.done()
+        self.notice()
+        self.error("SHA_MISMATCH", "merge_ticket", self.merge_payload(reviewed_sha=OTHER_SHA))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+        self.assertEqual(["t1"], [item["id"] for item in self.ok("list_unmerged")["items"]])
+        # 校验顺序：大小写不影响比对（git 给的是小写，人手里可能大写）。
+        self.ok("merge_ticket", self.merge_payload(reviewed_sha=HEAD_SHA.upper()), "merge-upper")
+
+    def test_merge_legacy_submission_requires_the_unverified_literal(self):
+        """C4 第三种：老提交的 head_sha 是 NULL。
+
+        库里有 140 多条历史提交、49 张老单，它们的 head_sha 只能是 NULL。静默放行等于
+        把「没核对过」写成「核对过」，全堵死又让老单永远合不了。所以要求调用方显式传字面量
+        `unverified`，并把它原样入库。
+        """
+        self.done()
+        self.notice()
+        # 把这一行改成「历史提交」的样子：那时还没有 head_sha 这一列。
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE submissions SET head_sha=NULL")
+        conn.commit()
+        conn.close()
+        self.assertIsNone(self.ok("get_ticket", self.scope())["submissions"][0]["head_sha"])
+        # 不传字面量就合不进去，无论是另一个 sha 还是「什么都不说」。
+        # 这里报 INVALID_INPUT 而不是 SHA_MISMATCH：没有可比的 sha 就不是「两边不等」，
+        # 而是调用方给了一个这里不接受的値。
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha=HEAD_SHA))
+        self.error("INVALID_INPUT", "merge_ticket", {k: v for k, v in self.merge_payload().items()
+                                                    if k != "reviewed_sha"})
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+        self.ok("merge_ticket", self.merge_payload(reviewed_sha="unverified"), "merge-legacy")
+        self.assertEqual("unverified", self.ok("get_ticket", self.scope())["merges"][0]["reviewed_sha"])
+
+    def test_merge_rejects_unverified_when_a_head_sha_is_recorded(self):
+        """有 sha 的单不许自称 unverified：那等于把一个可核对的事写成没核对。"""
+        self.done()
+        self.notice()
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha="unverified"))
+        # 既不是 40 位十六进制也不是 unverified，同样拒绝。
+        for bad in (None, "", HEAD_SHA[:39], HEAD_SHA + "0", "Z" * 40, "unverifie"):
+            self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha=bad))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
     # --- list_unmerged 读取 -------------------------------------------------
 
     def test_list_unmerged_lists_done_tickets_without_a_merge_record(self):
@@ -307,9 +373,9 @@ class MergeTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(4, receipt["from_version"])
-        self.assertEqual(8, receipt["schema_version"])
+        self.assertEqual(9, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(8, user_version(legacy))
+        self.assertEqual(9, user_version(legacy))
         self.assertIn("merges", table_names(legacy))
         self.assertEqual(before, counts(legacy))
         center = Center(legacy)
@@ -326,9 +392,12 @@ class MergeTest(unittest.TestCase):
             "target_session_id": "coordinator-1", "wake_kind": "queued",
         }, "notice-after-migrate")
         self.assertTrue(noticed["ok"], noticed)
-        merged = center.execute("merge_ticket", self.merge_payload(), "merge-after-migrate")
+        # v4 库里没有 head_sha 这一列，那条提交是历史提交：按 legacy 路径显式传 unverified。
+        merged = center.execute("merge_ticket", self.merge_payload(reviewed_sha="unverified"),
+                                "merge-after-migrate")
         self.assertTrue(merged["ok"], merged)
-        self.assertFalse(center.execute("merge_ticket", {**self.merge_payload(), "ticket_id": "t2"},
+        self.assertFalse(center.execute("merge_ticket", {**self.merge_payload(reviewed_sha="unverified"),
+                                                        "ticket_id": "t2"},
                                         "merge-after-migrate-2")["ok"])
         unmerged = center.execute("list_unmerged", {})
         self.assertTrue(unmerged["ok"], unmerged)

@@ -32,7 +32,7 @@ python -m task_center --db <绝对路径> <操作> --request-id <唯一编号> -
 | --- | --- |
 | `claim_ticket` | `project_id` `ticket_id` `expected_revision` |
 | `bind_session` | `project_id` `ticket_id` `attempt_id` `session_id` `project_root` |
-| `submit_result` | 上述 + `session_id` `summary` `artifacts` `evidence` `risks` |
+| `submit_result` | 上述 + `session_id` `summary` `artifacts` `evidence` `risks` `head_sha`（`git rev-parse HEAD` 的输出，40 位十六进制；它是这次**被验收的那棵树**，合并时拿它比分枝 tip） |
 | `review_result` | `project_id` `ticket_id` `attempt_id` `submission_id` `reviewer_session_id` `verdict` `checks` `reason` |
 
 未知字段会被直接拒绝（`INVALID_INPUT`），拼错不会静默忽略——这是好事，别绕过。

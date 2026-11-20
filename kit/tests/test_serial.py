@@ -95,7 +95,8 @@ class SerialDispatchTest(unittest.TestCase):
         result.write_text("1. 检查步骤", encoding="utf-8")
         self.ok("submit_result", self.scope(
             ticket_id=ticket_id, project_id=project_id, attempt_id=attempt, session_id=session,
-            artifacts=[result.name], summary="清单已完成", evidence=["人工检查条目"], risks=[]))
+            artifacts=[result.name], summary="清单已完成", evidence=["人工检查条目"], risks=[],
+            head_sha="0123456789abcdef0123456789abcdef01234567"))
         return attempt
 
     def events(self, ticket_id="t1", project_id="p1"):

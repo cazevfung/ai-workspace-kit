@@ -117,10 +117,10 @@ def build_v3(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     return path
 
 
-def counts(path):
+def counts(path, tables=TABLES):
     conn = sqlite3.connect(path)
     try:
-        return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLES}
+        return {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
     finally:
         conn.close()
 
@@ -268,6 +268,98 @@ CREATE TABLE requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response T
 """
 
 
+# 冻结的 schema 8：schema 9 之前的最后一步形状——notices 已经有两列，`submissions`
+# 还没有 head_sha，`merges` 还没有 reviewed_sha。真实库（今天）就是这一个形状。
+V8_SCHEMA = """
+CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE);
+CREATE TABLE tickets(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+ deliverable TEXT NOT NULL,
+ prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL, criteria TEXT NOT NULL,
+ revision INTEGER NOT NULL, state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL);
+CREATE TABLE attempts(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), revision INTEGER NOT NULL,
+ prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL,
+ state TEXT NOT NULL, session_id TEXT, coordinator_session_id TEXT, coordinator_workdir TEXT,
+ created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX active_session ON attempts(session_id)
+ WHERE session_id IS NOT NULL AND state IN ('blocked','running','submitted');
+CREATE TABLE submissions(
+ id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
+ summary TEXT NOT NULL, artifacts TEXT NOT NULL, evidence TEXT NOT NULL, risks TEXT NOT NULL,
+ created_at TEXT NOT NULL);
+CREATE TABLE reviews(
+ id TEXT PRIMARY KEY, submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(id),
+ reviewer_session_id TEXT NOT NULL, verdict TEXT NOT NULL, checks TEXT NOT NULL,
+ reason TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE events(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT REFERENCES tickets(id),
+ operation TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE merges(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
+ commit_sha TEXT NOT NULL, target_branch TEXT NOT NULL, tests TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE questions(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
+ attempt_id TEXT NOT NULL REFERENCES attempts(id),
+ question TEXT NOT NULL, options TEXT NOT NULL, state TEXT NOT NULL, asked_at TEXT NOT NULL);
+CREATE UNIQUE INDEX one_open_question ON questions(attempt_id) WHERE state='open';
+CREATE TABLE notices(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
+ attempt_id TEXT NOT NULL REFERENCES attempts(id), origin_session_id TEXT NOT NULL,
+ status TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL,
+ target_session_id TEXT NOT NULL DEFAULT '', wake_kind TEXT NOT NULL DEFAULT '');
+CREATE UNIQUE INDEX one_sent_notice ON notices(ticket_id) WHERE status='sent';
+CREATE INDEX notices_ticket ON notices(ticket_id, created_at);
+CREATE TABLE answers(
+ id TEXT PRIMARY KEY, question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
+ answer TEXT NOT NULL, answered_by TEXT NOT NULL, answered_by_session_id TEXT, created_at TEXT NOT NULL);
+CREATE INDEX questions_ticket ON questions(ticket_id, asked_at);
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX tickets_project ON tickets(project_id, created_at);
+CREATE TABLE requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
+"""
+
+
+def build_v8(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
+    """写一个内容完整的 v8 库：一张在跑、一张已验收已合并、一张已验收还没合。
+
+    三张单各对应一个真实现场：还在做的、已经合过的（它那条 merges 行没有 reviewed_sha）、
+    已验收等合并的（它那条提交行没有 head_sha）。
+    """
+    prd_sha = hashlib.sha256((Path(project_root) / "PRD.md").read_bytes()).hexdigest()
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(V8_SCHEMA)
+        conn.execute("INSERT INTO projects VALUES ('p1','项目一',?)", (str(project_root),))
+        conn.execute("INSERT INTO tickets VALUES ('t1','p1','还在做','一份清单','PRD.md',?,'[]',1,'running','a1',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO tickets VALUES ('t2','p1','已经合过','另一份清单','PRD.md',?,'[]',1,'done','a2',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO tickets VALUES ('t3','p1','已验收等合并','第三份清单','PRD.md',?,'[]',1,'done','a3',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts VALUES ('a1','t1',1,'PRD.md',?,'running','executor-1','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts VALUES ('a2','t2',1,'PRD.md',?,'accepted','executor-2','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts VALUES ('a3','t3',1,'PRD.md',?,'accepted','executor-3','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO submissions VALUES ('s1','a2','已交付','[]','[\"自检\"]','[]',?)", (stamp,))
+        conn.execute("INSERT INTO submissions VALUES ('s2','a3','已交付','[]','[\"自检\"]','[]',?)", (stamp,))
+        conn.execute("INSERT INTO reviews VALUES ('r1','s1','reviewer-1','accept','[]','逐项核对',?)", (stamp,))
+        conn.execute("INSERT INTO reviews VALUES ('r2','s2','reviewer-1','accept','[]','逐项核对',?)", (stamp,))
+        conn.execute("INSERT INTO merges VALUES ('m1','t2','abc1234','master','300 项全绿',?)", (stamp,))
+        conn.execute("INSERT INTO notices VALUES ('n1','t3','a3','origin-1','sent','已发回执',?,'coordinator-1','queued')",
+                     (stamp,))
+        conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES ('t1','bind_session','{}',?)",
+                     (stamp,))
+        conn.execute("INSERT INTO requests VALUES ('req-1','fp','{}')")
+        conn.execute("PRAGMA user_version=8")
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
 def build_v7(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     """写一个内容完整的 v7 库：两张工单（running / done）与三条存量 notices。"""
     prd_sha = hashlib.sha256((Path(project_root) / "PRD.md").read_bytes()).hexdigest()
@@ -362,9 +454,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(3, receipt["from_version"])
-        self.assertEqual(8, receipt["schema_version"])
+        self.assertEqual(9, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(8, user_version(self.db))
+        self.assertEqual(9, user_version(self.db))
         self.assertIn("coordinator_session_id", columns(self.db, "attempts"))
         self.assertIn("merges", table_names(self.db))
         self.assertEqual(before, counts(self.db))
@@ -391,7 +483,7 @@ class MigrateTest(unittest.TestCase):
         before = counts(db)
         result = Center(db).execute("migrate", {})
         self.assertTrue(result["ok"], result)
-        self.assertEqual(8, result["result"]["schema_version"])
+        self.assertEqual(9, result["result"]["schema_version"])
         self.assertFalse(result["result"]["migrated"])
         self.assertIn("已是最新", result["result"]["message"])
         self.assertEqual(before, counts(db))
@@ -407,7 +499,7 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(second["ok"], second)
         self.assertFalse(second["result"]["migrated"])
         self.assertFalse(second["result"]["migrated"])
-        self.assertEqual(8, user_version(self.db))
+        self.assertEqual(9, user_version(self.db))
         self.assertEqual(before, counts(self.db))
 
     # --- 5 -> 6：问答两张表与 blocked 索引谓词 ------------------------------
@@ -419,9 +511,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(5, receipt["from_version"])
-        self.assertEqual(8, receipt["schema_version"])
+        self.assertEqual(9, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(8, user_version(legacy))
+        self.assertEqual(9, user_version(legacy))
         self.assertLessEqual({"questions", "answers"}, table_names(legacy))
         index = index_sql(legacy, "active_session")
         self.assertIn("'blocked'", index)
@@ -462,9 +554,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(7, receipt["from_version"])
-        self.assertEqual(8, receipt["schema_version"])
+        self.assertEqual(9, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(8, user_version(legacy))
+        self.assertEqual(9, user_version(legacy))
         self.assertIn("target_session_id", columns(legacy, "notices"))
         self.assertIn("wake_kind", columns(legacy, "notices"))
         self.assertEqual(before, counts(legacy))
@@ -499,14 +591,71 @@ class MigrateTest(unittest.TestCase):
         legacy = build_v7(self.root / "center-v7-merge.sqlite3", self.project)
         self.assertTrue(Center(legacy).execute("migrate", {})["ok"])
         center = Center(legacy)
+        # reviewed_sha 传 unverified：v7 库里没有 head_sha 这一列，这条提交是历史提交。
         payload = {"project_id": "p1", "ticket_id": "t1", "commit": "a1b2c3d",
-                   "target_branch": "master", "tests": "269 项全绿"}
+                   "target_branch": "master", "tests": "269 项全绿", "reviewed_sha": "unverified"}
         # t1 有一条 sent：合并门放行（状态还是 running，所以先撞 INVALID_STATE）。
         self.assertEqual("INVALID_STATE", center.execute("merge_ticket", payload, "merge-running")["error"]["code"])
         # t2 已 done 且有两条 failed：failed 也算走过回执，能写合并记录。
         merged = center.execute("merge_ticket", {**payload, "ticket_id": "t2"}, "merge-after-v8")
         self.assertTrue(merged["ok"], merged)
         self.assertEqual("t2", merged["result"]["ticket_id"])
+
+    # --- 8 -> 9：被验收的树与要合的树 ---------------------------------------
+
+    def test_upgrade_from_v8_adds_head_sha_and_reviewed_sha(self):
+        legacy = build_v8(self.root / "center-v8.sqlite3", self.project)
+        before = counts(legacy, TABLES + ("merges",))
+        result = Center(legacy).execute("migrate", {})
+        self.assertTrue(result["ok"], result)
+        receipt = result["result"]
+        self.assertEqual(8, receipt["from_version"])
+        self.assertEqual(9, receipt["schema_version"])
+        self.assertTrue(receipt["migrated"])
+        self.assertEqual(9, user_version(legacy))
+        self.assertIn("head_sha", columns(legacy, "submissions"))
+        self.assertIn("reviewed_sha", columns(legacy, "merges"))
+        # 旧数据一行不丢：两张提交、一条合并记录、一条回执与事件全在。
+        self.assertEqual(before, counts(legacy, TABLES + ("merges",)))
+        conn = sqlite3.connect(legacy)
+        try:
+            self.assertEqual([None, None], [row[0] for row in conn.execute(
+                "SELECT head_sha FROM submissions ORDER BY rowid")])
+            self.assertEqual([None], [row[0] for row in conn.execute(
+                "SELECT reviewed_sha FROM merges ORDER BY rowid")])
+        finally:
+            conn.close()
+        center = Center(legacy)
+        # 升级后能读：旧单的提交与合并记录都读得出来，两个新列是空值而不是空串。
+        delivered = center.execute("get_ticket", {"project_id": "p1", "ticket_id": "t2"})["result"]
+        self.assertEqual("abc1234", delivered["merges"][0]["commit_sha"])
+        self.assertIsNone(delivered["merges"][0]["reviewed_sha"])
+        self.assertIsNone(delivered["submissions"][0]["head_sha"])
+        # 老单合并：必须显式传字面量 unverified，传了就把这句话原样入库。
+        payload = {"project_id": "p1", "ticket_id": "t3", "commit": "def5678",
+                   "target_branch": "master", "tests": "300 项全绿"}
+        self.assertEqual("INVALID_INPUT", center.execute(
+            "merge_ticket", {**payload, "reviewed_sha": "0123456789abcdef0123456789abcdef01234567"},
+            "merge-legacy-bad")["error"]["code"])
+        merged = center.execute("merge_ticket", {**payload, "reviewed_sha": "unverified"},
+                                "merge-legacy-ok")
+        self.assertTrue(merged["ok"], merged)
+        after = center.execute("get_ticket", {"project_id": "p1", "ticket_id": "t3"})["result"]
+        self.assertEqual("unverified", after["merges"][0]["reviewed_sha"])
+
+    def test_v8_header_with_head_sha_is_rejected_untouched(self):
+        legacy = build_v8(self.root / "center-v8-claims-new.sqlite3", self.project)
+        conn = sqlite3.connect(legacy)
+        conn.execute("ALTER TABLE submissions ADD COLUMN head_sha TEXT")
+        conn.commit()
+        conn.close()
+        before = digest(legacy)
+        result = Center(legacy).execute("migrate", {})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
+        # 拒绝时版本号与文件字节都不许变：它还是 v8，不该被顺手升成 9。
+        self.assertEqual(8, user_version(legacy))
+        self.assertEqual(before, digest(legacy))
 
     def test_v7_header_with_new_notice_columns_is_rejected_untouched(self):
         legacy = build_v7(self.root / "center-v7-claims-new.sqlite3", self.project)
@@ -544,9 +693,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(6, receipt["from_version"])
-        self.assertEqual(8, receipt["schema_version"])
+        self.assertEqual(9, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(8, user_version(legacy))
+        self.assertEqual(9, user_version(legacy))
         self.assertIn("coordinator_workdir", columns(legacy, "attempts"))
         self.assertIn("notices", table_names(legacy))
         self.assertIn("status='sent'", index_sql(legacy, "one_sent_notice"))

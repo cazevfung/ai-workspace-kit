@@ -41,12 +41,19 @@ EXAMPLE_NESTED = re.compile(r"X:/示例项目/Documents/[^/\s`\"']+/")
 def _normalize(match: re.Match[str]) -> str:
     return match.group(0).replace("\\", "/")
 
+# 同步带进来的上游业务专名。逐条登记，每发现一处加一条，下次同步才会自动清掉。
+UPSTREAM_TERMS = (
+    ("这份表核的是 1205 版本的结案材料", "这份表核的是一份结案材料"),
+)
+
 
 def redact(text: str) -> str:
     text = HOME_ROOT.sub("X:/示例项目", text)
     text = EXAMPLE_PATH.sub(_normalize, text)
     text = EXAMPLE_NESTED.sub("X:/示例项目/", text)
     text = UUID.sub("<session-id>", text)
+    for raw, clean in UPSTREAM_TERMS:
+        text = text.replace(raw, clean)
     return text
 
 

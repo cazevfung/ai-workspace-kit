@@ -8,6 +8,11 @@ from pathlib import Path
 
 from task_center import Center
 
+# 本文件里每一次提交用的 head sha。真值由 git 给（`git rev-parse HEAD`），
+# 这里只要是一个合法的 40 位十六进制串：用例验的是「记下来、读得回、比得上」，
+# 不是 sha 本身对不对。
+HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+
 
 class CenterTest(unittest.TestCase):
     def setUp(self):
@@ -165,10 +170,10 @@ class CenterTest(unittest.TestCase):
                                           project_root=str(self.project)))
         return claim["attempt_id"]
 
-    def result_payload(self, attempt, session="executor-1"):
+    def result_payload(self, attempt, session="executor-1", head_sha=HEAD_SHA):
         (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
         return self.scope(attempt_id=attempt, session_id=session, artifacts=["result.md"],
-                          summary="清单已完成", evidence=["人工检查条目"], risks=[])
+                          summary="清单已完成", evidence=["人工检查条目"], risks=[], head_sha=head_sha)
 
     def test_claim_requires_coordinator_session_id(self):
         self.ticket()
@@ -237,6 +242,33 @@ class CenterTest(unittest.TestCase):
         self.error("CONFLICT", "bind_session", self.scope(ticket_id="t2", attempt_id=claim["attempt_id"],
                    session_id="executor-1", project_root=str(self.project)))
         self.assertEqual("dispatching", self.ok("get_ticket", self.scope(ticket_id="t2"))["state"])
+
+    def test_submit_requires_a_full_head_sha(self):
+        """C3：没有 40 位十六进制的 head_sha 就交不了成果。
+
+        这条字段存在的理由只有一个：验收与合并之间隔着一次「再提交一次」的机会，
+        库里不记被验收的那棵树，事后就分不出合进去的到底是不是它。所以缺字段、
+        长度不对、不是十六进制，一律 INVALID_INPUT，而不是存一个近似值。
+        """
+        self.ticket()
+        attempt = self.running()
+        payload = self.result_payload(attempt)
+        cases = [None, "", "   ", HEAD_SHA[:39], HEAD_SHA + "0", "Z" * 40, 12345, [HEAD_SHA]]
+        for bad in cases:
+            body = {key: value for key, value in payload.items() if key != "head_sha"}
+            if bad is not None:
+                body["head_sha"] = bad
+            with self.subTest(head_sha=bad):
+                self.error("INVALID_INPUT", "submit_result", body)
+        self.assertEqual("running", self.ok("get_ticket", self.scope())["state"])
+
+    def test_submit_stores_the_head_sha_and_normalizes_case(self):
+        """合法 sha 原样可读回；大写输入的存小写，比对才不用猜大小写。"""
+        self.ticket()
+        attempt = self.running()
+        self.ok("submit_result", self.result_payload(attempt, head_sha=HEAD_SHA.upper()))
+        ticket = self.ok("get_ticket", self.scope())
+        self.assertEqual(HEAD_SHA, ticket["submissions"][0]["head_sha"])
 
     def test_submit_has_receipt_but_not_done(self):
         self.ticket()
@@ -401,7 +433,7 @@ class CenterTest(unittest.TestCase):
     def test_init_reports_current_schema_version(self):
         fresh = self.root / "fresh.sqlite3"
         result = Center(fresh).execute("init", {})
-        self.assertEqual(8, result["result"]["schema_version"])
+        self.assertEqual(9, result["result"]["schema_version"])
 
     def test_current_shape_with_old_version_header_is_rejected(self):
         # v2 shape but user_version=1: only the version gate can reject this.

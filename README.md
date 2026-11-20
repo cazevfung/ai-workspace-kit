@@ -107,6 +107,8 @@ graph LR
 | `doc_gate.py` | 计划没读 PRD、没写依据、缺节、完成证据不可判定 | 写在任务块里之前 |
 | `close_gate.py` | 收尾包缺节、状态位没改、说有在途单其实没有 | 说「这一轮结束」之前 |
 | `intake_gate.py` | 交给别人的长线任务，交接包缺节就想往下传 | 交接时 |
+| `claims_gate.py` | 文档里写的数与源数据对不上：计数、合计、比例、摘要、字节数、行号锚点、清单条数 | 写结案材料与验收证据时 |
+| `ref_gate.py` | 引用指向不存在的文件、行号或标题 | 文档之间互相引用时 |
 | `run_tests.py` | 改完之后测试不全绿 | 提交前、合并前 |
 | `auto_merge.py` | 想手工合并、想跳过测试合、想在有冲突时硬合 | 合并时 |
 
@@ -192,7 +194,7 @@ python tools/run_tests.py            # 应全绿
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；`v0.2.1` 装出来是 381 项。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；`v0.3.0` 装出来是 453 项。
 
 ---
 
@@ -213,7 +215,7 @@ ai-workspace/
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`（用户级），所以在**任何项目**里都能被 agent 读到。装完数一下 `~/.agents/skills` 下的目录就知道当前有几个，`v0.2.1` 是 25 个：
+技能同时装在 `~/.agents/skills`（用户级），所以在**任何项目**里都能被 agent 读到。装完数一下 `~/.agents/skills` 下的目录就知道当前有几个，`v0.3.0` 是 25 个：
 
 - **工作区技能（5）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`
 - **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
@@ -257,7 +259,7 @@ python uninstall.py --skills                            # 只从 ~/.agents/skill
 ```bash
 python maintainer/sync_from_origin.py        # 1. 从上游同步，并把绝对路径换成 {{WORKSPACE}}
 python maintainer/redact_for_public.py       # 2. 清掉同步带进来的用户名与会话 id
-python verify/verify_install.py              # 3. 临时目录里真装一遍，13 项全过再发版
+python verify/verify_install.py              # 3. 临时目录里真装一遍，14 项全过再发版
 ```
 
 第 2 步不能省：`kit/tests/fixtures` 是有意**原样复制**的（夹具里的绝对路径是判据的一部分），所以同步会把真实用户名和会话 id 一起带进来。`redact_for_public.py --check` 可以单独做发布前检查。

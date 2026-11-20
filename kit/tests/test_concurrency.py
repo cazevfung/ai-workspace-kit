@@ -90,6 +90,7 @@ class DualProjectConcurrencyTest(unittest.TestCase):
                     "project_id": pid, "ticket_id": tid, "attempt_id": claim["attempt_id"],
                     "session_id": session, "artifacts": ["result.md"],
                     "summary": f"{tid} 的清单", "evidence": ["按 PRD 逐条核对"], "risks": [],
+                    "head_sha": "0123456789abcdef0123456789abcdef01234567",
                 })
             except BaseException as exc:  # noqa: BLE001 - 收集到主线程再断言，避免线程里静默失败
                 errors.append(exc)

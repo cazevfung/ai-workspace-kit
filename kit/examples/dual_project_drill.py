@@ -48,7 +48,8 @@ def main():
             run(center, "submit_result", {"project_id": pid, "ticket_id": f"{pid}-t1",
                                           "attempt_id": claim["attempt_id"], "session_id": session,
                                           "artifacts": ["result.md"], "summary": f"{pid} 的清单",
-                                          "evidence": ["按 PRD 逐条核对"], "risks": []})
+                                          "evidence": ["按 PRD 逐条核对"], "risks": [],
+                                          "head_sha": "0000000000000000000000000000000000000000"})
 
         threads = [threading.Thread(target=work, args=(pid,)) for pid in projects]
         for thread in threads:

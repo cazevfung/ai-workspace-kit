@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "note": "反例：只错一处。锚点指向 report.md 根本没有的第 999 行。",
+  "claims": [
+    {
+      "id": "B-A1",
+      "kind": "anchor",
+      "file": "report.md",
+      "line": 999,
+      "contains": "比例 0.75",
+      "source": "反例：行号故意超出文件长度，用来证明「指向不存在的行」会被点到"
+    }
+  ]
+}

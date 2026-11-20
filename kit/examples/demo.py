@@ -41,7 +41,8 @@ def main():
             if cycle == 2:
                 (project / "result.md").write_text("1. 检查输入\n2. 检查输出", encoding="utf-8")
             sid = call("submit_result", **scope, attempt_id=aid, session_id=session, summary="模拟执行提交",
-                       artifacts=["result.md"], evidence=["演示数据，不代表真实会话执行"], risks=[])["submission_id"]
+                       artifacts=["result.md"], evidence=["演示数据，不代表真实会话执行"], risks=[],
+                       head_sha="0000000000000000000000000000000000000000")["submission_id"]
             passed = len((project / "result.md").read_text(encoding="utf-8").splitlines()) >= 2
             call("review_result", **scope, attempt_id=aid, submission_id=sid,
                  reviewer_session_id="SIMULATED-reviewer", verdict="accept" if passed else "reject",

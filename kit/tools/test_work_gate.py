@@ -106,7 +106,8 @@ class WorkGateTest(unittest.TestCase):
         (self.project / "out.md").write_text("成果", encoding="utf-8")
         self.ok("submit_result", {"project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
                                   "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
-                                  "evidence": ["核对"], "risks": []})
+                                  "evidence": ["核对"], "risks": [],
+                                  "head_sha": "0123456789abcdef0123456789abcdef01234567"})
         ok, payload = self.check("repo-1")
         self.assertFalse(ok, payload)
         self.assertIn("recover_ticket", payload["fix"])
@@ -325,6 +326,7 @@ class MergeCommitGateTest(unittest.TestCase):
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
             "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
             "evidence": ["核对"], "risks": [],
+            "head_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
@@ -396,7 +398,8 @@ class MergeCommitGateTest(unittest.TestCase):
         """已经记过合并的工单不该出现第二次合并提交。"""
         self.done()
         self.ok("merge_ticket", {"project_id": "repo", "ticket_id": "repo-1",
-                                 "commit": "a" * 40, "target_branch": "master", "tests": "OK"})
+                                 "commit": "a" * 40, "target_branch": "master", "tests": "OK",
+                                 "reviewed_sha": "0123456789abcdef0123456789abcdef01234567"})
         self.start_conflicted_merge()
         code, out, err = self.gate()
         self.assertEqual(1, code, out + err)
@@ -760,6 +763,7 @@ class UnclosedRoundListTest(unittest.TestCase):
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
             "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
             "evidence": ["核对"], "risks": [],
+            "head_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
@@ -774,7 +778,8 @@ class UnclosedRoundListTest(unittest.TestCase):
             "target_session_id": "coordinator-repo", "wake_kind": "queued",
         })
         self.ok("merge_ticket", {"project_id": "repo", "ticket_id": "repo-1",
-                                 "commit": "a" * 40, "target_branch": "master", "tests": "OK"})
+                                 "commit": "a" * 40, "target_branch": "master", "tests": "OK",
+                                 "reviewed_sha": "0123456789abcdef0123456789abcdef01234567"})
 
     def list_command(self):
         return self.run_main(["--list", "--db", str(self.db), "--repo", str(self.project)])

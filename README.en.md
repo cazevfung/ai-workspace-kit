@@ -107,6 +107,8 @@ Rules in a document go unread, so the real constraints sit in exit codes. These 
 | `doc_gate.py` | A plan with no PRD basis, missing sections, or completion evidence a machine cannot judge | Before the work starts |
 | `close_gate.py` | A closing packet with missing sections, an unchanged status line, or claimed in-flight work that does not exist | Before saying the round is over |
 | `intake_gate.py` | A handoff packet with missing sections, about to be passed on | At handoff time |
+| `claims_gate.py` | Numbers a document states that do not match their source: counts, sums, ratios, digests, sizes, line anchors, list lengths | When writing closing material or acceptance evidence |
+| `ref_gate.py` | Citations pointing at a file, line or heading that does not exist | When one document cites another |
 | `run_tests.py` | A change that leaves the test suite red | Before committing and merging |
 | `auto_merge.py` | Manual merging, merging without tests, forcing a merge with conflicts | At merge time |
 
@@ -192,7 +194,7 @@ python tools/run_tests.py            # should be green end to end
 python tools/doc_gate.py --all       # should exit 0
 ```
 
-The number of tests is whatever `run_tests.py` reports in its summary line, and it changes between tags. `v0.2.1` installs 381 of them.
+The number of tests is whatever `run_tests.py` reports in its summary line, and it changes between tags. `v0.3.0` installs 453 of them.
 
 ---
 
@@ -213,7 +215,7 @@ ai-workspace/
 └── .githooks/             # commit hooks
 ```
 
-The skills are also installed to `~/.agents/skills`, so an agent can read them in **any** project. Count the directories there to see how many you have; `v0.2.1` installs 25.
+The skills are also installed to `~/.agents/skills`, so an agent can read them in **any** project. Count the directories there to see how many you have; `v0.3.0` installs 25.
 
 - **Workspace skills (5):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`
 - **General skills (20):** `brainstorming`, `writing-plans`, `executing-plans`, `test-driven-development`,

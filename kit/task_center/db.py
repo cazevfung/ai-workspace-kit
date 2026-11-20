@@ -44,7 +44,7 @@ CREATE UNIQUE INDEX active_session ON attempts(session_id)
 CREATE TABLE submissions(
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
  summary TEXT NOT NULL, artifacts TEXT NOT NULL, evidence TEXT NOT NULL, risks TEXT NOT NULL,
- created_at TEXT NOT NULL);
+ created_at TEXT NOT NULL, head_sha TEXT);
 CREATE TABLE reviews(
  id TEXT PRIMARY KEY, submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(id),
  reviewer_session_id TEXT NOT NULL, verdict TEXT NOT NULL, checks TEXT NOT NULL,
@@ -54,7 +54,8 @@ CREATE TABLE events(
  operation TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE merges(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
- commit_sha TEXT NOT NULL, target_branch TEXT NOT NULL, tests TEXT NOT NULL, created_at TEXT NOT NULL);
+ commit_sha TEXT NOT NULL, target_branch TEXT NOT NULL, tests TEXT NOT NULL, created_at TEXT NOT NULL,
+ reviewed_sha TEXT);
 CREATE TABLE questions(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
  attempt_id TEXT NOT NULL REFERENCES attempts(id),
@@ -95,14 +96,20 @@ REQUIRED_TABLES = {"projects", "tickets", "attempts", "submissions", "reviews", 
 # Version 8 adds notices.target_session_id and notices.wake_kind so "who it was sent to" and
 # "how the host treated it" are recorded too; a wake_kind of created means the host started a
 # new task instead of delivering, which is recorded as a failed notice (PRD-009 R5, AW-060).
-# Only the 3 -> 4 -> 5 -> 6 -> 7 -> 8 upgrades have known paths; everything else is rejected loudly.
-SCHEMA_VERSION = 8
+# Version 9 adds submissions.head_sha and merges.reviewed_sha so "which tree was accepted" and
+# "which tree is being merged" are two recorded values that can be compared (R-009 goal 2).
+# Both columns are nullable on purpose: rows written before this version have no sha, and
+# inventing one would turn a guess into a fact. `merge_ticket` therefore requires the literal
+# `unverified` for such a ticket instead of letting it through silently.
+# Only the 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 upgrades have known paths; everything else is rejected loudly.
+SCHEMA_VERSION = 9
 
 REQUIRED_COLUMNS = {
     "tickets": {"id", "project_id", "title", "deliverable", "prd_path", "prd_sha256", "criteria", "revision", "state", "current_attempt"},
     "attempts": {"id", "ticket_id", "revision", "prd_path", "prd_sha256", "state", "session_id", "coordinator_session_id",
                  "coordinator_workdir", "created_at"},
-    "merges": {"id", "ticket_id", "commit_sha", "target_branch", "tests", "created_at"},
+    "submissions": {"id", "attempt_id", "summary", "artifacts", "evidence", "risks", "created_at", "head_sha"},
+    "merges": {"id", "ticket_id", "commit_sha", "target_branch", "tests", "created_at", "reviewed_sha"},
     "questions": {"id", "ticket_id", "attempt_id", "question", "options", "state", "asked_at"},
     "answers": {"id", "question_id", "answer", "answered_by", "answered_by_session_id", "created_at"},
     "notices": {"id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail", "created_at",
@@ -125,9 +132,9 @@ V4_REQUIRED_COLUMNS = {
     "attempts": REQUIRED_COLUMNS["attempts"] - {"coordinator_workdir"},
 }
 
-# v5 有 merges，还没有 questions/answers，active_session 谓词不含 blocked。
+# v5 有 merges（但还没有 reviewed_sha），还没有 questions/answers，active_session 谓词不含 blocked。
 V5_REQUIRED_TABLES = V3_REQUIRED_TABLES | {"merges"}
-V5_REQUIRED_COLUMNS = {**V4_REQUIRED_COLUMNS, "merges": REQUIRED_COLUMNS["merges"]}
+V5_REQUIRED_COLUMNS = {**V4_REQUIRED_COLUMNS, "merges": REQUIRED_COLUMNS["merges"] - {"reviewed_sha"}}
 
 # v6 有 questions/answers、还没有 notices 与 coordinator_workdir。
 V6_REQUIRED_TABLES = V5_REQUIRED_TABLES | {"questions", "answers"}
@@ -137,6 +144,10 @@ V6_REQUIRED_COLUMNS = {**V5_REQUIRED_COLUMNS, "questions": REQUIRED_COLUMNS["que
 # v7 有 notices 与 coordinator_workdir，notices 还没有 target_session_id / wake_kind 两列。
 V7_REQUIRED_TABLES = V6_REQUIRED_TABLES | {"notices"}
 V7_REQUIRED_COLUMNS = {**V6_REQUIRED_COLUMNS, "notices": REQUIRED_COLUMNS["notices"] - {"target_session_id", "wake_kind"}}
+
+# v8 有 notices 的两列，还没有 submissions.head_sha 与 merges.reviewed_sha。
+V8_REQUIRED_TABLES = V7_REQUIRED_TABLES
+V8_REQUIRED_COLUMNS = {**V7_REQUIRED_COLUMNS, "submissions": REQUIRED_COLUMNS["submissions"] - {"head_sha"}}
 
 
 def column_names(conn, table):
@@ -220,6 +231,18 @@ MIGRATIONS = {
         "already_applied": lambda conn: ("target_session_id" in column_names(conn, "notices")
                                          or "wake_kind" in column_names(conn, "notices")),
         "already_applied_message": "Database claims version 7 but already has the newer notices columns; inspect it, do not migrate",
+    },
+    8: {
+        "tables": V8_REQUIRED_TABLES,
+        "columns": V8_REQUIRED_COLUMNS,
+        "statements": [
+            # 存量行留 NULL=「那时没有这一项」：补一个猜测值会变成推定事实。
+            "ALTER TABLE submissions ADD COLUMN head_sha TEXT",
+            "ALTER TABLE merges ADD COLUMN reviewed_sha TEXT",
+        ],
+        "already_applied": lambda conn: ("head_sha" in column_names(conn, "submissions")
+                                         or "reviewed_sha" in column_names(conn, "merges")),
+        "already_applied_message": "Database claims version 8 but already has submissions.head_sha or merges.reviewed_sha; inspect it, do not migrate",
     },
 }
 

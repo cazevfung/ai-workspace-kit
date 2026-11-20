@@ -134,6 +134,16 @@ class RepoFixture(unittest.TestCase):
             "notices": [{"status": "sent", "detail": "已把回执发回原会话"}],
         }
         self.records = []
+        # 「被验收的那棵树」的 sha：默认跟着分支 tip 走（正常路径），用例可以改成某个固定
+        # 值造「验收后又提交」的现场，或改成 None 造 schema 9 之前的老提交。
+        self.reviewed_head = "tip"
+
+    def ticket(self):
+        """工单视图，等价于 `get_ticket`：提交数组里带 `head_sha`，最新一条在最后。"""
+        head = self.reviewed_head
+        if head == "tip":
+            head = self.branch_tip() or None
+        return {**self.ticket_info, "submissions": [{"head_sha": head}]}
 
     # --- 临时仓库的小工具 -------------------------------------------------
 
@@ -160,6 +170,15 @@ class RepoFixture(unittest.TestCase):
 
     def head(self, ref="HEAD"):
         return self.git("rev-parse", ref).stdout.strip()
+
+    def branch_tip(self):
+        """源分支 tip；分支还不存在时返回空串（合并流程自己会在第 2 步拒绝）。"""
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{self.BRANCH}"],
+            cwd=str(self.repo), capture_output=True, text=True,
+            env={**os.environ, **self.env},
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
 
     def tag_sha(self):
         proc = subprocess.run(
@@ -195,7 +214,7 @@ class RepoFixture(unittest.TestCase):
                 self.TICKET,
                 branch=self.BRANCH,
                 target="master",
-                ticket_reader=lambda ticket_id: self.ticket_info,
+                ticket_reader=lambda ticket_id: self.ticket(),
                 merge_recorder=self.record,
                 out=chunks.append,
                 env=self.env,
@@ -348,8 +367,67 @@ class TempRepoCase(RepoFixture):
         self.assertEqual(1, len(self.records))
         self.assertEqual(after, self.records[0]["commit"])
         self.assertEqual("master", self.records[0]["target_branch"])
-        self.assertIn("OK", self.records[0]["tests"], "测试结论应取汇总行")
+        self.assertIn("OK", self.records[0]["tests"], "测试结论取汇总行")
+        # 合并记录里要写下「被验收的那棵树」：登记时传的就是分支 tip。
+        self.assertEqual(self.head(f"refs/heads/{self.BRANCH}"), self.records[0]["reviewed_sha"])
         self.assertEqual(1, self.worktree_count())
+
+    # 被验收的树与要合的树 ------------------------------------------------
+
+    def test_tip_moved_after_review_is_refused_before_any_write(self):
+        """C5：验收之后又提交一次，合并必须一步不动地失败，并打出两个 sha。
+
+        这就是这张单存在的缝：以前 `merges` 只记「合到了哪个提交」，不记「验收的是哪棵树」，
+        于是验收后又提交一次也照样合得进去，而库里查不出来。断言的是四样没动：
+        master、回退点 tag、临时工作树、合并记录。
+        """
+        self.branch_work({"feature.txt": "feature\n"})
+        reviewed = self.head(f"refs/heads/{self.BRANCH}")
+        self.reviewed_head = reviewed
+        self.branch_work({"feature2.txt": "after the review\n"}, message="提交发生在验收之后")
+        tip = self.head(f"refs/heads/{self.BRANCH}")
+        self.assertNotEqual(reviewed, tip)
+        master_before = self.head()
+        code, out = self.run_merge()
+        self.assertEqual(1, code, out)
+        self.assertIn("第 2 步", out)
+        self.assertIn(f"被验收的 {reviewed}", out)
+        self.assertIn(f"现在要合的 {tip}", out)
+        self.assertEqual(master_before, self.head(), "master 一指头都不许动")
+        self.assertIsNone(self.tag_sha(), "这一步不该打回退点")
+        self.assertEqual([], self.records, "不许写合并记录")
+        self.assertEqual(1, self.worktree_count(), "连临时工作树都不该建")
+        # 回退到被验收的那个提交就能合：判的是两棵树是否相同，不是「有没有人再提交过」。
+        self.git("checkout", "-B", self.BRANCH, reviewed)
+        self.git("checkout", "master")
+        code, out = self.run_merge()
+        self.assertEqual(0, code, out)
+        self.assertEqual(reviewed, self.records[0]["reviewed_sha"])
+
+    def test_legacy_submission_without_a_sha_merges_as_unverified(self):
+        """老提交（head_sha 为 NULL）不静默放行，也不全堵死：按 unverified 落库。"""
+        self.branch_work({"feature.txt": "feature\n"})
+        self.reviewed_head = None
+        code, out = self.run_merge()
+        self.assertEqual(0, code, out)
+        self.assertIn("没有记录 head sha", out)
+        self.assertEqual("unverified", self.records[0]["reviewed_sha"])
+
+    def test_record_only_also_compares_the_merged_tree(self):
+        """--record-only 比的是那次合并合进来的那一支：不等同样拒绝，不写记录。"""
+        self.branch_work({"feature.txt": "feature\n"})
+        self.git("merge", "--no-ff", self.BRANCH, "-m", "merge")
+        merged_tip = self.head(f"refs/heads/{self.BRANCH}")
+        self.reviewed_head = "0" * 40
+        code, out = self.run_merge(record_only=True)
+        self.assertEqual(1, code, out)
+        self.assertIn("被验收的", out)
+        self.assertEqual([], self.records)
+        # 改成真实 tip 就能收口，写下的 reviewed_sha 就是那一支。
+        self.reviewed_head = merged_tip
+        code, out = self.run_merge(record_only=True)
+        self.assertEqual(0, code, out)
+        self.assertEqual(merged_tip, self.records[0]["reviewed_sha"])
 
     def test_dry_run_does_not_touch_target(self):
         """dry-run 跑到预演就停：master 不动、不打 tag、不写记录。"""
@@ -680,7 +758,7 @@ class SharedLockScopeTest(RepoFixture):
                 branch=self.BRANCH,
                 target="master",
                 dry_run=True,
-                ticket_reader=lambda ticket_id: self.ticket_info,
+                ticket_reader=lambda ticket_id: self.ticket(),
                 merge_recorder=self.record,
                 out=chunks.append,
                 env=self.env,
@@ -779,7 +857,7 @@ class EnvironmentFailureTest(RepoFixture):
                 branch=self.BRANCH,
                 target="master",
                 dry_run=True,
-                ticket_reader=lambda ticket_id: self.ticket_info,
+                ticket_reader=lambda ticket_id: self.ticket(),
                 merge_recorder=self.record,
                 out=chunks.append,
                 env=env,

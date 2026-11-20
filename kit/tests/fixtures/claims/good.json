@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "note": "正例：四类断言全部与源数据对上。每条的 source 写明期望值从句命令/哪个数抄来。",
+  "claims": [
+    {
+      "id": "C1",
+      "kind": "count",
+      "file": "report.md",
+      "line": 20,
+      "pattern": "^- 组",
+      "regex": true,
+      "expect": 3,
+      "source": "数 report.md 里 `grep -c '^- 组' report.md` 的输出"
+    },
+    {
+      "id": "C2",
+      "kind": "sum",
+      "file": "report.md",
+      "line": 20,
+      "pattern": "^- 组.：(\\d+) 份$",
+      "expect": 10,
+      "source": "把 report.md 三行的份数 3+5+2 相加，与第 20 行写的合计 10 比"
+    },
+    {
+      "id": "C3",
+      "kind": "ratio",
+      "file": "report.md",
+      "line": 20,
+      "numerator": "^- \\[x\\] ",
+      "denominator": "^- \\[.\\] ",
+      "digits": 2,
+      "expect": 0.75,
+      "source": "已勾 3 条 / 共 4 条 = 0.75，期望值由除出来，不是抄写"
+    },
+    {
+      "id": "C4",
+      "kind": "anchor",
+      "file": "report.md",
+      "line": 20,
+      "contains": "比例 0.75",
+      "source": "锚点本身就是源数据：第 20 行是否含这句话由文件决定"
+    },
+    {
+      "id": "C5",
+      "kind": "list",
+      "file": "report.md",
+      "line": 20,
+      "section": "二、清单",
+      "expect": 4,
+      "source": "数 `二、清单` 节下以 `- ` 开头的行，`sed -n '12,17p' report.md | grep -c '^- '`"
+    },
+    {
+      "id": "C6",
+      "kind": "sha256",
+      "file": "export.bin",
+      "expect": "5d00a3f0f33169f8064fefa1af8c670cc0b611d93bb1fcac5287ef162fa6532f",
+      "source": "对 export.bin 跑 sha256sum 的输出，不是手写的十六进制"
+    },
+    {
+      "id": "C7",
+      "kind": "size",
+      "file": "export.bin",
+      "expect": 76,
+      "source": "对 export.bin 跑 wc -c 的输出"
+    }
+  ]
+}

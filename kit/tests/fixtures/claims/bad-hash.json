@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "note": "反例：只错一处。登记的摘要不是 report.md 的摘要（它是空输入的摘要）。",
+  "claims": [
+    {
+      "id": "B-H1",
+      "kind": "sha256",
+      "file": "report.md",
+      "expect": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source": "反例：`printf '' | sha256sum` 的输出，故意登记到 report.md 上"
+    }
+  ]
+}

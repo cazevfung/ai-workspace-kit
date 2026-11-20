@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "note": "反例：只错一处。清单实际 4 条，摘要记成 5 条。",
+  "claims": [
+    {
+      "id": "B-L1",
+      "kind": "list",
+      "file": "report.md",
+      "line": 20,
+      "section": "二、清单",
+      "expect": 5,
+      "source": "反例：故意与 `二、清单` 节的实际条目数不符"
+    }
+  ]
+}

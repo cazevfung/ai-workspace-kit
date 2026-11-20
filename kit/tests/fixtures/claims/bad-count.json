@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "note": "反例：只错一处。文档只说 3 个分组，摘要把它记成 4。",
+  "claims": [
+    {
+      "id": "B-C1",
+      "kind": "count",
+      "file": "report.md",
+      "line": 20,
+      "pattern": "^- 组",
+      "regex": true,
+      "expect": 4,
+      "source": "反例：故意与 report.md 的实际行数不符，用来证明抓得住错数"
+    }
+  ]
+}

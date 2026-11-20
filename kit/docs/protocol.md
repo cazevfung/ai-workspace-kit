@@ -55,8 +55,8 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 
 | 操作 | 输入字段 | 结果与边界 |
 | --- | --- | --- |
-| init | 空对象 | 显式建库并写入当前 schema 版本（8）；已有同版本数据库不重复建表，旧版本和其他库拒绝 |
-| migrate | 空对象 | 只做已知升级链（3 → 4：attempts 加 coordinator_session_id；4 → 5：新建 merges 表；5 → 6：新建 questions / answers 两张表，并按「blocked 也算活跃尝试」重建 active_session 索引；6 → 7：attempts 加 coordinator_workdir 列、新建 notices 表与一张单一条 sent 的部分唯一索引；7 → 8：notices 加 target_session_id 与 wake_kind 两列，存量行留空串表示「历史未记」）；保留全部工单、尝试、提交、验收、事件与既有回信记录；已是 8 返回「已是最新」且不改任何行；其他版本号或不是本工具的库报 SCHEMA_MISMATCH 且不改文件；旧版本头配新形状（例如 user_version=5 却已有 questions 表、user_version=6 却已有 notices 表、user_version=7 却已有 target_session_id 或 wake_kind）同样拒绝；不自动建库。升级前的快照只能在文件层做（backup 操作对旧库会报错），顺序见「升级旧库的顺序」与「改 schema 的落地顺序」 |
+| init | 空对象 | 显式建库并写入当前 schema 版本（9）；已有同版本数据库不重复建表，旧版本和其他库拒绝 |
+| migrate | 空对象 | 只做已知升级链（3 → 4：attempts 加 coordinator_session_id；4 → 5：新建 merges 表；5 → 6：新建 questions / answers 两张表，并按「blocked 也算活跃尝试」重建 active_session 索引；6 → 7：attempts 加 coordinator_workdir 列、新建 notices 表与一张单一条 sent 的部分唯一索引；7 → 8：notices 加 target_session_id 与 wake_kind 两列，存量行留空串表示「历史未记」；8 → 9：submissions 加 head_sha、merges 加 reviewed_sha，存量行留 NULL 表示「那时没有这一项」——老提交没有可核对的 sha，补一个猜测值就把推定写成了事实）；保留全部工单、尝试、提交、验收、事件与既有回信记录；已是 9 返回「已是最新」且不改任何行；其他版本号或不是本工具的库报 SCHEMA_MISMATCH 且不改文件；旧版本头配新形状（例如 user_version=5 却已有 questions 表、user_version=6 却已有 notices 表、user_version=7 却已有 target_session_id 或 wake_kind、user_version=8 却已有 head_sha 或 reviewed_sha）同样拒绝；不自动建库。升级前的快照只能在文件层做（backup 操作对旧库会报错），顺序见「升级旧库的顺序」与「改 schema 的落地顺序」 |
 | register_project | project_id, name, root | root 是已存在的绝对项目目录；root 是身份、project_id 是标签，同一路径重复登记复用原记录（回执返回原 project_id 与 name，`reused: true`），不报 CONFLICT、也不改已有标签；把自己的 project_id 指向第二个目录报 CONFLICT |
 | list_projects | 空对象 | 只读，列出 project_id / name / root；没有它时项目清单只能读库或靠工单反推 |
 | unregister_project | project_id | 撤销错误登记；项目下仍有工单时拒绝（PROJECT_HAS_TICKETS），回执里列出这些工单；撤销后同一路径可重新登记 |
@@ -65,15 +65,15 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | list_tickets | project_id 可选, limit 可选, offset 可选 | 默认 50 条，最多 100；按项目过滤 |
 | claim_ticket | project_id, ticket_id, expected_revision, coordinator_session_id, coordinator_workdir 可选, allow_parallel 可选 | 原子领取 ready/rework 工单，生成 attempt_id，状态 dispatching；coordinator_session_id 是派发它的协调会话，1–500 字符；coordinator_workdir 是协调者自己的工作目录（1–1000 字符），不传就是空，不阻止派发；**同项目已有在途工单时报 DISPATCH_BUSY，消息里点名那张单号与它停在哪一步**（在途 = dispatching / running / awaiting_review / blocked，见「同项目一次只跑一张单」）；`allow_parallel` 只收布尔且默认 false，显式传 true 才越过，越过往 events 写一条 `allow_parallel_override` 并在回执里回显 `parallel_with`；回执含 coordinator_session_id、coordinator_workdir、allow_parallel 与 parallel_with |
 | bind_session | project_id, ticket_id, attempt_id, session_id, project_root | 将预留尝试绑定到会话标识；状态 running；session_id 与 claim 时的 coordinator_session_id 相同则报 SELF_DISPATCH，工单停在 dispatching；回执含 session_id 与 coordinator_session_id；不代表已验证宿主身份 |
-| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks | 保存 submission_id、成果摘要和自检证据；状态 awaiting_review |
+| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks, head_sha | 保存 submission_id、成果摘要、自检证据与这次提交的分支 head sha；状态 awaiting_review。`head_sha` 必填，收 40 位十六进制（大小写都收，存小写），缺字段、长度不对或含非十六进制字符报 INVALID_INPUT；它记的是「被验收的那棵树」，合并时 `merge_ticket` 拿它与最新提交比 |
 | review_result | project_id, ticket_id, attempt_id, submission_id, reviewer_session_id, verdict, checks, reason | 只接受这八个顶层字段，多传即拒（见「验收 payload 是一张闭集」）；accept→done；reject→rework。验收者不能是该工单任一历史执行会话 |
 | recover_ticket | project_id, ticket_id, attempt_id, expected_revision, reason | 只恢复 dispatching/running/awaiting_review/blocked；attempt_id 必须是当前尝试，旧编号返回 STALE_ATTEMPT；回执含 superseded_attempt_id、discarded_submission_id 与 voided_question_ids；旧尝试失效，它的开放问题转 voided，revision+1，回到 ready |
 | revise_ticket | project_id, ticket_id, expected_revision, reason, prd_path, criteria, deliverable 可选, reopen 可选 | 明确更新需求摘要和验收项，旧尝试失效，revision+1；deliverable 不传则保留原值；对已完成工单必须传 reopen=true；回执含 previous_state、prd_path 与 deliverable；已取消工单不能重开 |
 | cancel_ticket | project_id, ticket_id, expected_revision, reason | 取消未终结工单，旧尝试失效，revision+1；不停止真实会话 |
-| merge_ticket | project_id, ticket_id, commit, target_branch, tests | 给已验收（done）工单写一条合并记录：合并提交、目标分支、合并前跑过的测试结论；不是 done 报 INVALID_STATE；该单 `notices` 为空报 NO_NOTICE（要么补记一条 `sent`、要么记一条 `failed` 并写清原因，`failed` 也算走过回执）；已有合并记录报 ALREADY_MERGED（这一条先判，行为不变）；回执含 ticket_id、commit、target_branch、tests 与 merge_id |
+| merge_ticket | project_id, ticket_id, commit, target_branch, tests, reviewed_sha | 给已验收（done）工单写一条合并记录：合并提交、目标分支、合并前跑过的测试结论、被验收的那棵树；不是 done 报 INVALID_STATE；该单 `notices` 为空报 NO_NOTICE（要么补记一条 `sent`、要么记一条 `failed` 并写清原因，`failed` 也算走过回执）；已有合并记录报 ALREADY_MERGED（这一条先判，行为不变）。`reviewed_sha` 必填：与该工单最新一条提交的 `head_sha` 相等就放行并写入该值，不等报 `SHA_MISMATCH` 且一行不写；最新提交的 `head_sha` 为 NULL（schema 8 以前的老提交）时必须传字面量 `unverified`，否则报 INVALID_INPUT，传了就把 `unverified` 原样入库；有 `head_sha` 的单传 `unverified` 同样报 INVALID_INPUT。回执含 ticket_id、commit、target_branch、tests、reviewed_sha 与 merge_id |
 | list_unmerged | project_id 可选 | 只读，列出 state=done 但没有合并记录的工单（id / project_id / title / state / revision / created_at，带 has_merge=false）；历史工单直接在 master 上做、没有 merges 行，会照样列出——清单让人看见并判断，不替人隐去 |
 | events | project_id, ticket_id, limit 可选, offset 可选 | 按顺序返回状态事件和原请求回执关联 |
-| backup | destination | 在现有目录内创建新的绝对路径快照，不覆盖文件，不记录业务状态变化；只接受当前 schema（7）的库，旧库返回 SCHEMA_MISMATCH 且不落任何文件 |
+| backup | destination | 在现有目录内创建新的绝对路径快照，不覆盖文件，不记录业务状态变化；只接受当前 schema（9）的库，旧库返回 SCHEMA_MISMATCH 且不落任何文件 |
 | ask_ticket | project_id, ticket_id, attempt_id, session_id, question, options 可选 | 就当前尝试提一个可回答的问题，工单进「在等答案」：question 1–2000 字符；options 为 0–6 项 `{"id","text"}`（id ≤20 且不重复、text ≤200），不传或空数组表示开放题；工单与尝试同时进 blocked，revision 不变；回执含 question_id、state、asked_at。工单不在 running 报 INVALID_STATE，attempt_id 不是当前尝试报 STALE_ATTEMPT，session_id 不是该尝试绑定的那个报 SESSION_MISMATCH；一条尝试同时只能有一条开放问题 |
 | answer_ticket | project_id, ticket_id, question_id, answer, answered_by, answered_by_session_id 条件必填, prd_sha256 | 把人的结论写进库：answer 1–4000 字符；answered_by 只能为 human / coordinator，coordinator 必须带 answered_by_session_id、human 不许带；prd_sha256 原样抄 get_ticket 的当前值；问题 open → answered、尝试与工单回 running，revision 不变；回执含 answer_id、question_state、ticket_state。工单回到 running 只表示库里不再等答案，不代表那个会话已经在跑（见「`blocked`：工单在等一句话」） |
 | record_notice | project_id, ticket_id, attempt_id, session_id, origin_session_id, status, detail, target_session_id, wake_kind | 记一次回信尝试（本操作只落库，不发消息）：status 只收 `sent` / `failed`，其他值报 INVALID_INPUT；session_id 必须等于该尝试 claim 时写下的 coordinator_session_id，否则 NOT_COORDINATOR 且不写行；target_session_id 必填且也必须等于那条协调会话，写成执行会话或别的会话报 NOT_TARGET 且不写行；wake_kind 是宿主回执里的原值，不按白名单收：只有 `created`（宿主把它当成新建任务而非投递）**特判**——一律落 `failed`、回执带 `alert: NOTIFY_CREATED_TASK` 并让这次调用**非零退出**（那一行仍然入库，事后查得到）；`queued` / `resumed` 与枚举外的取值（例如 `already-active`）一律原样入库，调用方不得自行映射成近似的三值之一（见「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」）；只校验形状——空串、纯空白、超过 40 字、含内部空白或换行报 INVALID_INPUT 且不写行；同一张单最多一条 `sent`，第二次报 ALREADY_NOTIFIED 且不写行；`failed` 可以多条，措辞在 detail 里，回执带 `alert: NOTIFY_FAILED` 但不改工单状态；回执含 notice_id、ticket_id、attempt_id、origin_session_id、status、detail、target_session_id、wake_kind、ticket_state 与 revision |
@@ -171,7 +171,7 @@ session_id 按原样精确比较，大小写不同即视为不同会话（`EXEC3
 1. 协调会话先调用 claim_ticket，传入自己的会话标识作为 coordinator_session_id，记录 attempt_id。
 2. **派发是另一个会话**：协调会话不得自己执行这张工单。默认载体是项目普通会话——`send_to_session` 不传 `target_session_id` 并指定 `project_path`（见下节「派发的载体」）；宿主确实没有新建项目会话的能力时才用一次性独立上下文子任务并标注；两者都没有就停下来告诉人，不要自己动手。适配器负责检查项目与会话回执。
 3. 被派发的会话调用 bind_session 保存绑定——它的 session_id 不能等于 claim 时的 coordinator_session_id。真实执行者必须等绑定完成，才能提交；先完成了成果也应保留本地记录并稍后提交，而不是再次创建工单。
-4. 执行者保存业务项目中的成果，再调用 submit_result。
+4. 执行者保存业务项目中的成果，再调用 submit_result——`head_sha` 填 `git rev-parse HEAD` 的输出（40 位十六进制），它是这次被验收的那棵树。同一张单验收后再提交一次会刷新这个值，所以合并比的是最新一条。
 5. 收到回执后通知协调方，**只发一条**：正文写清工单号、状态与提交 sha 或 review_id，不写 `wake_kind`、也不补第二条（为什么一条就够、送达怎么判，见「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节的「回执只发一条」「送达改由一次会话列表核对承担」「终态只落库不唤醒」三条）。协调会话收到后 `record_notice` 落库（`wake_kind` 填 `unknown` 并在 `detail` 里注明是占位），再跑一次 `list_sessions` 核对会话列表：没有多出标题等于这份回执的新任务即算送达，多出了就先停掉误建的再带 `target_session_id` 重发。终态（`done` / `rework`）只落库不唤醒，唤醒只留给 `created` 误建、`blocked`、`ask_ticket` 三种。通知丢失时，可根据中心 awaiting_review 状态继续，而不重做执行。
 6. 独立验收会话核对成果后调用 review_result。
 
@@ -242,6 +242,19 @@ python tools/auto_merge.py --ticket AW-xxx
 ```
 
 工具在临时 worktree 里先合一次并跑 `python tools/run_tests.py`，绿了才 `git merge --no-ff`；红了一律中止，此时目标分支一动未动。真实合并后还会再跑一次全量测试，再红就 `git reset --hard pre-merge-<工单号>` 回滚——回退点在合并前就打好了。回退点已存在时工具拒绝合并，不覆盖旧回退点。
+
+### 被验收的树与要合的树
+
+`done` 说的是「那次提交的成果通过了验收」，不说「现在要合的这一支还是它」。两者之间隔着一次「再提交一次」的机会：验收之后往分支上补一个提交，合并照样通过，而库里查不出来——R-008 那次合并两棵树刚好相同，是因为验收后没人再提交，不是因为闸门查过。所以现在两棵树各有一个可查的值：
+
+- **被验收的那棵树**：`submit_result` 的 `head_sha` 写进 `submissions.head_sha`。验收会话拿它跟 `git rev-parse HEAD`（或分支 tip）核一次：这是它判「我验收的是不是这一支」的依据，核不上就不该 accept。
+- **要合的那棵树**：`merge_ticket` 的 `reviewed_sha`。它与该工单**最新一条提交**的 `head_sha` 相等才写合并记录，不等报 `SHA_MISMATCH` 且一行不写。
+- **git 一侧的比对在 `tools/auto_merge.py`，不在 `task_center`。** 中心库不跑 git，所以 `merge_ticket` 只能比库里的两个值；把分支 tip 读出来与 `head_sha` 比这件事，由合并工具在第 2 步做：`git rev-parse refs/heads/<源分支>` 与提交的 `head_sha` 不等就非零退出，输出里同时打出「被验收的 <sha>」与「现在要合的 <sha>」。这一步在打回退点、写 journal、建临时工作树之前，所以被拒时目标分支、回退点、journal、临时工作树与合并记录一样都没动。
+- **两种处理方式。** 要么把源分支退回被验收的那个提交再合，要么让独立验收会话对现在的 tip 重新验收一次（提交一次带 `head_sha` 的成果，再 `review_result`）。不要在合并时换一个 sha 蒙过去：那个值是要留档的事实。
+
+**老提交（`head_sha` 为 NULL）怎么合。** schema 9 之前写下的提交没有这一列，库里有 140 多条这样的提交与几十张已验收未合并的老单。它们不能静默放行（那等于把「没核对过」写成「核对过」），也不能全堵死（那样老单永远合不了），所以留了一个明文出口：`reviewed_sha` 传字面量 `unverified`，它按原样写进 `merges.reviewed_sha`，于是「这单没记录过 sha」在库里查得到。`tools/auto_merge.py` 遇到这种单会自己这么传，并在输出里打一条警告；有 `head_sha` 的单传 `unverified` 会被拒（INVALID_INPUT）——那是把一个可核对的事自称没核对。历史合并记录不追溯：已有的 `merges` 行 `reviewed_sha` 就是 NULL，它如实表示那时还没有这一列。
+
+`--record-only` 也做同一道比对，它比的是那次合并合进来的那一支（`parent2` 指向的源分支 tip）：不等同样拒绝收口，由人决定这张单怎么算。
 
 ### 合并断在半路：`--record-only`
 
@@ -338,7 +351,7 @@ PRD 内容在领取、绑定、提交和验收时重新核对。变更返回 STA
 
 快照 → `migrate` → 校验 → 删旧快照，顺序不能颠倒。`backup` 与读取共用同一套 schema 校验，在 schema 3 的库上直接返回 `SCHEMA_MISMATCH`，所以升级前的那一份只能在文件层做：用 SQLite backup API（库开着也安全），或停写后复制文件连同旁边的 WAL/SHM。具体命令：`sqlite3 <源库> ".backup <目标文件>"`（`sqlite3` 的 `.backup` 就是 SQLite backup API 的命令行形式）；或停写后把库文件连同旁边的 `-wal` / `-shm` 一起 `copy` 走——只拷主库会丢掉还没落盘的写入。
 
-校验包括三件：`migrate` 回执的 `from_version` 是升级前的版本、`migrated: true`、`schema_version` 是当前版本；`list_tickets` / `list_projects` 还能看到原有记录；升级后 `backup` 能成功（它只接受最新 schema，成功即证明库已经是最新）。全部通过后再删旧快照。升级链是逐级执行的（3 → 4 → 5 → 6 → 7 → 8），从 v3 直接升到 v8 也一样，不需要先单独升到 v4 或 v5。
+校验包括三件：`migrate` 回执的 `from_version` 是升级前的版本、`migrated: true`、`schema_version` 是当前版本；`list_tickets` / `list_projects` 还能看到原有记录；升级后 `backup` 能成功（它只接受最新 schema，成功即证明库已经是最新）。全部通过后再删旧快照。升级链是逐级执行的（3 → 4 → 5 → 6 → 7 → 8 → 9），从 v3 直接升到 v9 也一样，不需要先单独升到 v4 或 v5。
 
 ### 改 schema 的落地顺序
 
@@ -379,6 +392,7 @@ git -c core.hooksPath=<某工作树>/.githooks commit -m "..."
 - NOT_TARGET：`target_session_id` 不是该尝试 claim 时写下的协调会话。回执发错了地方比没发更难发现，所以写成执行会话自己或其他会话都不允许，且一行不写。
 - NOTIFY_CREATED_TASK：回执的 `wake_kind` 是 `created`——宿主把它当成了新建任务，这条回执没有到达任何人。命令非零退出，但库里已经留了一条 `failed`；先停掉那条误建的任务，再带上 `target_session_id` 重发。
 - NO_NOTICE：这张单没有任何回信记录，合并不进去。补记一条 `sent`，或补一条 `failed` 写清原因，再合并。`tools/auto_merge.py` 在正常合并路径上把这道判**提到了任何写入之前**（第 1 步收尾），所以忘补回执时是「一步都不动」地被拒，而不是 `git merge` 已经落进目标分支才在写记录那步失败；那种现场才需要 `--record-only` 收口。
+- SHA_MISMATCH：要合的那棵树与被验收的不是同一个提交——`merge_ticket` 收到了不等于最新提交 `head_sha` 的 `reviewed_sha`。验收之后分支又变动过了，要么退回被验收的提交，要么重新验收现在的 tip；不要换一个 sha 蒙过去。`tools/auto_merge.py` 在真合并之前自己会先比一次，被拒时输出两个 sha。
 - ALREADY_MERGED：这张工单已有合并记录，读取它而不是再写一条；要改记录内容得先由人核对实际合并情况。
 - NOT_COORDINATOR：只有派发这张单的协调会话能代记结论或回信结果（`answer_ticket` 的代答、`record_notice`）。换一个会话不能替代；请协调会话自己来写。
 - ALREADY_NOTIFIED：这张单已经有一条 `sent` 回信记录，读它的 `notices` 而不是再写一条；`failed` 不受此限，可以逐次记录。
