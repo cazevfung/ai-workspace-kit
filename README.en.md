@@ -2,71 +2,87 @@
 
 中文版：[README.md](README.md)
 
-**Every piece of work an AI does gets a ticket, evidence, an independent review, and a record you can still query ten steps later.**
+**You talk to one PM. It breaks work into tickets, hands them to the right project, watches the receipts, keeps review separate from execution, merges after QA, and chases whatever nobody answered.**
 
-[What it solves](#what-problem-it-solves) · [Four core capabilities](#four-core-capabilities) · [What you can use it for](#what-you-can-use-it-for-six-situations) · [How one ticket runs](#the-life-of-one-ticket) · [Run it once](#run-it-once-after-installing) · [Install](#install)
+[Where you are now](#where-you-are-now) · [What you are missing](#what-you-are-missing-is-a-pm) · [What the PM does](#what-the-pm-does-for-you) · [Six situations](#what-you-can-use-it-for-six-situations) · [Mechanism](#the-life-of-one-ticket) · [Run it once](#run-it-once-after-installing) · [Install](#install)
 
 The workflow has run dozens of tickets in a real project. Everything specific to that project has been stripped out, and what remains is packaged here. You need Python 3.10 and an agent that reads `AGENTS.md`. Cindy, Claude Code and Codex all work.
 
 ---
 
-## What problem it solves
+## Where you are now
 
-You let an AI take ten steps in a row, and at the end it says "done". That sentence leaves three questions unanswered. What was actually supposed to be delivered? Which project does this belong to? And on what grounds is it done?
+You have several projects and a dozen sessions open. The titles look alike, and yesterday's "rewrite the dispatch logic" is in one of them; you open three before you find it.
 
-The code is usually there. What is missing is a record other people can check. The next day you open a new session, or a colleague picks the work up two weeks later, and tries to work out why it was changed this way, who reviewed it, and why it was merged. Your only source is the chat log, and chat logs scroll away. A database does not.
+One session stops halfway and asks whether it should support Windows. You are in a meeting and do not answer. Two days later it is still sitting there, and its context has gone cold.
 
-This workspace puts all three things into one local SQLite file:
+You have one session reworking the front end and another reworking the API. Both touch the same file. The merge conflicts, you fix it by hand, and you still do not know whether the tests ran.
 
-- a ticket holds the scope and the acceptance criteria;
-- an attempt records which session is doing the work and which worktree it is bound to;
-- a submission records the files, their sha256, and the evidence;
-- a review records the verdict, the reasoning, and who gave it.
+You ask "is it done?" and it says "done". You open the diff and one of the three files was never touched. You cannot check every time, so "it said done" slowly becomes "done".
 
-Sessions can be thrown away. The database cannot. That is the most basic design decision here.
+You want to push something forward from your phone, and the first step is remembering which project and which session it lives in.
 
-So there are two layers. One is the process: how a requirement comes in, who does the work, who reviews it, how it lands on the main branch. The other is the decision points: which steps refuse to be vague, and fail on the spot when they are. The rest of this document covers the process first, then the decision points.
+You want to start a fourth piece of work, but the first three already have all of your attention.
 
----
-
-## Four core capabilities
-
-**One database covers every project.** Tickets, attempts, submissions, reviews and merge records live in one local SQLite file. Close the session, change the person, come back two weeks later: the record is still there, and one command tells you what a project is working on, where it is stuck, and who is on it.
-
-**One line runs from PRD to merge.** A requirement carries an ID and a version, the plan passes a gate, the person who did the work does not review it, and the merge is previewed and tested first. None of this depends on a single conversation staying alive.
-
-**Verdicts are exit codes, not good intentions.** A set of checks covers commits, plans, closing, handoffs, stated numbers, citations and merges. When something is missing they exit non-zero, and "needs your confirmation" does not count as done.
-
-**Other projects can hand long-running work in.** Another project writes a six-section handoff packet, passes the gate, and opens a workspace session. This workspace then coordinates the work, and the background is not left behind in the old chat.
+None of this happens because the model is weak. Taken one at a time, the model can do all of it. It happens because every session's routing, memory, chasing and checking is pressed onto one person, and you only have one share of attention.
 
 ---
 
-## What you can use it for: six situations
+## What you are missing is a PM
 
-| What you are doing | What you end up with |
-| --- | --- |
-| Taking a feature from requirement to production | Criteria come from a versioned PRD, the plan passes a gate, doer and reviewer are separate, tests run before merge, and the database keeps the record |
-| Pushing several projects at once | One central database shows every project's ticket state, without digging through separate chats |
-| Receiving long-running work from another project | A six-section packet passes the gate and the task lands here; the original session stops and only relays the receipt |
-| Changing a requirement mid-flight | The PRD hash no longer matches the ticket, submission is blocked by `STALE_PRD`, and the ticket has to be revised explicitly |
-| Feeling unsure before a merge | `auto_merge` previews conflicts, runs tests, tags a rollback point, and returns to it when something fails |
-| Coming back the next day | State lives in the database, so a new session or a new person can see where it stopped and whose turn it is |
+Sort those problems and only four jobs remain:
+
+- decide which project a piece of work belongs to, and who should do it;
+- remember where each piece stands and whose turn is next;
+- push when something has stopped and is waiting on you;
+- check the delivery before it counts as delivered.
+
+Those four jobs have a name: project manager. A PM takes requirements, breaks them down, hands them out, follows up, reviews, and reports. That is the whole job description.
+
+You never had one because an agent's unit of work is a session. A session is an execution unit, not a management unit. It runs, it stops, it waits for you, but it does not know what the other sessions are doing, and it is not accountable to your project.
+
+What this kit adds is not a stronger agent. It adds a **project layer**: the ticket becomes the object being managed, and the session drops back to being a replaceable executor. That layer is what makes a stable PM possible.
 
 ---
 
-## From requirement to merge: it covers the whole line
+## What the PM does for you
 
-A single ticket is only the smallest unit. The part that matters is the line: a requirement enters as a PRD, passes one review, gets dispatched to the right project, is reviewed by someone else when it comes back, and leaves a record when it merges. People change, sessions change, projects change, and the line still connects.
+### Breaking work down
 
-This is also where it differs most from "writing better prompts". A prompt governs how good this one answer is. This kit governs whether, ten steps later, you can still find out who did each step and what it passed on.
+A requirement becomes a ticket before anything runs. The ticket states what is being delivered, what is explicitly out of scope, and what the acceptance criteria are. If the criteria cannot be written down, the work is not thought through, and it does not start.
 
-**A requirement starts as a PRD.** Each project has one, with an ID and a version. A ticket's "basis" section has to name the version it uses, and its acceptance criteria come from the PRD rather than being invented during execution. If the PRD changes and the ticket does not, the submission is blocked with `STALE_PRD` and the old result is void. The point of that rule is simple: when the requirement moves, someone has to revise the ticket explicitly, and results cannot quietly drift away from it.
+Each ticket is pinned to a PRD with an ID and a version. Change the PRD and the hash no longer matches, the old result is void, and the ticket has to be revised explicitly.
 
-**There are two reviews.** The first happens before any code. The PRD goes through the checklist in the `prd-authoring` skill, and the plan goes through `doc_gate`. `doc_gate` checks three things: whether the plan cites the PRD, whether it states what is being delivered and what is out of scope, and whether the completion evidence can be judged by a machine. The second review happens after delivery, when a different session gives the verdict. The person who did the work cannot sign it off.
+### Handing it out
 
-**Tickets can be dispatched to different projects.** One central database covers every project. Each project registers a root directory, each ticket belongs to one project, and results stay in that project's repository. Once the coordinating session claims a ticket, it dispatches execution to that project's workspace, and review happens there too. Project ownership is never guessed. `probe` only offers candidates, and a human confirms the choice.
+The PM works out which project the ticket belongs to, dispatches it to that project's workspace, and opens a new executor session. You do not go hunting through a session list. One ticket runs per project by default; parallel work takes an explicit `allow_parallel`, so two tickets cannot quietly step on each other.
 
-**Other projects can ask this workspace to take work over.** A session in any project that hits something multi-step, deliverable and too large for one round can hand it over instead of grinding through it alone. Handoffs follow a fixed protocol. First write a six-section handoff packet: the user's own words, what is to be delivered, what was tried before and why it failed, hard constraints, confirmed facts, and open questions. Run `intake_gate.py` to catch missing sections, then send a four-line message that opens a new workspace session.
+Handing work out is not mainly about finding a session. It is about writing down what is being handed out. Every ticket leaves with exactly the context it needs:
+
+- **Not too much.** An executor receives this ticket and the one PRD it cites. It does not see other projects, and unrelated history does not pull it off course. Knowing more is not an advantage here; it leads to overreach and to edits nobody asked for.
+- **Not too little.** The ticket has to be self-contained enough that a different session, or a different person, can start immediately. That is why deliverables and exclusions are mandatory, and why handoffs require six sections: the user's own words, what was tried and why it failed, hard constraints, confirmed facts, and open questions.
+
+This is the handover a nurse gives at shift change. Only what matters: the patient's state, what was done, what comes next. Never omitting an allergy. More is noise, less is an incident.
+
+Once the context is bounded, the executor becomes replaceable. A new session, a new person, a week later: same ticket, same work.
+
+### Keeping it moving
+
+When an executor submits, the receipt lands in the database and the PM decides the next hop. Decisions that need a human go through `ask_ticket` and are recorded, rather than a card that blocks the whole round. While you are busy, the work waits in the database; pair it with a host-side scheduled job and the PM can check ticket state on a timer and push stalled work forward again.
+
+Review is done by a different session. It reads the ticket and the evidence, not the chat that produced them, so the judgement stays clean. The person who did the work cannot sign it off, and there is no switch for that.
+
+### Bringing it home
+
+Branches are planned before work starts: one ticket, one worktree, one `ticket/<id>` branch, with the main checkout staying on the main branch. Passing QA does not put anything on the main branch. Merging goes through `auto_merge.py`, which checks ticket state and branch, previews conflicts, tags a rollback point, and runs the tests in a temporary worktree. Only then does it merge with `--no-ff`, run the tests again, and write the merge record. If something fails, the branch returns to where it was before the merge.
+
+A round does not end with "it is done" either. It ends with a seven-section closing packet, and `close_gate.py` decides whether the sections are there and which of three conclusions the round reached.
+
+---
+
+## Other projects can hand work in
+
+When you are working in some other project and hit a task that is multi-step, deliverable and too large for one round, you do not have to grind through it alone. Hand it to this workspace. The handoff follows a fixed protocol: write a six-section packet, run `intake_gate.py` to catch missing sections, then send a four-line message that opens a new workspace session. The original session stops and afterwards only relays the receipt.
 
 Everything needed for that path ships in the kit:
 
@@ -89,40 +105,44 @@ graph LR
   O["Long-running work in another project"] -. "Six-section handoff + intake_gate" .-> T
 ```
 
-After handing work over, the original session stops and only relays the receipt. On the receiving side, the first thing the coordinator does with a handoff packet is run the gate, not start reading the PRD.
+---
 
-What this arrangement buys you:
+## What you can use it for: six situations
 
-- **Requirements cannot drift quietly.** The PRD has a version and the ticket is pinned to it. When the requirement changes, the old result is void and a ticket revision is required.
-- **The doer and the judge are separate.** An executor cannot accept its own work, a coordinator cannot write the result itself, and merging is backed by its own script.
-- **Several projects share one ledger.** A single database answers what each project is working on, where it is stuck, and who is on it, without digging through separate chat logs.
-- **The outside can hand work in.** Another project can pass a long-running task over with a six-section packet, without manually rebuilding context and without losing "what did not work last time".
+| What you are doing | What you end up with |
+| --- | --- |
+| Taking a feature from requirement to production | Criteria come from a versioned PRD, the plan passes a gate, doer and reviewer are separate, tests run before merge, and the database keeps the record |
+| Pushing several projects at once | One central database shows every project's ticket state, without digging through separate chats |
+| Receiving long-running work from another project | A six-section packet passes the gate and the task lands here; the original session stops and only relays the receipt |
+| Changing a requirement mid-flight | The PRD hash no longer matches the ticket, submission is blocked by `STALE_PRD`, and the ticket has to be revised explicitly |
+| Feeling unsure before a merge | `auto_merge` previews conflicts, runs tests, tags a rollback point, and returns to it when something fails |
+| Coming back the next day | State lives in the database, so a new session or a new person can see where it stopped and whose turn it is |
 
 ---
 
 ## The life of one ticket
 
-The path below is the whole mechanism. Every step writes to the database, and a step that fails exits non-zero.
+Those capabilities reduce to seven steps. Every step writes to the database, and a step that fails exits non-zero.
 
-**Step 1, open a ticket.** `create_ticket` requires a deliverable, with a topic and an explicit statement of what is out of scope, plus acceptance criteria. If you cannot write the acceptance criteria, the work is not thought through yet, and that is worth fixing first.
+**Step 1, open the ticket.** `create_ticket` requires a deliverable (a topic, plus an explicit statement of what is out of scope), acceptance criteria, and the PRD version it is pinned to.
 
-**Step 2, dispatch.** After `claim_ticket`, the coordinating session may not write the result itself. It has to open a new session, hand the work over, and binding with its own identifier is rejected as `SELF_DISPATCH`. The rule exists because dispatching to yourself is far too easy in other workflows.
+**Step 2, dispatch.** After `claim_ticket`, the coordinating session may not write the result itself. It opens a new session and hands the work over; binding with its own identifier is rejected as `SELF_DISPATCH`.
 
-**Step 3, execute.** One ticket gets one git worktree and one `ticket/<id>` branch. The executor works in `.worktrees/<id>/`, while the main checkout stays on the main branch, so a merge cannot accidentally run in the wrong direction.
+**Step 3, execute.** One ticket gets one git worktree and one `ticket/<id>` branch. The executor works in `.worktrees/<id>/` and leaves the main checkout alone.
 
-**Step 4, submit.** `submit_result` carries the artifacts, a sha256 for each file, and the evidence. After that the ticket moves to `awaiting_review` and the executor stops.
+**Step 4, submit.** `submit_result` carries the artifacts, a sha256 for each file, and the evidence. The ticket moves to `awaiting_review` and the executor stops.
 
-**Step 5, independent review.** A different session reads the ticket and the evidence, then calls `review_result` with a verdict: `accept` or `rework`. The person who did the work does not get to review it, and there is no switch to turn that off.
+**Step 5, independent review.** A different session reads the ticket and the evidence, then calls `review_result` with `accept` or `rework`.
 
-**Step 6, merge.** Passing review does not put anything on the main branch. Merging goes through `tools/auto_merge.py`, which first checks four things: the ticket is `done`, there is no merge record yet, the checkout is clean, and the source branch is genuinely ahead. Once those pass, it previews conflicts, tags a rollback point, and runs the tests in a temporary worktree. If they pass it merges with `--no-ff`, runs the tests again, and only then writes the merge record. If anything fails, it returns to the rollback point and the main branch never moved.
+**Step 6, merge.** The merge goes through `auto_merge.py`, which checks state, previews, tags a rollback point and runs the tests before it merges.
 
-**Step 7, close the round.** A round does not end with the words "it is done". Write the seven-section closing packet described in `docs/closing.md`, then run `close_gate.py`. It checks that all seven sections are present and that section 3 is not a bare "none". The conclusion also has to be one of three values: closed, waiting on an answer, or needs a restart.
+**Step 7, close the round.** Write the seven-section closing packet from `docs/closing.md`, and let `close_gate.py` judge it.
 
 Throughout, the ticket state follows `ready → dispatching → running → awaiting_review → done`. Two side branches exist. When a human decision is needed, `ask_ticket` records the question and waits. When work goes back, the ticket returns to `rework` and is claimed again.
 
 ---
 
-## Decision points that actually block
+## Why you can trust it
 
 Rules in a document go unread, so the real constraints sit in exit codes. These checks are not reminders; they are the default path that makes an operation fail:
 
@@ -143,19 +163,19 @@ Rules in a document go unread, so the real constraints sit in exit codes. These 
 
 ## Why the rules look like this
 
-Every rule traces back to a specific failure. None of them were designed on a whiteboard. These three are typical, and they are described as what happened rather than as case IDs.
+Every rule traces back to a specific failure. These three are typical, and they are described as what happened.
 
-**Once, a dispatch message carried a session identifier that was perfectly well formed. The database accepted it, and no session with that ID existed.** The string had been assembled from a temporary directory name. The record looked like a completed dispatch and pointed at nothing, which is harder to spot than an obvious placeholder. What the rules require now runs both ways. The executor calls `get_current_session_id` itself and writes down what it gets, without assembling or abbreviating it. Before dispatching, the coordinator looks up the title and path with `list_sessions` using the working directory, and if the lookup fails, nothing is bound and nothing is submitted.
+**Once, a dispatch message carried a session identifier that was perfectly well formed. The database accepted it, and no session with that ID existed.** The string had been assembled from a temporary directory name. The record looked like a completed dispatch and pointed at nothing. Now the executor calls `get_current_session_id` itself, and the coordinator looks up the title and path with `list_sessions` before dispatching; if the lookup fails, nothing is bound and nothing is submitted.
 
-**Another time, an executor submitted four artifacts and every sha256 was wrong.** The paths in the submission had no worktree prefix, so the database resolved them against the project root and hashed the files of the same name in the main checkout. The numbers were correct; the file they pointed at was not. Artifact paths now have to carry the `.worktrees/<id>/` prefix, and review checks them one by one.
+**Another time, an executor submitted four artifacts and every sha256 was wrong.** The paths had no worktree prefix, so the database resolved them against the project root and hashed the files of the same name in the main checkout. The numbers were correct; the file they pointed at was not. Artifact paths now have to carry the `.worktrees/<id>/` prefix, and review checks them one by one.
 
-**And once, a coordinator skipped ticketing and dispatch, did the work itself in the coordinating session, then declared it complete.** The record looked thorough, but nobody else had looked at it. `SELF_DISPATCH` now rejects that binding on the spot, so the separation of doer and reviewer is a mechanism rather than an agreement.
+**And once, a coordinator skipped ticketing and dispatch, did the work itself, then declared it complete.** The record looked thorough, but nobody else had looked at it. `SELF_DISPATCH` now rejects that binding on the spot, so the separation of doer and reviewer is a mechanism rather than an agreement.
 
 ---
 
 ## When to use it, and when not to
 
-It is heavy. Opening a ticket means creating, claiming, binding, submitting and reviewing. Plans go through `doc_gate`, commits carry a ticket ID, and closing a round goes through `close_gate`. By default only one ticket runs at a time, and `claim_ticket` reports `DISPATCH_BUSY` while another ticket in the same project is in flight. Running things in parallel takes an explicit `allow_parallel`. When no human is around to decide, the work waits in the database.
+It is heavy. Opening a ticket means creating, claiming, binding, submitting and reviewing. Plans go through `doc_gate`, commits carry a ticket ID, and closing a round goes through `close_gate`. One ticket runs at a time by default, and parallel work takes an explicit `allow_parallel`. When no human is around to decide, the work waits in the database.
 
 So it earns its cost on work that has to be delivered, reviewed by someone else, and picked back up days later: a new feature, a process change, or a document other people will follow.
 
@@ -167,9 +187,7 @@ A simple test: will anyone in two months ask how this was decided, who reviewed 
 
 ## How it relates to orchestration modes and subagents
 
-These three are often mixed up, but they answer different questions.
-
-An orchestration mode (a Lead session with several Workers) turns "one task, one agent" into several. Each Worker is a full independent task with its own worktree and conversation history. They run in parallel, and they can be placed on another machine signed in to the same account. A subagent is lighter: a one-shot dispatch inside the same process, finished when it returns.
+An orchestration mode (a Lead session with several Workers) turns "one task, one agent" into several. Each Worker is a full independent task with its own worktree and conversation history. They run in parallel, and they can be placed on another machine signed in to the same account. A subagent is lighter: a one-shot dispatch inside the same process.
 
 Both answer the question of who is running and how work is handed out. The workspace answers a different set of questions: should this be done now, what counts as finished, who may change files, who reviews the result, and how does it get onto the main branch.
 
@@ -177,7 +195,7 @@ The differences show up in concrete places. In an orchestration mode, the Lead s
 
 The layers stack. Use orchestration to push several threads in parallel, and let each thread follow the workspace workflow inside its own project. The default dispatch carrier is an ordinary project session rather than a Worker, because an executor has to be openable for follow-up questions and has to submit results itself. A Worker is managed by a team, and once the team is archived it is gone.
 
-The largest gap in the workspace sits right here. "Open an executor session after `claim_ticket`" has no automated adapter yet; the coordinator calls `send_to_session` by hand. This is listed under "known not implemented" in `AGENTS.md`, and it is not pretending otherwise.
+The largest gap in the workspace sits right here. "Open an executor session after `claim_ticket`" needs a host capability; in Cindy that is `send_to_session`, and other hosts either add it or open a session by hand and call `bind_session`. This is listed under "known not implemented" in `AGENTS.md`, and it is not pretending otherwise.
 
 ---
 
@@ -253,7 +271,7 @@ ai-workspace/
 ├── task_center/           # ticket core (standard library only, SQLite)
 ├── tools/                 # gates, auto_merge, run_tests, session checks
 ├── tests/                 # cases for the ticket core and the gates
-├── docs/                  # protocol / closing / probe / intake / skill-loading
+├── docs/                  # protocol / closing / probe / intake / skill-loading / claims-format
 ├── examples/
 ├── .agents/skills/        # workspace skills
 └── .githooks/             # commit hooks
@@ -302,7 +320,7 @@ python uninstall.py --skills                            # remove only this kit's
 
 ```bash
 python maintainer/sync_from_origin.py        # 1. sync, turning absolute paths into {{WORKSPACE}}
-python maintainer/redact_for_public.py       # 2. strip usernames and session IDs the sync carried in
+python maintainer/redact_for_public.py       # 2. strip usernames, session IDs and upstream business names
 python verify/verify_install.py              # 3. install into a temp dir; all 14 checks must pass
 ```
 
