@@ -4,6 +4,8 @@
 
 **You talk to one PM. It breaks work into tickets, hands them to the right project, watches the receipts, keeps review separate from execution, merges after QA, and chases whatever nobody answered.**
 
+![Architecture: you talk to one PM, it dispatches work to different projects, review is a separate session, and every record lands in one database](docs/architecture.svg)
+
 [Where you are now](#where-you-are-now) · [What you are missing](#what-you-are-missing-is-a-pm) · [What the PM does](#what-the-pm-does-for-you) · [Six situations](#what-you-can-use-it-for-six-situations) · [Mechanism](#the-life-of-one-ticket) · [Run it once](#run-it-once-after-installing) · [Install](#install)
 
 The workflow has run dozens of tickets in a real project. Everything specific to that project has been stripped out, and what remains is packaged here. You need Python 3.10 and an agent that reads `AGENTS.md`. Cindy, Claude Code and Codex all work.
