@@ -4,7 +4,7 @@
 代价从「无所谓」变成「永久」。这一组用例锁住撤销路径与它的保护条件。
 
 `RootIsIdentityTest` 那一组锁另一件事：`root` 是身份、`project_id` 是标签
-（PRD-009 §4.4 / AC05）——同一 root 重复登记复用原记录且不改标签，开单不要求先登记。
+（口径见 `docs/decisions.md`「项目接入面」）——同一 root 重复登记复用原记录且不改标签，开单不要求先登记。
 """
 import tempfile
 import unittest
@@ -103,7 +103,7 @@ class ProjectRegistryTest(RegistryCase):
 
 
 class RootIsIdentityTest(RegistryCase):
-    """`root` 是身份、`project_id` 是标签（PRD-009 §4.4 / AC05）。
+    """`root` 是身份、`project_id` 是标签（口径见 `docs/decisions.md`「项目接入面」）。
 
     这组用例锁两件事：同一 root 重复登记复用原记录且不改已有标签；开单不要求先登记，
     但已登记的 root 不能被另一张单悄悄换掉。

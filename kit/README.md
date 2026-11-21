@@ -8,6 +8,7 @@
 1. [`AGENTS.md`](AGENTS.md)——项目归属、六条硬规则、已知未实现清单。
 2. [`PRD/`](PRD/)——需求依据；每个成果都要写清依据的是哪份 PRD 的哪个版本。
 3. [`docs/protocol.md`](docs/protocol.md)——调用顺序与错误码。
+4. [`docs/decisions.md`](docs/decisions.md)——随包口径：消息通道三档、回执一条、送达判据、项目接入面；本文与 `AGENTS.md` 里引到这几件事的地方都指向它。
 
 ## 一分钟上手
 

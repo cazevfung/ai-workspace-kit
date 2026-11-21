@@ -460,7 +460,7 @@ def split_status(status: str) -> tuple[list[str], list[str], list[str]]:
 
 # --- 第 2 步的收尾：未跟踪文件与「合并要新增的路径」是否撞名 ----------------
 #
-# 为什么单拿一件事出来说：AW-049 要新增 `PRD/PRD-008-批量迁移技能内容.md`，而主检出里
+# 为什么单拿一件事出来说：AW-049 要新增一份需求文档，而主检出里
 # 恰好有一份**同名**的未跟踪文件。那份文件与分支上的新文件逐字节相同，`git merge` 仍然
 # 以 `untracked working tree file would be overwritten` 拒绝。所以这不是偶发：合并要往
 # 工作区写出这个路径，工作区里已经有一个 git 不认识的同名文件，git 必须先删掉它才写得进去，
@@ -475,7 +475,7 @@ def normalize_git_path(path: str) -> str:
     """比较用的路径口径：与 git 在 Windows 上看到的那个路径一致。
 
     分隔符统一成 `/`（git 的输出一直是 `/`，但人手里的路径可能带 `\\`）；Windows 的
-    NTFS 默认不分大小写，git 在那里也把 `PRD/PRD-008.md` 与 `prd/prd-008.md` 当成同一个
+    NTFS 默认不分大小写，git 在那里也把 `Docs/Guide.md` 与 `docs/guide.md` 当成同一个
     文件。只用于比较，不要拿它去落盘——落盘要用工作区里的原名。
     """
     text = str(path).replace("\\", "/").strip()

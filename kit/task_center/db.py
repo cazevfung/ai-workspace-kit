@@ -90,12 +90,12 @@ REQUIRED_TABLES = {"projects", "tickets", "attempts", "submissions", "reviews", 
 # Version 4 adds attempts.coordinator_session_id so a coordinator cannot bind its own claim.
 # Version 5 adds merges so an accepted ticket can carry a queryable "landed" record.
 # Version 6 adds questions/answers so "waiting for one sentence" is a recorded state, and
-# widens the active_session predicate to include 'blocked' (PRD-005 4.4).
+# widens the active_session predicate to include 'blocked' (see docs/protocol.md "blocked").
 # Version 7 adds attempts.coordinator_workdir and the notices table so a handoff receipt that
-# was or was not sent is a recorded fact, not something a coordinator has to remember (PRD-009 R5).
+# was or was not sent is a recorded fact, not something a coordinator has to remember (docs/decisions.md "回执一条").
 # Version 8 adds notices.target_session_id and notices.wake_kind so "who it was sent to" and
 # "how the host treated it" are recorded too; a wake_kind of created means the host started a
-# new task instead of delivering, which is recorded as a failed notice (PRD-009 R5, AW-060).
+# new task instead of delivering, which is recorded as a failed notice (docs/decisions.md "送达判据").
 # Version 9 adds submissions.head_sha and merges.reviewed_sha so "which tree was accepted" and
 # "which tree is being merged" are two recorded values that can be compared (R-009 goal 2).
 # Both columns are nullable on purpose: rows written before this version have no sha, and

@@ -1,6 +1,6 @@
 """schema 6：决策通道——工单会「在等一句话」，而这句话有人答、有记录、能被查。
 
-依据 `PRD/PRD-005-决策通道.md` v0.3 的 4.1–4.7。这里判的都是「库里说得清」：
+依据 `docs/decisions.md` 与 `docs/protocol.md`「blocked：工单在等一句话」两节。这里判的都是「库里说得清」：
 
 1. `blocked` 两处都写（`tickets.state` 与 `attempts.state`），权威在工单级；`revision` 不变。
 2. `blocked` 期间 `submit_result` 必须被拒（`INVALID_STATE`）——成果只能在答案回来后交。

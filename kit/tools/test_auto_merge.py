@@ -307,7 +307,7 @@ class TempRepoCase(RepoFixture):
     def test_untracked_files_do_not_block_and_are_reported(self):
         """C2：只有未跟踪文件时照常合并，且输出列出它们、说明没被合进去。
 
-        并行开发线（.agents/skills/skill-routing/、PRD-004、plan-005）留在工作区
+        并行开发线（.agents/skills/skill-routing/、需求文档、plan-005）留在工作区
         里是常态，它们不参与这次合并，却曾经把合并整体拦住。
         """
         self.branch_work({"feature.txt": "feature\n"})
@@ -982,8 +982,8 @@ class UntrackedOverlapTest(unittest.TestCase):
 
     def test_separator_and_case_are_not_a_difference(self):
         """反斜杠与大小写都是同一个人在 Windows 上写同一个路径的两种写法。"""
-        added = ["PRD/PRD-008-批量迁移技能内容.md"]
-        untracked = ["prd\\PRD-008-批量迁移技能内容.MD"]
+        added = ["PRD/batch-migrate.md"]
+        untracked = ["prd\\batch-migrate.MD"]
         self.assertEqual(untracked, auto_merge.untracked_overlap(added, untracked))
 
     def test_hit_is_reported_with_the_name_in_the_worktree(self):
@@ -1014,7 +1014,7 @@ class UntrackedOverwriteTest(RepoFixture):
     所以这里也拿相同内容造场景——靠比内容放过是错的。
     """
 
-    NAME = "PRD/PRD-008-批量迁移技能内容.md"
+    NAME = "PRD/batch-migrate.md"
 
     def make_collision(self, untracked_name=None):
         self.branch_work({self.NAME: "同样的内容\n"})
@@ -1046,13 +1046,13 @@ class UntrackedOverwriteTest(RepoFixture):
         self.assertEqual("同样的内容\n", kept.read_text(encoding="utf-8"))
 
     def test_case_variant_untracked_file_also_stops(self):
-        """Windows 上不分大小写：`prd-008.md` 也是同一个路径。"""
-        self.make_collision("PRD/prd-008-批量迁移技能内容.md")
+        """Windows 上不分大小写：`PRD/BATCH-MIGRATE.MD` 也是同一个路径。"""
+        self.make_collision("PRD/BATCH-MIGRATE.MD")
         before = self.head()
         code, out = self.run_merge()
         self.assertEqual(1, code, out)
         self.assertIn(auto_merge.STEP_UNTRACKED, out)
-        self.assertIn("prd-008", out.lower())
+        self.assertIn("batch-migrate", out.lower())
         self.assertEqual(before, self.head())
         self.assertIsNone(self.tag_sha())
 

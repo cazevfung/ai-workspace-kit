@@ -1,5 +1,17 @@
 # 更新记录
 
+## 未发布（KIT-006）
+
+主题：把契约里的空引用补实、把入参报错分开、把插件做成能装的包。
+
+- 新增 `kit/docs/decisions.md`：把被反复引用的四条口径——消息通道三档、回执一条、送达判据、项目接入面——沉淀成随包文档。`kit` 与 `skills` 里原来指向包外需求文档的 19 个文件全部改指向它，或改成不依赖外部文档的表述；`grep -rn "PRD-00[2-9]" kit skills --include=*.md --include=*.py` 已经没有命中。
+- `kit/docs/protocol.md`：`create_ticket` 的字段行写明 `deliverable` ≤500 字；新增命令行层错误码 `INPUT_UNREADABLE`，读不到 `--input` 的文件时带回原样的路径与系统原因，不再和「参数不合格」共用一个 `INVALID_INPUT`。核心返回的 `error` 由命令行原句打印，核心的校验与文案一行未改。
+- 插件补真实图标：`plugin/draft/assets/icon.png`（1024×1024，由 Cindy 的图片能力生成一次），`ghost.json` 声明 `icon` 并升到 `0.2.1`；打包产物 `dist/ai-workspace-kit-0.2.1.cindy` 入库，新增 `kit/tools/test_plugin_pack.py` 拆包自检（清单、`main.js`、图标是真图且大于 1024 字节、包与源码一致）。
+- `.gitignore`：`dist/` 改成只放行 `dist/*.cindy`，其他构建输出照旧忽略。
+- `plugin/README.md` 与根 `README.md` 补「装插件 → 启动 → 它报出四步计划」一节，写明装那一步必须人在 Cindy 里点确认，并写明「打包 ≠ 安装 ≠ 上架」。
+- 用例数 481 → 491（新增 6 条拆包自检、4 条命令行入参）。
+- 返工（验收 reject 的 C4）：补 `tools/test_plugin_pack.py` 仓库根转发层，与 `tools/run_tests.py`、`tools/doc_gate.py` 同形，`python tools/test_plugin_pack.py` 现在在仓库根就能跑；顺手清掉两处指不到文件的引用——`docs/protocol.md` 里那份不在包内的计划文件名，以及 `pdsa-workflow` 指向 PRD 第 8 节 / `PRD-001` §7 的两处。
+
 ## 未发布（KIT-005）
 
 主题：装上就能开工。

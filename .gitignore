@@ -7,7 +7,9 @@ _sandbox/
 *.egg-info/
 .venv/
 build/
-dist/
+# 打包产物只在 dist/ 下留 .cindy 入库，其余构建输出照旧忽略
+dist/*
+!dist/*.cindy
 
 # 本机任务交接包：含本机路径与会话标识，不进公开仓库
 HANDOFF.md
