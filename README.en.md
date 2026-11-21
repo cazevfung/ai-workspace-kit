@@ -8,7 +8,7 @@
 
 [The problem](#the-problem-it-solves) · [What it is](#what-it-is) · [Context boundaries](#context-boundaries) · [Life of a ticket](#the-life-of-one-ticket) · [Gates](#gates-and-decision-points) · [Known limitations](#known-limitations) · [Install](#install) · [Demo](#verification-and-demo)
 
-The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.3.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md` (Cindy, Claude Code, Codex).
+The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.4.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md` (Cindy, Claude Code, Codex).
 
 ---
 
@@ -214,7 +214,7 @@ In the kit repository, the nine-step self-check installs into a temporary HOME a
 python verify/verify_onboard.py
 ```
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 481.
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 491.
 
 `examples/demo.py` walks the whole loop in a temporary database — create, dispatch, submit, review — touching no real session or workspace, deleting the database when done.
 
@@ -252,7 +252,7 @@ ai-workspace/
 └── .githooks/             # commit hooks
 ```
 
-The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.3.0` installs 26:
+The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.4.0` installs 26:
 
 - **Workspace skills (6):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`, `bootstrap-workspace`
 - **General skills (20):** `brainstorming`, `writing-plans`, `executing-plans`, `test-driven-development`, `systematic-debugging`, `verification-before-completion`, `code-review-and-quality`, `requesting-code-review`, `receiving-code-review`, `merge-latest-branches`, `writing-skills`, `shuo-ren-hua`, `dispatching-parallel-agents`, `subagent-driven-development`, `resumable-implementation-contracts`, `using-git-worktrees`, `doubt-driven-development`, `planning-and-task-breakdown`, `project-routing`, `handoff-to-workspace`

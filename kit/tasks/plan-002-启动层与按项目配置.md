@@ -69,7 +69,7 @@
 
 跑两处测试，更新 `verify/verify_install.py` 的技能计数（6 / 26）与 `README` 里新增命令的入口，确认 `D:/AI工作区` 一个字节都没动。
 
-- 验证：`python tools/run_tests.py` 期望末行 `结果：全部通过`、两处用例数都打印、合计不少于 453，退出码 0。
+- 验证：`python tools/run_tests.py` 期望末行 `结果：全部通过`、两处用例数都打印、合计不少于开工基线（那个数记在 `CHANGELOG.md` 的 0.3.0 条目里，此处不再抄一遍），退出码 0。
 - 验证：`git -C D:/AI工作区 status --porcelain` 期望输出为空，退出码 0。
 
 ## 不做什么

@@ -8,7 +8,7 @@ English version: [README.en.md](README.en.md)
 
 [它解决什么问题](#它解决什么问题) · [它是什么](#它是什么) · [上下文边界](#上下文边界) · [一张单的一生](#一张单的一生) · [闸门与判定点](#闸门与判定点) · [已知限制](#已知限制) · [安装](#安装) · [验证与 demo](#验证与-demo)
 
-这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.3.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主；Cindy、Claude Code、Codex 均可。
+这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.4.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主；Cindy、Claude Code、Codex 均可。
 
 ---
 
@@ -216,7 +216,7 @@ python tools/add_project.py D:/my-project      # 业务仓库写 .agents/ticket-
 python verify/verify_onboard.py
 ```
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 481 项。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 491 项。
 
 `examples/demo.py` 用一个临时库把闭环走一遍：建工单、派发、提交、验收。它不连真实会话，不写你的工作区，结束时删掉临时库。
 
@@ -254,7 +254,7 @@ ai-workspace/
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.3.0` 共 26 个：
+技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.4.0` 共 26 个：
 
 - **工作区技能（6）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`bootstrap-workspace`
 - **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
@@ -282,7 +282,7 @@ ai-workspace/
 
 ### 插件：装、启动、它会报出四步计划
 
-仓库里的 `dist/ai-workspace-kit-0.2.1.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
+仓库里的 `dist/ai-workspace-kit-0.4.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
 
 1. **装** —— 在 Cindy 侧边栏「插件」里导入本地包，选中这个文件，确认。**这一步必须由人点**：导入会把插件写进用户目录并启用，Agent 不代点，也不在你没看权限清单时替你确认。装上是本地开发副本，不经过市场审核。
 2. **启动** —— 在任意会话里敲 `$ai-workspace <你的工作区绝对路径>`，或者说「把这条路径加成项目、开一个协调会话」。它会调 `bootstrap`。
