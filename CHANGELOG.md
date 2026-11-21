@@ -10,6 +10,7 @@
 - `.gitignore`：`dist/` 改成只放行 `dist/*.cindy`，其他构建输出照旧忽略。
 - `plugin/README.md` 与根 `README.md` 补「装插件 → 启动 → 它报出四步计划」一节，写明装那一步必须人在 Cindy 里点确认，并写明「打包 ≠ 安装 ≠ 上架」。
 - 用例数 481 → 491（新增 6 条拆包自检、4 条命令行入参）。
+- 返工（验收 reject 的 C4）：补 `tools/test_plugin_pack.py` 仓库根转发层，与 `tools/run_tests.py`、`tools/doc_gate.py` 同形，`python tools/test_plugin_pack.py` 现在在仓库根就能跑；顺手清掉两处指不到文件的引用——`docs/protocol.md` 里那份不在包内的计划文件名，以及 `pdsa-workflow` 指向 PRD 第 8 节 / `PRD-001` §7 的两处。
 
 ## 未发布（KIT-005）
 
