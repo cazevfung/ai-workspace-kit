@@ -146,6 +146,8 @@ python -m task_center --db <绝对路径> <操作> --request-id <唯一编号> -
 python -m task_center.probe --roots D:/ --depth 2 --explain   # 只读项目探测
 python tools/auto_merge.py --list                 # 已验收但还没合并的工单
 python tools/auto_merge.py --ticket <工单号>       # 预演 → 测试 → --no-ff 合入 master；失败回滚
+python onboard.py --json                          # 装完在宿主里开工：create_project → 开会话 → 第一条指令
+python tools/add_project.py <业务仓库>             # 按项目配置：写 ticket-config.json 并指向套件 .githooks
 python tools/work_gate.py --list                  # 现在有哪些活跃尝试
 python tools/work_gate.py --ticket <工单号>        # 这张工单能否为本次改动背书
 TASK_CENTER_TICKET=<工单号> git commit -m "..."    # 钩子会再核对一次

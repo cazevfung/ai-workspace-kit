@@ -68,9 +68,18 @@ def skill_dirs(anchor=None):
     默认看工具所在仓库与用户目录；传入 anchor 时，额外沿它的祖先逐层找
     `.agents/skills`。不这么做的话，另一项目的计划文件引用自己项目的 skill
     会被误判为「不存在」。
+
+    套件源码树里技能放在 `<仓库>/skills/workspace` 与 `<仓库>/skills/generic`，
+    只有装到工作区或用户目录之后才出现在 `.agents/skills`。开发期直接跑
+    `python tools/run_tests.py` 时若不认这两处，本仓库自己的计划会被判成引用了
+    不存在的 skill，闸门与它写的用例一起红——发现的路径不该逼人先装一遍。
     """
     here = Path(__file__).resolve().parent.parent
     bases = [here / ".agents" / "skills", Path.home() / ".agents" / "skills"]
+    for kind in ("workspace", "generic"):
+        candidate = here.parent / "skills" / kind
+        if candidate.is_dir() and candidate not in bases:
+            bases.append(candidate)
     if anchor is not None:
         for parent in [anchor if anchor.is_dir() else anchor.parent, *anchor.parents]:
             candidate = parent / ".agents" / "skills"

@@ -340,6 +340,7 @@ def main(argv=None) -> int:
 {'预演完成' if dry else '安装完成'}。下一步：
 
   cd {workspace}
+  python onboard.py --json                                           # 在宿主里开工的调用计划
   python tools/work_gate.py --list                                   # 开工第一条命令
   python tools/run_tests.py                                          # 验证环境（应全绿）
   python tools/doc_gate.py --all                                     # 计划格式自检

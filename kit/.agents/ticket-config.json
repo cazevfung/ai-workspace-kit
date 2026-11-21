@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "project_id": "ai-workspace-kit",
+  "target_branch": "master",
+  "test_cmd": ["python", "tools/run_tests.py"],
+  "test_timeout": 1800
+}

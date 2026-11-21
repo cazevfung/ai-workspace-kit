@@ -27,7 +27,7 @@ The common cause is not a weak model but the absence of a layer accountable to t
 
 ## What it is
 
-It plays the role of a project manager: breaking work down, handing it out, keeping it moving, bringing it home. The implementation has four parts: `task_center/`, the ticket core (standard library plus SQLite); `tools/`, the gate and merge scripts; `AGENTS.md`, the behaviour contract; and `skills/`, 25 skills (5 workspace, 20 general). The kit does not make the model stronger; it turns who does the work, what counts as done, who checks and why it merges into records and checks that fail.
+It plays the role of a project manager: breaking work down, handing it out, keeping it moving, bringing it home. The implementation has four parts: `task_center/`, the ticket core (standard library plus SQLite); `tools/`, the gate and merge scripts; `AGENTS.md`, the behaviour contract; and `skills/`, 26 skills (6 workspace, 20 general). The kit does not make the model stronger; it turns who does the work, what counts as done, who checks and why it merges into records and checks that fail.
 
 ### Breaking work down
 
@@ -200,7 +200,21 @@ python tools/run_tests.py            # should be all green
 python tools/doc_gate.py --all       # should exit 0
 ```
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; `v0.3.0` installs 453.
+Then connect the workspace to the host and a business repository:
+
+```bash
+cd ~/ai-workspace
+python onboard.py --json                       # create_project -> open session -> first instruction, full arguments
+python tools/add_project.py D:/my-project      # writes .agents/ticket-config.json and points core.hooksPath at .githooks
+```
+
+In the kit repository, the nine-step self-check installs into a temporary HOME and walks the whole loop:
+
+```bash
+python verify/verify_onboard.py
+```
+
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 481.
 
 `examples/demo.py` walks the whole loop in a temporary database — create, dispatch, submit, review — touching no real session or workspace, deleting the database when done.
 
@@ -238,9 +252,9 @@ ai-workspace/
 └── .githooks/             # commit hooks
 ```
 
-The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.3.0` installs 25:
+The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.3.0` installs 26:
 
-- **Workspace skills (5):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`
+- **Workspace skills (6):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`, `bootstrap-workspace`
 - **General skills (20):** `brainstorming`, `writing-plans`, `executing-plans`, `test-driven-development`, `systematic-debugging`, `verification-before-completion`, `code-review-and-quality`, `requesting-code-review`, `receiving-code-review`, `merge-latest-branches`, `writing-skills`, `shuo-ren-hua`, `dispatching-parallel-agents`, `subagent-driven-development`, `resumable-implementation-contracts`, `using-git-worktrees`, `doubt-driven-development`, `planning-and-task-breakdown`, `project-routing`, `handoff-to-workspace`
 
 The first workspace skill worth reading is `skill-routing`: it assigns each decision point to a skill or a fixed action, and `scripts/check_routing.py` fails when an assignment is missing or points nowhere.

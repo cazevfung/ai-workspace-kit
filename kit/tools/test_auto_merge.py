@@ -121,6 +121,14 @@ class RepoFixture(unittest.TestCase):
         self.write("tools/test_gate.py", PASSING)
         self.write("tests/test_sample.py", PASSING)
         self.write("notes.txt", "base\n")
+        # auto_merge 只认项目配置里的测试命令与目标分支；夹具仓库也得先接一次。
+        self.write(".agents/ticket-config.json", json.dumps({
+            "version": 1,
+            "project_id": "p-test",
+            "target_branch": "master",
+            "test_cmd": ["python", "tools/run_tests.py"],
+            "test_timeout": 1800,
+        }, ensure_ascii=False))
         self.commit("base")
 
         self.ticket_info = {
