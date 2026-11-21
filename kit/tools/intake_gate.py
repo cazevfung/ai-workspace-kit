@@ -15,7 +15,7 @@
     python tools/intake_gate.py 交接包.md
     python tools/intake_gate.py --extract 交接包.md   # 只打印第 1 节，供 PRD 原样搬运
 
-判据五条（`PRD-009` §4.8）：文件存在且能按 UTF-8 解码；六个固定标题齐全且
+判据五条（口径与 `docs/intake.md` 一致，不在别处另写一份）：文件存在且能按 UTF-8 解码；六个固定标题齐全且
 顺序正确；第 1 节含至少一段以 `>` 开头的引用；第 3 节非空且不是「待补充」这
 类占位；第 5 节至少有一个绝对路径。
 

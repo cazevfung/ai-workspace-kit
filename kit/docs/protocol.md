@@ -49,6 +49,8 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 '{"project_id":"ai-workspace"}' | Out-File -Encoding utf8 payload.json
 ```
 
+**路指错了不是参数错。** `--input` 指向的文件不存在、是个目录、或没权限读时，命令行层报 `INPUT_UNREADABLE`，`message` 里带**原样的那条路**与系统原因（例如 `读不到输入文件：/tmp/payload.json（No such file or directory）`）；这比「参数不合格」能多告诉你一件事：要改的是路径，不是 JSON 内容。编码、语法、未知字段这三类仍是 `INVALID_INPUT`。核心已经返回的 `error` 由命令行**原句**打印，不再套一层通用文案——冒烟时看到的 `500`、「at most 4000 characters」这类具体数字，就是核心原话。
+
 ## 操作与字段
 
 下表中的字段除明确标注外均为必填。未知字段拒绝，避免拼错后静默忽略。
@@ -60,7 +62,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | register_project | project_id, name, root | root 是已存在的绝对项目目录；root 是身份、project_id 是标签，同一路径重复登记复用原记录（回执返回原 project_id 与 name，`reused: true`），不报 CONFLICT、也不改已有标签；把自己的 project_id 指向第二个目录报 CONFLICT |
 | list_projects | 空对象 | 只读，列出 project_id / name / root；没有它时项目清单只能读库或靠工单反推 |
 | unregister_project | project_id | 撤销错误登记；项目下仍有工单时拒绝（PROJECT_HAS_TICKETS），回执里列出这些工单；撤销后同一路径可重新登记 |
-| create_ticket | project_id, ticket_id, title, deliverable, prd_path, criteria, root 可选 | 项目内 PRD 相对路径；保存内容摘要，创建 revision=1、ready 工单。root 可选：project_id 未登记时传了就顺手记一行（name 取目录名）再开单，不传报 NOT_FOUND 且 message 写明可以传 root；project_id 已登记而 root 与库里的不一致报 ROOT_MISMATCH，原记录不动 |
+| create_ticket | project_id, ticket_id, title, deliverable（必填，≤500 字）, prd_path, criteria, root 可选 | 项目内 PRD 相对路径；保存内容摘要，创建 revision=1、ready 工单。root 可选：project_id 未登记时传了就顺手记一行（name 取目录名）再开单，不传报 NOT_FOUND 且 message 写明可以传 root；project_id 已登记而 root 与库里的不一致报 ROOT_MISMATCH，原记录不动 |
 | get_ticket | project_id, ticket_id | 返回工单、所有执行尝试（含 coordinator_session_id 与 coordinator_workdir）、提交和验收历史，以及合并记录数组 merges、问答历史数组 questions 与 answers、回信记录数组 notices（没有记录时均为空数组）；回信结果与协调者工作目录在同一份回执里，验收据此判交接闭环有没有走完 |
 | list_tickets | project_id 可选, limit 可选, offset 可选 | 默认 50 条，最多 100；按项目过滤 |
 | claim_ticket | project_id, ticket_id, expected_revision, coordinator_session_id, coordinator_workdir 可选, allow_parallel 可选 | 原子领取 ready/rework 工单，生成 attempt_id，状态 dispatching；coordinator_session_id 是派发它的协调会话，1–500 字符；coordinator_workdir 是协调者自己的工作目录（1–1000 字符），不传就是空，不阻止派发；**同项目已有在途工单时报 DISPATCH_BUSY，消息里点名那张单号与它停在哪一步**（在途 = dispatching / running / awaiting_review / blocked，见「同项目一次只跑一张单」）；`allow_parallel` 只收布尔且默认 false，显式传 true 才越过，越过往 events 写一条 `allow_parallel_override` 并在回执里回显 `parallel_with`；回执含 coordinator_session_id、coordinator_workdir、allow_parallel 与 parallel_with |
@@ -79,6 +81,8 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | record_notice | project_id, ticket_id, attempt_id, session_id, origin_session_id, status, detail, target_session_id, wake_kind | 记一次回信尝试（本操作只落库，不发消息）：status 只收 `sent` / `failed`，其他值报 INVALID_INPUT；session_id 必须等于该尝试 claim 时写下的 coordinator_session_id，否则 NOT_COORDINATOR 且不写行；target_session_id 必填且也必须等于那条协调会话，写成执行会话或别的会话报 NOT_TARGET 且不写行；wake_kind 是宿主回执里的原值，不按白名单收：只有 `created`（宿主把它当成新建任务而非投递）**特判**——一律落 `failed`、回执带 `alert: NOTIFY_CREATED_TASK` 并让这次调用**非零退出**（那一行仍然入库，事后查得到）；`queued` / `resumed` 与枚举外的取值（例如 `already-active`）一律原样入库，调用方不得自行映射成近似的三值之一（见「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」）；只校验形状——空串、纯空白、超过 40 字、含内部空白或换行报 INVALID_INPUT 且不写行；同一张单最多一条 `sent`，第二次报 ALREADY_NOTIFIED 且不写行；`failed` 可以多条，措辞在 detail 里，回执带 `alert: NOTIFY_FAILED` 但不改工单状态；回执含 notice_id、ticket_id、attempt_id、origin_session_id、status、detail、target_session_id、wake_kind、ticket_state 与 revision |
 
 `criteria` 是 1–100 项 `{"id":"C1","text":"明确验收条件"}`，id 不能重复。
+
+`deliverable` 必填且**不超过 500 字**（超了报 `INVALID_INPUT`，原句里写着 `at most 500 characters`）；它是「做的是不是这件事」，写法见上一段。`title` 上限 200 字，`reason` 上限 4000 字，`summary` 与 `evidence` 各条目上限 4000 字。
 
 `deliverable` 是必填的交付物描述：它要说什么东西、什么形状、给谁看。它和 `criteria` 不能互相替代——`criteria` 管「做得对不对」，`deliverable` 管「做的是不是这件事」。验收条件只约束质量、不约束主题时，成果会合规地跑偏（隔离试点 TEST-003 实际发生过）。
 
@@ -101,7 +105,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 - **答之前可以 recover。** `blocked` 在 `recover_ticket` 的允许状态集合里；recover 之后旧尝试 `superseded`、它的开放问题转 `voided`（回执的 `voided_question_ids` 列出是哪几条），revision+1。此后才到的答案报 `QUESTION_MISMATCH`，不会写进已失效的尝试；也不要把旧问题搬到新尝试上（新尝试 revision 已加一，旧答案依据的需求摘要也可能过期），要接着问就在新尝试上重新 `ask_ticket`。
 - **谁能答：人与协调会话。** `answered_by=human` 表示这是人给的原文，此时不许带 `answered_by_session_id`（带了报 `INVALID_INPUT`，虽是 null 也算带了）；`answered_by=coordinator` 表示协调会话代记，`answered_by_session_id` 必填、必须等于该尝试的 `coordinator_session_id`（否则 `NOT_COORDINATOR`），也不能等于执行会话自己的 `session_id`（`SELF_ANSWER`）。这两列是自报字段，不是身份认证：库里验不出「这句真是人说的」，它们只让后来的人看得出这条结论有没有被转述。
 - **一条问题一个答案。** `answers.question_id` 是 UNIQUE，本版不提供覆盖或改答案；答错了走 `recover_ticket` 重开。
-- **唤醒不是引擎能力。** `answer_ticket` 把工单改回 `running` 只说明库里不再等答案，不代表那个会话已经在跑。叫起来靠协调会话用 `send_to_session`（带 `target_session_id`）发一条消息：只放 `question_id` 与一句指令，**不复制答案正文**（复制就多一份不随修订变的真相）。执行会话醒来读 `get_ticket` 的 `questions` / `answers` 后继续，最后 `submit_result`。投递失败按 `PRD-005` 4.5 第 6 步处置：会话已不在（`ARCHIVED` / `DELETED` / `NOT_FOUND`）只能 `recover_ticket` 重新派发，不许换一个会话接着写。
+- **唤醒不是引擎能力。** `answer_ticket` 把工单改回 `running` 只说明库里不再等答案，不代表那个会话已经在跑。叫起来靠协调会话用 `send_to_session`（带 `target_session_id`）发一条消息：只放 `question_id` 与一句指令，**不复制答案正文**（复制就多一份不随修订变的真相）。执行会话醒来读 `get_ticket` 的 `questions` / `answers` 后继续，最后 `submit_result`。投递失败按 `docs/decisions.md` 的「送达判据」处置：会话已不在（`ARCHIVED` / `DELETED` / `NOT_FOUND`）只能 `recover_ticket` 重新派发，不许换一个会话接着写。
 
 **为什么是两张表，而不是一张表加可空答案列。** 判据是「一条问题一个答案」这条约束能不能落在库上，以及作废的问题要不要额外字段：`answers.question_id` 的 UNIQUE 让「只接受一个答案」在索引上成立，不靠代码自觉；作废的问题是 `questions.state='voided'` 且没有对应 `answers` 行，而一张表得靠「answer 为 null 且 state='open'」两个字段互相印证才算得出「还没答」，还要额外防「有答案却仍写 open」这种行。两张表也让问答与 `attempts` / `submissions` / `reviews` 的挂法一致（子表引用父行，父行唯一的约束在索引上）。`one_open_question` 是 `questions(attempt_id) WHERE state='open'` 的部分唯一索引：一条尝试同时只有一条开放问题。
 
@@ -117,7 +121,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | 6 | `answered_by=coordinator`，但会话就是执行会话自己 | `SELF_ANSWER` |
 | 7 | 同上，但会话不是派发这张单的协调会话 | `NOT_COORDINATOR` |
 
-1、2 排在 3 前面是有意的：工单一旦离开 `blocked`，「问题已作废」比「尝试编号不再当前」更接近事实，这也让 recover 之后的迟到答案如 `PRD-005` 4.7 所说报 `QUESTION_MISMATCH`。`ask_ticket` 一侧的 `STALE_ATTEMPT` 与 `SESSION_MISMATCH` 由当前尝试和绑定会话直接判，正常路径全可达。两个兜底码要单独说清：`ALREADY_ASKED` 与第 3 至 5 条一样，正常路径上先被状态检查挡下（`blocked` 再问是 `INVALID_STATE`，作废的问题再答是 `QUESTION_MISMATCH`），它们防的是库里出现「open 问题配 running 工单」这类不一致行；`one_open_question` 索引与状态同步写让这种行写不进去。
+1、2 排在 3 前面是有意的：工单一旦离开 `blocked`，「问题已作废」比「尝试编号不再当前」更接近事实，这也让 recover 之后的迟到答案一律按「问题已作废」处理，报 `QUESTION_MISMATCH`。`ask_ticket` 一侧的 `STALE_ATTEMPT` 与 `SESSION_MISMATCH` 由当前尝试和绑定会话直接判，正常路径全可达。两个兜底码要单独说清：`ALREADY_ASKED` 与第 3 至 5 条一样，正常路径上先被状态检查挡下（`blocked` 再问是 `INVALID_STATE`，作废的问题再答是 `QUESTION_MISMATCH`），它们防的是库里出现「open 问题配 running 工单」这类不一致行；`one_open_question` 索引与状态同步写让这种行写不进去。
 
 ### 回信落库：一张单最多一条 `sent`，没过回执的单合不进去
 
@@ -398,7 +402,8 @@ git -c core.hooksPath=<某工作树>/.githooks commit -m "..."
 - ALREADY_NOTIFIED：这张单已经有一条 `sent` 回信记录，读它的 `notices` 而不是再写一条；`failed` 不受此限，可以逐次记录。
 - DISPATCH_BUSY：同项目还有在途工单（`dispatching` / `running` / `awaiting_review` / `blocked`），消息里点名了是哪张单、停在哪一步。它先做完再领下一张；确实要并行就显式传 `allow_parallel: true`，越过会在 events 里留一条记录。
 - SCHEMA_MISMATCH：目标文件不是本工具的数据库，或版本不在已知升级路径上。init、migrate、读取与 backup 做同一套表/列校验，任意外部库不会被当成有效快照；也因此 backup 不能给旧库做快照——升级前需要一份快照时，先在文件层做（SQLite backup API，或停写后复制文件），再 migrate，旧库升级不自动迁移。`tools/work_gate.py --list` 读不了库时也打这个码并非零退出，不再打印一张空清单冒充「没有人在做」。
-- BACKUP_EXISTS / INVALID_INPUT：备份目标已存在或不是可写绝对目录。目标目录必须支持硬链接（FAT32、部分 SMB/NFS 不支持）。
+- INVALID_INPUT：字段形状不对、未知字段、JSON 语法或编码不对；核心的报错原句会带字段名与上限数字，照着改参数。backup 的目标已存在或不是可写绝对目录也报这个码：目标目录必须支持硬链接（FAT32、部分 SMB/NFS 不支持）。
+- INPUT_UNREADABLE：命令行层专有——`--input` 指的那份文件读不到（不存在、是目录、无权限）。消息里带原样的路径与系统原因；先修路径，别改 JSON。核心不会产生这个码，它只在 `python -m task_center` 这一层出现。
 
 ## 修订文档时的自查
 
@@ -421,8 +426,8 @@ grep -rn "<说法>" . --include=*.md
 
 **半修长什么样。** 只改被点名的那一句。今天有两次：
 
-- **AW-031 的范围句。** 变更记录写「1–8 节一字未改」，而同一版改了 §5 里的 AC01 与 AC08，§5 就在 1–8 里面，句子当场自相矛盾。第一次只把 `8` 改成 `7`（`a77a1ff`），§5 照样在改动里，句子照样假；第二轮回炉（`b094aaf`）才换成能对着 diff 逐条数的写法：「本次共 6 行新增 / 5 行删除，其中表头版本行 1 行、§5 AC01 与 AC08 共 2 行、§8 两行、本节新增 1 行；1–4、6–7 节与附录 A 零改动」。核这一条：`git show a77a1ff -- PRD/PRD-005-决策通道.md | grep -n "一字未改"` 打出的是「1–7 节、附录 A……一字未改」。
-- **AW-037 的归因句。** `tasks/plan-008` 里写「写这段时 11 条，AW-035/036 合进来后 13 条」，可 AW-036 当时并没有合并记录，那个因果是补出来的。回炉（`e72d3dd`）后换成「数字 + 核对时间 + 核对命令 + 逐行拆解」。核它：`grep -n "13 条" tasks/plan-008-过期表述清零.md`。
+- **AW-031 的范围句。** 变更记录写「1–8 节一字未改」，而同一版改了 §5 里的 AC01 与 AC08，§5 就在 1–8 里面，句子当场自相矛盾。第一次只把 `8` 改成 `7`（`a77a1ff`），§5 照样在改动里，句子照样假；第二轮回炉（`b094aaf`）才换成能对着 diff 逐条数的写法：「本次共 6 行新增 / 5 行删除，其中表头版本行 1 行、§5 AC01 与 AC08 共 2 行、§8 两行、本节新增 1 行；1–4、6–7 节与附录 A 零改动」。核这一条：对同一提交跑 `git show a77a1ff --stat` 再对一遍 diff，改动落在 §5，而句子说的是 1–7 节零改动。
+- **AW-037 的归因句。** `tasks/plan-008` 里写「写这段时 11 条，AW-035/036 合进来后 13 条」，可 AW-036 当时并没有合并记录，那个因果是补出来的。回炉（`e72d3dd`）后换成「数字 + 核对时间 + 核对命令 + 逐行拆解」。核它：在同一份计划里跑 `grep -n "13 条"`，看那一行旁边有没有核对时间与命令。
 
 ### 二、数字、条数、哈希、标识必须带核对时间与核对命令
 

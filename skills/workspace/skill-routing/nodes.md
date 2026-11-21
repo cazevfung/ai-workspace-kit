@@ -46,7 +46,7 @@
 | N26 | 文档与回复的语言质量 | `skill:shuo-ren-hua` | 已接 | 写完读出声：读起来像标签堆叠、省主语、倒装的，改回完整句子再交 |
 | N27 | 多任务并行与长任务断点续接 | `skill:subagent-driven-development` | 已接 | 并行前先确认各任务无共享文件；有共享状态就串行。长任务按 `skill:resumable-implementation-contracts` 落稳定任务 ID 与续跑点，`skill:dispatching-parallel-agents` 管分派 |
 | N28 | 开工前隔离工作区 | `skill:using-git-worktrees` | 已接 | 同一工作树已有别的活跃尝试时，先建 worktree 再动手；建不出来就停下告诉人，不许在共享工作树上并写 |
-| N29 | 我要把一条消息送进一个正在跑的会话：现在投还是插进这一轮，发完怎么确认打中了原目标 | `action:先 list_session_queue 看目标在不在跑；在跑且这条消息要改的是它当前这一轮的产出，就 steer_session 直接注入（或先 send_to_session 拿到 queued_message_id 再 steer_session_queued_message），否则 send_to_session 并带 target_session_id；发完读回执的 wake_kind：created 就是发错了目标，其余任何非空取值（queued / resumed / already-active 等）都算打中 | 无 skill | 目标不在跑、或 steer 回执是 delivery=queued（这一轮已收尾，插不进去）时，按 `PRD/PRD-005-决策通道.md` §8.2 的四条判据重新判断该走哪一档，改投递并明确告诉人这一轮的产出已经按旧指令做完；回执出现 `wake_kind=created` 时先停掉新建的那条任务，再带 `target_session_id` 重发 |
+| N29 | 我要把一条消息送进一个正在跑的会话：现在投还是插进这一轮，发完怎么确认打中了原目标 | `action:先 list_session_queue 看目标在不在跑；在跑且这条消息要改的是它当前这一轮的产出，就 steer_session 直接注入（或先 send_to_session 拿到 queued_message_id 再 steer_session_queued_message），否则 send_to_session 并带 target_session_id；发完读回执的 wake_kind：created 就是发错了目标，其余任何非空取值（queued / resumed / already-active 等）都算打中 | 无 skill | 目标不在跑、或 steer 回执是 delivery=queued（这一轮已收尾，插不进去）时，按 `docs/decisions.md` 的「消息通道三档」四条判据重新判断该走哪一档，改投递并明确告诉人这一轮的产出已经按旧指令做完；回执出现 `wake_kind=created` 时先停掉新建的那条任务，再带 `target_session_id` 重发 |
 
 ## 与本表配套的文件
 

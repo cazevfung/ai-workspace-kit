@@ -12,7 +12,7 @@
 （名册只读 attempts / tickets 两列，不依赖某次 schema 升级）。**不建库、不写行，
 也不修任何会话**：误建的新会话要停掉仍由人来做，本脚本只告诉你它绑没绑。
 
-判据（与 PRD-009 的交接面一致）：
+判据（与 `docs/decisions.md` 的「送达判据」一致）：
 
 - **绑上了**：这张会话是一条尝试的 `session_id`，且工单与尝试都还在
   `dispatching` / `running` / `awaiting_review` / `blocked` 之内 → 退出码 0，

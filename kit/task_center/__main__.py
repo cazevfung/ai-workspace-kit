@@ -16,6 +16,7 @@ class Parser(argparse.ArgumentParser):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    input_path = None
     try:
         parser = Parser(description="Local task center (trusted single-user prototype)")
         parser.add_argument("--db", required=True, help="Absolute path to the one authoritative database")
@@ -28,13 +29,20 @@ def main():
         if args.input == "-":
             raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         else:
+            input_path = args.input
             with Path(args.input).open("rb") as source:
                 raw = source.read(MAX_INPUT_BYTES + 1)
         if len(raw) > MAX_INPUT_BYTES:
             raise ValueError("JSON input exceeds 1 MiB")
         payload = json.loads(raw.decode("utf-8-sig")) if raw.strip() else {}
         response = Center(args.db).execute(args.operation, payload, args.request_id)
-    except (ValueError, OSError, UnicodeError, RecursionError):
+    except OSError as problem:
+        # 「读不到输入文件」与「参数不合格」是两件事：前者要人改路径，后者要人改内容。
+        # 合并成一个 INVALID_INPUT 的话，路径打错时会去翻 JSON，翻不出错在哪里。
+        where = f"读不到输入文件：{input_path}" if input_path else "读不到标准输入"
+        reason = problem.strerror or str(problem)
+        response = {"ok": False, "error": {"code": "INPUT_UNREADABLE", "message": f"{where}（{reason}）"}}
+    except (ValueError, UnicodeError, RecursionError):
         response = {"ok": False, "error": {"code": "INVALID_INPUT", "message": "Invalid arguments, JSON input, or inaccessible input file"}}
     print(json.dumps(response, ensure_ascii=False, allow_nan=False))
     return 0 if response["ok"] else 1

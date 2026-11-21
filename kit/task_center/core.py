@@ -38,7 +38,7 @@ FIELDS = {
 }
 READS = {"get_ticket", "list_tickets", "list_projects", "list_unmerged", "events"}
 
-# 回信失败不改工单状态，也不自动重派：它在回执上带这一个标记，等人来看（PRD-009 R5 / AC07）。
+# 回信失败不改工单状态，也不自动重派：它在回执上带这一个标记，等人来看（见 docs/decisions.md「回执一条」）。
 NOTIFY_FAILED = "NOTIFY_FAILED"
 # 宿主把「发给某个会话」当成新建任务时用的标记：那次回执没有到达任何人，命令要非零退出。
 # 只报错不停会话：自动停掉误建的新会话要调宿主能力，超出本单范围。
@@ -310,7 +310,7 @@ class Center:
             item["checks"] = json.loads(item["checks"])
         result["merges"] = [dict(row) for row in conn.execute(
             "SELECT * FROM merges WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
-        # 问答随尝试挂在工单下面：验收会话靠它判断「成果是不是按最终结论做的」（PRD-005 3）。
+        # 问答随尝试挂在工单下面：验收会话靠它判断「成果是不是按最终结论做的」（判据见 docs/decisions.md）。
         result["questions"] = [dict(row) for row in conn.execute(
             "SELECT * FROM questions WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
         for item in result["questions"]:
@@ -318,7 +318,7 @@ class Center:
         result["answers"] = [dict(row) for row in conn.execute(
             "SELECT a.* FROM answers a JOIN questions q ON q.id=a.question_id WHERE q.ticket_id=? ORDER BY a.rowid",
             (result["id"],))]
-        # 回信记录随工单挂上来：发了没、失败原因、发给谁，验收会话读 get_ticket 就能判闭环（PRD-009 AC06）。
+        # 回信记录随工单挂上来：发了没、失败原因、发给谁，验收会话读 get_ticket 就能判闭环（见 docs/decisions.md「回执一条」）。
         result["notices"] = [dict(row) for row in conn.execute(
             "SELECT * FROM notices WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
         return result
@@ -377,7 +377,7 @@ class Center:
         self._unchanged_prd(conn, ticket)
         # 派发者与执行者必须是两个会话：claim 时写下谁派的，bind 时拒绝同一个会话。
         coordinator = text(data, "coordinator_session_id", 500)
-        # 协调者自己的工作目录是可选的自报值：不传就空，不阻止派发（PRD-009 R5）。
+        # 协调者自己的工作目录是可选的自报值：不传就空，不阻止派发（见 docs/decisions.md「送达判据」）。
         workdir = text(data, "coordinator_workdir", 1000) if "coordinator_workdir" in data else None
         aid = str(uuid4())
         conn.execute("INSERT INTO attempts(id,ticket_id,revision,prd_path,prd_sha256,state,session_id,"
@@ -444,7 +444,7 @@ class Center:
         qid = "q-" + str(uuid4())
         conn.execute("INSERT INTO questions VALUES (?,?,?,?,?,'open',?)",
                      (qid, ticket["id"], attempt["id"], question, packed(choices), asked_at))
-        # 两处都写，权威在工单级（PRD-005 4.4）；revision 不变：等一句话不是新代次。
+        # 两处都写，权威在工单级（见 docs/protocol.md「blocked：工单在等一句话」）；revision 不变：等一句话不是新代次。
         conn.execute("UPDATE attempts SET state='blocked' WHERE id=?", (attempt["id"],))
         conn.execute("UPDATE tickets SET state='blocked' WHERE id=?", (ticket["id"],))
         return {"question_id": qid, "ticket_id": ticket["id"], "attempt_id": attempt["id"],
@@ -495,7 +495,7 @@ class Center:
                 "answered_by": answered_by, "answered_at": created_at, "revision": ticket["revision"]}
 
     def _record_notice(self, conn, data):
-        # 回信是整条派发链的收口：发没发出去、失败了为什么，都得在库里查得到（PRD-009 R5）。
+        # 回信是整条派发链的收口：发没发出去、失败了为什么，都得在库里查得到（见 docs/decisions.md「回执一条」）。
         # 不在这里发任何消息，也不推动工单状态机：本操作只落库。
         ticket = self._ticket(conn, data)
         aid = text(data, "attempt_id", 200)
@@ -551,10 +551,10 @@ class Center:
     def _invalidate(self, conn, ticket, state):
         if ticket["current_attempt"]:
             # 只终止未完成的尝试；accepted/rejected/superseded 是审计真相，不得被覆盖。
-            # blocked 必须在这张名单里，否则被作废的尝试会留着「还在等答案」的样子（PRD-005 4.4 第 3 条）。
+            # blocked 必须在这张名单里，否则被作废的尝试会留着「还在等答案」的样子（见 docs/protocol.md 的状态同步口径）。
             conn.execute("UPDATE attempts SET state='superseded' WHERE id=? AND state IN ('blocked','dispatching','running','submitted')",
                          (ticket["current_attempt"],))
-            # 问题随之作废：作废之后晚到的答案只能报 QUESTION_MISMATCH（PRD-005 4.7）。
+            # 问题随之作废：作废之后晚到的答案只能报 QUESTION_MISMATCH。
             # 放在这里而不是 _recover_ticket 里，是因为 revise / cancel 同样会把尝试作废。
             conn.execute("UPDATE questions SET state='voided' WHERE attempt_id=? AND state='open'",
                          (ticket["current_attempt"],))

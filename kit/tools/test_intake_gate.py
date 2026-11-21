@@ -37,7 +37,7 @@ def drop_section(text, number):
 
 
 class PackCheckTest(unittest.TestCase):
-    """按形状判定的五条判据（PRD-009 §4.8）：每条都要能被一个反例推翻。"""
+    """按形状判定的五条判据（见 `docs/intake.md`）：每条都要能被一个反例推翻。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
