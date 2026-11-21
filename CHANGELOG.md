@@ -1,29 +1,22 @@
 # 更新记录
 
-## 未发布（KIT-006）
+## 0.4.0（2026-11-21）
 
-主题：把契约里的空引用补实、把入参报错分开、把插件做成能装的包。
+2026-11-21 发布。把 KIT-005「装上就能开工」与 KIT-006「契约补实、插件可装」两轮成果合成一个版本；本单只做版本号、变更记录与插件包对齐，闸门判定与核心逻辑一行未改。
 
-- 新增 `kit/docs/decisions.md`：把被反复引用的四条口径——消息通道三档、回执一条、送达判据、项目接入面——沉淀成随包文档。`kit` 与 `skills` 里原来指向包外需求文档的 19 个文件全部改指向它，或改成不依赖外部文档的表述；`grep -rn "PRD-00[2-9]" kit skills --include=*.md --include=*.py` 已经没有命中。
-- `kit/docs/protocol.md`：`create_ticket` 的字段行写明 `deliverable` ≤500 字；新增命令行层错误码 `INPUT_UNREADABLE`，读不到 `--input` 的文件时带回原样的路径与系统原因，不再和「参数不合格」共用一个 `INVALID_INPUT`。核心返回的 `error` 由命令行原句打印，核心的校验与文案一行未改。
-- 插件补真实图标：`plugin/draft/assets/icon.png`（1024×1024，由 Cindy 的图片能力生成一次），`ghost.json` 声明 `icon` 并升到 `0.2.1`；打包产物 `dist/ai-workspace-kit-0.2.1.cindy` 入库，新增 `kit/tools/test_plugin_pack.py` 拆包自检（清单、`main.js`、图标是真图且大于 1024 字节、包与源码一致）。
-- `.gitignore`：`dist/` 改成只放行 `dist/*.cindy`，其他构建输出照旧忽略。
-- `plugin/README.md` 与根 `README.md` 补「装插件 → 启动 → 它报出四步计划」一节，写明装那一步必须人在 Cindy 里点确认，并写明「打包 ≠ 安装 ≠ 上架」。
-- 用例数 481 → 491（新增 6 条拆包自检、4 条命令行入参）。
-- 返工（验收 reject 的 C4）：补 `tools/test_plugin_pack.py` 仓库根转发层，与 `tools/run_tests.py`、`tools/doc_gate.py` 同形，`python tools/test_plugin_pack.py` 现在在仓库根就能跑；顺手清掉两处指不到文件的引用——`docs/protocol.md` 里那份不在包内的计划文件名，以及 `pdsa-workflow` 指向 PRD 第 8 节 / `PRD-001` §7 的两处。
-
-## 未发布（KIT-005）
-
-主题：装上就能开工。
-
-- 新增 `onboard.py`：打印「`create_project` → 开协调会话 → 第一条指令」的调用计划，`--json` 给每步完整参数，`--dry-run` 零副作用；`dispatch_ticket` 计划复用同一份 `send_to_session` 参数。
-- 新增 `skills/workspace/bootstrap-workspace`：写清经 `cindy_mcp_call_tool` 调 `cindy_helper` 的确切参数、预演与事后 `list_sessions` 反查。
-- `plugin/draft/` 升级为可安装清单：`ghost.json` 声明 `bootstrap` 与 `dispatch_ticket`，`main.js` 返回与 `onboard.py --json` 同源的步骤与失败停点，补 `locales/`。图标待发布前用真实素材补。
-- 新增 `tools/add_project.py`：为业务仓库写 `.agents/ticket-config.json`（`test_cmd` / `target_branch`）并把 `core.hooksPath` 指向套件 `.githooks`。
-- `tools/auto_merge.py` 改读项目配置：缺配置在第 2 步非零退出并提示跑 `add_project.py`，不再回落 `tools/run_tests.py`；目标分支默认取配置值。
+- 版本与包对齐：`VERSION` 到 `0.4.0`；`plugin/draft/ghost.json` 的 `version` 同步到 `0.4.0`，重新打包为 `dist/ai-workspace-kit-0.4.0.cindy`，`dist/` 下只留这一个包。`README` / `README.en` / `docs` / `kit/README` / `plugin/README` 里的版本号、用例数与包名同步到这次发布。
+- 装上就能开工：新增 `onboard.py`，打印「`create_project` → 开协调会话 → 第一条指令」的调用计划，`--json` 给每步完整参数，`--dry-run` 零副作用；`dispatch_ticket` 计划复用同一份 `send_to_session` 参数。新增 `skills/workspace/bootstrap-workspace`：写清经 `cindy_mcp_call_tool` 调 `cindy_helper` 的确切参数、预演与事后 `list_sessions` 反查。
+- `plugin/draft/` 升级为可安装清单：`ghost.json` 声明 `bootstrap` 与 `dispatch_ticket`，`main.js` 返回与 `onboard.py --json` 同源的步骤与失败停点，补 `locales/`。
+- 新增 `tools/add_project.py`：为业务仓库写 `.agents/ticket-config.json`（`test_cmd` / `target_branch`）并把 `core.hooksPath` 指向套件 `.githooks`。`tools/auto_merge.py` 改读项目配置：缺配置在第 2 步非零退出并提示跑 `add_project.py`，不再回落 `tools/run_tests.py`；目标分支默认取配置值。
 - `tools/doc_gate.py` 补源码树的技能发现路径（`skills/workspace` 与 `skills/generic`），修掉 0.3.0 里「在源码目录直接跑测试有 7 项 `test_doc_gate` 失败」的已知问题；判定条件未改。
 - 新增 `verify/verify_onboard.py`：临时 HOME 里跑 install → add-project → create_ticket → claim → bind → submit → review → merge → close 九步。
-- 用例数 453 → 481。
+- 新增 `kit/docs/decisions.md`：把被反复引用的四条口径——消息通道三档、回执一条、送达判据、项目接入面——沉淀成随包文档。`kit` 与 `skills` 里原来指向包外需求文档的 19 个文件全部改指向它，或改成不依赖外部文档的表述；`grep -rn "PRD-00[2-9]" kit skills --include=*.md --include=*.py` 已经没有命中。
+- `kit/docs/protocol.md`：`create_ticket` 的字段行写明 `deliverable` ≤500 字；新增命令行层错误码 `INPUT_UNREADABLE`，读不到 `--input` 的文件时带回原样的路径与系统原因，不再和「参数不合格」共用一个 `INVALID_INPUT`。核心返回的 `error` 由命令行原句打印，核心的校验与文案一行未改。
+- 插件补真实图标：`plugin/draft/assets/icon.png`（1024×1024，由 Cindy 的图片能力生成一次），`ghost.json` 声明 `icon`——KIT-006 先打成 `0.2.1`，本单随套件升到 `0.4.0` 重打。新增 `kit/tools/test_plugin_pack.py` 拆包自检（清单、`main.js`、图标是真图且大于 1024 字节、包与源码一致）。
+- `.gitignore`：`dist/` 改成只放行 `dist/*.cindy`，其他构建输出照旧忽略。
+- `plugin/README.md` 与根 `README.md` 补「装插件 → 启动 → 它报出四步计划」一节，写明装那一步必须人在 Cindy 里点确认，并写明「打包 ≠ 安装 ≠ 上架」。
+- 返工（KIT-006 验收 reject 的 C4）：补 `tools/test_plugin_pack.py` 仓库根转发层，与 `tools/run_tests.py`、`tools/doc_gate.py` 同形，`python tools/test_plugin_pack.py` 现在在仓库根就能跑；顺手清掉两处指不到文件的引用——`docs/protocol.md` 里那份不在包内的计划文件名，以及 `pdsa-workflow` 指向 PRD 第 8 节 / `PRD-001` §7 的两处。
+- 用例数 453 → 491。
 
 ## 0.3.0
 

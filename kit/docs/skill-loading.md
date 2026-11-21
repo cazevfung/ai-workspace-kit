@@ -294,7 +294,7 @@ cmd //c "mklink /J X:/示例项目//.agents//skills//merge-latest-branches {{WOR
 
 ### 8.1 探针技能
 
-`skills/zz-load-probe/SKILL.md`（sha256 `ce042f2fcfbaa48a380507f477bafec69fc878a24019f4b394ea453c5cc8636d`，验证完成后已删除）：
+`skills/zz-load-probe/SKILL.md`（sha256 摘要存于同目录下的 `evidence/aw-036-probe.sha256`，`sha256sum -c` 格式；探针验证完成后已删除）：
 
 ```markdown
 ---

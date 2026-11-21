@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # Windows
 ## 安装器做了什么
 
 1. 复制 `kit/` 到工作区，并把 `{{WORKSPACE}}` 替换成真实路径；
-2. 把 25 个技能复制到 `~/.agents/skills`（已存在的默认跳过）；
+2. 把 26 个技能复制到 `~/.agents/skills`（已存在的默认跳过）；
 3. 写 `~/.agents/center.json`（中心库指针）与 `~/.agents/intake/`（交接协议）；
 4. 初始化 `.data/task-center.sqlite3` 并登记项目 `ai-workspace`；
 5. `git init` 并做首次提交（**在启用钩子之前**，否则钩子会拦住这次提交）；
@@ -86,4 +86,4 @@ python uninstall.py --purge-data     # 连 .data/ 进度库一起删
 **技能在 agent 里看不到。** 确认技能装在 `~/.agents/skills/<名字>/SKILL.md`；
 Cindy 每次以 `--no-approve` 启动，项目级技能目录不参与启动，用户级目录才可靠。
 
-**测试很慢。** 381 项用例大约 1–2 分钟；第一次跑会创建临时库，之后更快。
+**测试很慢。** 491 项用例大约 1–2 分钟；第一次跑会创建临时库，之后更快。
