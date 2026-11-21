@@ -18,6 +18,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -48,8 +52,8 @@ def main(argv=None) -> int:
               (result.stdout + result.stderr)[-1500:])
 
         check("工作区核心存在", (ws / "task_center" / "core.py").is_file())
-        check("项目内技能 5 个", len([p for p in (ws / ".agents" / "skills").iterdir()]) == 5)
-        check("用户级技能 25 个", len([p for p in (agents / "skills").iterdir()]) == 25)
+        check("项目内技能 6 个", len([p for p in (ws / ".agents" / "skills").iterdir()]) == 6)
+        check("用户级技能 26 个", len([p for p in (agents / "skills").iterdir()]) == 26)
         center_path = agents / "center.json"
         center_ok = False
         if center_path.is_file():

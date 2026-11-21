@@ -1,5 +1,18 @@
 # 更新记录
 
+## 未发布（KIT-005）
+
+主题：装上就能开工。
+
+- 新增 `onboard.py`：打印「`create_project` → 开协调会话 → 第一条指令」的调用计划，`--json` 给每步完整参数，`--dry-run` 零副作用；`dispatch_ticket` 计划复用同一份 `send_to_session` 参数。
+- 新增 `skills/workspace/bootstrap-workspace`：写清经 `cindy_mcp_call_tool` 调 `cindy_helper` 的确切参数、预演与事后 `list_sessions` 反查。
+- `plugin/draft/` 升级为可安装清单：`ghost.json` 声明 `bootstrap` 与 `dispatch_ticket`，`main.js` 返回与 `onboard.py --json` 同源的步骤与失败停点，补 `locales/`。图标待发布前用真实素材补。
+- 新增 `tools/add_project.py`：为业务仓库写 `.agents/ticket-config.json`（`test_cmd` / `target_branch`）并把 `core.hooksPath` 指向套件 `.githooks`。
+- `tools/auto_merge.py` 改读项目配置：缺配置在第 2 步非零退出并提示跑 `add_project.py`，不再回落 `tools/run_tests.py`；目标分支默认取配置值。
+- `tools/doc_gate.py` 补源码树的技能发现路径（`skills/workspace` 与 `skills/generic`），修掉 0.3.0 里「在源码目录直接跑测试有 7 项 `test_doc_gate` 失败」的已知问题；判定条件未改。
+- 新增 `verify/verify_onboard.py`：临时 HOME 里跑 install → add-project → create_ticket → claim → bind → submit → review → merge → close 九步。
+- 用例数 453 → 481。
+
 ## 0.3.0
 
 同步到原工作区 2026-11-20 13:32（master `6bc6d32`），对应上游 R-007 到 R-009 三轮。

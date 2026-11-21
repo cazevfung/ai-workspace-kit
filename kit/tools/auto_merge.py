@@ -24,8 +24,10 @@
    journal、临时 worktree 都早），被拒时 master、tag、journal、工作树与分支一样都没动。
    `--dry-run` 例外：预演本来就什么都不写，这道判在那里只降为一条警告，好让预演
    照样走完冲突预演与临时 worktree 测试（真合并仍然过不去）。
-2. 前置检查：当前检出必须在目标分支上（否则方向反了：`git merge` 会把目标分支合进
-   当前分支）；**已跟踪文件**无改动（`git status --porcelain` 里除 `??` 之外为空）；
+2. 项目配置与前置检查：先读目标项目的 `.agents/ticket-config.json`——缺文件、缺
+   `test_cmd` 或 `target_branch` 就停在这一步，提示跑 `tools/add_project.py`，不回落
+   到任何默认测试命令；`--target` 不传时用配置里的 `target_branch`。然后当前检出必须
+   在目标分支上（否则方向反了：`git merge` 会把目标分支合进当前分支）；**已跟踪文件**无改动（`git status --porcelain` 里除 `??` 之外为空）；
    目标分支存在、源分支存在、源分支领先目标（`rev-list --count target..branch > 0`）。
    未跟踪文件本身不拦（它们不参与这次合并），但会逐个列出，并注明「这些文件没有被合进去」。
    第 2 步收尾第一件事是**比对两棵树**：工单最新一次提交的 `head_sha`（被验收的那棵树）
@@ -39,9 +41,9 @@
    指名文件并给出补救；交集为空时行为与以前完全一样。见 `guard_untracked_overwrite`。
 3. 冲突预演：`git merge-tree`；有冲突就列出文件并中止，不自动解冲突。
 4. 打回退点 `pre-merge-<ticket>`（已存在则拒绝：不覆盖旧回退点）。
-5. 临时 worktree 里先合一次并跑 `python tools/run_tests.py`；红就删临时 worktree、
+5. 临时 worktree 里先合一次并跑项目配置里的 `test_cmd`；红就删临时 worktree、
    退出非零——此时目标分支一动未动。
-6. 绿了在真实检出上 `git merge --no-ff <branch>`；合并后再跑一次全量测试，
+6. 绿了在真实检出上 `git merge --no-ff <branch>`；合并后再跑一次配置里的测试，
    再红就 `git reset --hard <tag>` 回滚。
 7. 成功：调 `merge_ticket` 写回合并提交、目标分支与测试汇总行。
 
@@ -103,6 +105,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import work_gate  # noqa: E402
 
 STEP_LOCK = "第 0 步 · 合并互斥锁"
+STEP_CONFIG = "第 2 步 · 项目配置"
 STEP_TICKET = "第 1 步 · 读工单"
 STEP_NOTICE = "第 1 步 · 回执预检"
 STEP_CHECKS = "第 2 步 · 前置检查"
@@ -210,11 +213,25 @@ def exists(repo, ref, env=None) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", ref, step="", check=False, env=env).returncode == 0
 
 
-def run_tests_in(where, *, python, env, timeout=1800, step=STEP_PREVIEW):
-    """在 where 里跑全量测试，返回 (是否通过, 汇总行, 完整输出)。"""
+def run_tests_in(where, *, python, test_cmd, env, timeout=1800, step=STEP_PREVIEW):
+    """在 where 里跑项目配置里的测试命令，返回 (是否通过, 汇总行, 完整输出)。
+
+    `test_cmd` 必须由 `load_project_config` 读出来：没有配置就不该走到这里。
+    这里不再回落 `tools/run_tests.py`——回落会让「项目根本没配测试」看起来像跑过了。
+    """
+    if not test_cmd:
+        raise Fail(
+            step,
+            "项目配置里没有 test_cmd，无法确认合并前测试跑什么。",
+            "先用 `python tools/add_project.py <仓库> --test-cmd \"...\"` 写配置；"
+            "不要用一条空命令让合并看起来通过了。",
+        )
+    command = list(test_cmd)
+    if command[0] in ("python", "python3", "py"):
+        command[0] = python
     try:
         proc = subprocess.run(
-            [python, "tools/run_tests.py"],
+            command,
             cwd=str(where),
             capture_output=True,
             text=True,
@@ -226,15 +243,15 @@ def run_tests_in(where, *, python, env, timeout=1800, step=STEP_PREVIEW):
     except FileNotFoundError as exc:
         raise Fail(
             step,
-            f"跑不了全量测试：找不到解释器 {python}（{exc}）。",
-            "用当前解释器跑一次 `python tools/run_tests.py` 确认能起来；"
-            "本工具用的是 --python 指定的（默认当前解释器）。",
+            f"跑不了测试命令：找不到 {command[0]}（{exc}）。",
+            f"检查 .agents/ticket-config.json 的 test_cmd：{command}；"
+            "本工具用的是 --python 指定的解释器（默认当前解释器）。",
         )
     except subprocess.TimeoutExpired:
         raise Fail(
             step,
-            f"全量测试超过 {timeout} 秒没有跑完，已中止等待。",
-            "先手动跑 `python tools/run_tests.py` 看是哪一处卡住（多半是有用例在等输入）；"
+            f"测试超过 {timeout} 秒没有跑完，已中止等待。",
+            "先手动跑一次配置里的 test_cmd 看是哪一处卡住；"
             "修好前不要合并，目标分支此时没有被改动。",
         )
     output = (proc.stdout or "") + (proc.stderr or "")
@@ -245,6 +262,51 @@ def run_tests_in(where, *, python, env, timeout=1800, step=STEP_PREVIEW):
     if not summary:
         summary = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), "(无输出)")
     return proc.returncode == 0, summary, output
+
+
+def load_project_config(repo) -> dict:
+    """读 `<repo>/.agents/ticket-config.json`，返回已验证的配置。
+
+    为什么不让它可选：以前合并只认「跑 tools/run_tests.py」+ 默认 master。业务项目
+    接进工作区之后，测试命令与目标分支各不相同；缺配置时静默回落，会让一场根本没
+    跑的测试被写成合并记录里的「通过」。所以缺文件、缺字段、类型不对一律停在这里，
+    且指向 `add_project.py`，而不是猜一个默认值。
+    """
+    repo = Path(repo).resolve()
+    path = repo / ".agents" / "ticket-config.json"
+    fix = (
+        f"先接项目：`python tools/add_project.py {repo.as_posix()}`（可加 "
+        "`--test-cmd \"...\"` 指定测试命令）。它会写 .agents/ticket-config.json，"
+        "并把 core.hooksPath 指向套件 .githooks。"
+    )
+    if not path.is_file():
+        raise Fail(STEP_CONFIG, f"目标项目缺 .agents/ticket-config.json：{path}", fix)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Fail(STEP_CONFIG, f"读不懂 {path}：{exc}", fix) from exc
+    if not isinstance(data, dict):
+        raise Fail(STEP_CONFIG, f"{path} 顶层必须是对象。", fix)
+    test_cmd = data.get("test_cmd")
+    if not isinstance(test_cmd, list) or not test_cmd or not all(isinstance(part, str) and part for part in test_cmd):
+        raise Fail(
+            STEP_CONFIG,
+            f"{path} 的 test_cmd 必须是非空字符串数组（例如 [\"python\", \"tools/run_tests.py\"]）。",
+            fix,
+        )
+    target = data.get("target_branch")
+    if not isinstance(target, str) or not target.strip():
+        raise Fail(STEP_CONFIG, f"{path} 缺 target_branch（非空字符串，例如 master / main）。", fix)
+    timeout = data.get("test_timeout", 1800)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise Fail(STEP_CONFIG, f"{path} 的 test_timeout 必须是正整数秒数。", fix)
+    return {
+        "path": path,
+        "test_cmd": [str(part) for part in test_cmd],
+        "target_branch": target.strip(),
+        "test_timeout": timeout,
+        "project_id": data.get("project_id"),
+    }
 
 
 def open_center(db_path=None, step=STEP_TICKET):
@@ -799,7 +861,7 @@ def run_merge(
     ticket_id,
     *,
     branch=None,
-    target="master",
+    target=None,
     dry_run=False,
     record_only=False,
     ticket_reader=None,
@@ -815,6 +877,12 @@ def run_merge(
     branch = branch or f"ticket/{ticket_id}"
     python = python or sys.executable
 
+    # 第 2 步的配置判在拿锁与读工单之前：本次合并到底该跑什么、合进哪里，
+    # 都写在目标项目的 .agents/ticket-config.json 里。缺配置时一步都不动，
+    # 而不是先拿锁、跑一遍默认命令、再在记录那一步发现没配测试。
+    config = load_project_config(repo)
+    target = target or config["target_branch"]
+
     if ticket_reader is None or merge_recorder is None:
         center, project_id = open_center_for_project(repo, db_path, STEP_TICKET)
         if ticket_reader is None:
@@ -826,6 +894,7 @@ def run_merge(
     # 之类与真实原因无关的报错，而真正要说的那句话是「谁占着」。
     lock = acquire_merge_lock(repo, ticket_id, emit, env=env)
     try:
+        emit(f"项目配置：{config['path']}（目标分支 {target}，测试 {' '.join(config['test_cmd'])}）")
         if record_only:
             # 半截状态的收口路径：同一把锁、同一道工单门，只是判据反过来问。
             return _record_only_steps(
@@ -838,6 +907,7 @@ def run_merge(
                 emit=emit,
                 env=env,
                 python=python,
+                config=config,
             )
         return _merge_steps(
             repo,
@@ -850,6 +920,7 @@ def run_merge(
             emit=emit,
             env=env,
             python=python,
+            config=config,
         )
     finally:
         release_merge_lock(lock, emit)
@@ -1236,6 +1307,7 @@ def _record_only_steps(
     emit,
     env,
     python,
+    config,
 ):
     """`--record-only`：已合并且无记录的现场，跑测试 → 写记录 → 清理。锁由 run_merge 管。"""
     ticket = _step_ticket(ticket_id, ticket_reader, emit)
@@ -1257,7 +1329,10 @@ def _record_only_steps(
         )
     emit(f"合并提交：{commit[:12]}（{target} 的祖先；parent2 是 {branch} 的 tip {tip[:12]}）")
 
-    passed, summary, output = run_tests_in(repo, python=python, env=env, step=STEP_RECORD_TESTS)
+    passed, summary, output = run_tests_in(
+        repo, python=python, test_cmd=config["test_cmd"], env=env,
+        timeout=config["test_timeout"], step=STEP_RECORD_TESTS,
+    )
     emit(output.rstrip())
     if not passed:
         tag = f"pre-merge-{ticket_id}"
@@ -1297,6 +1372,7 @@ def _merge_steps(
     emit,
     env,
     python,
+    config,
 ):
     """第 1~7 步。锁由 run_merge 取与释放，所以这里不用管锁。"""
     # 第 1 步：工单本身必须有资格合并
@@ -1364,7 +1440,8 @@ def _merge_steps(
             )
 
         passed, summary, output = run_tests_in(
-            worktree, python=python, env=env, step=STEP_PREVIEW
+            worktree, python=python, test_cmd=config["test_cmd"], env=env,
+            timeout=config["test_timeout"], step=STEP_PREVIEW,
         )
         emit(output.rstrip())
         if not passed:
@@ -1412,7 +1489,10 @@ def _merge_steps(
     }
     write_journal(repo, ticket_id, journal, emit)
 
-    passed, summary, output = run_tests_in(repo, python=python, env=env, step=STEP_MERGE)
+    passed, summary, output = run_tests_in(
+        repo, python=python, test_cmd=config["test_cmd"], env=env,
+        timeout=config["test_timeout"], step=STEP_MERGE,
+    )
     emit(output.rstrip())
     if not passed:
         git(repo, "reset", "--hard", tag, step=STEP_MERGE, env=env)
@@ -1455,7 +1535,7 @@ def main(argv, out=None):
     parser = argparse.ArgumentParser(description="验收通过后自动合并，失败自动回滚")
     parser.add_argument("--ticket", default=os.environ.get("TASK_CENTER_TICKET"))
     parser.add_argument("--branch", default=None, help="源分支，默认 ticket/<ticket>")
-    parser.add_argument("--target", default="master", help="目标分支，默认 master")
+    parser.add_argument("--target", default=None, help="目标分支，默认取项目配置的 target_branch")
     parser.add_argument("--dry-run", action="store_true", help="跑到预演与测试就停，不碰目标分支")
     parser.add_argument(
         "--record-only",

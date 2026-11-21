@@ -1,28 +1,71 @@
 {
-  "_comment": "设计稿，不是可发布包。缺 icon、main.js、locales，未在目标 Cindy 版本上实测。按 cindy-plugin-creator 补齐后再打包。",
   "schemaVersion": 3,
   "id": "ai-workspace-kit",
   "name": "AI 工作区套件",
-  "description": "安装一套带工单、证据、独立验收的 AI 工作区。",
-  "whenToUse": "用户想在本机装一套 AI 工作区/工单体系时使用；本插件只做安装引导，工作区本体在本地目录里。",
-  "version": "0.1.0",
+  "description": "把装好的 AI 工作区加成宿主项目、开协调会话，或把一张已领取的工单派给执行会话；只给调用计划，不替宿主执行。",
+  "whenToUse": "刚装完 AI 工作区要开工、把目录加成项目、开协调会话、发第一条指令，或把已领取的工单派给执行会话时使用；需要生成或修改工作区文件时不适用。",
+  "version": "0.2.0",
   "minCindyVersion": "0.1.68",
-  "author": "AI Workspace Kit contributors",
   "entry": "main.js",
   "command": "ai-workspace",
-  "keywords": ["AI 工作区", "工单", "workspace", "安装", "ticket"],
+  "locales": {
+    "en": "locales/en.json",
+    "zh-CN": "locales/zh-CN.json"
+  },
   "tools": [
     {
-      "name": "show_install_plan",
-      "description": "返回安装计划与前置条件，不执行任何写操作。",
+      "name": "bootstrap",
+      "description": "返回「把工作区加成项目 → 开协调会话 → 反查会话」的调用计划，不执行任何宿主写操作。步骤与工作区 <workspace>/onboard.py --json 的 bootstrap 计划一致：list_projects → create_project → send_to_session → list_sessions。失败路径：list_projects 读不到清单就停下、不要猜路径；create_project 目录不存在或同名冲突时先修目录或复用 project_path，不要重复登记；send_to_session 返回 NOT_FOUND / ARCHIVED / DELETED 时先 list_sessions 查状态，不要重复新建；list_sessions 找不到 title 与 workingDir 匹配项即会话没建出来，不要报告已开工。",
       "parameters": {
         "type": "object",
         "properties": {
           "workspace": {
             "type": "string",
-            "description": "可选，用户希望安装到的目录；不传则用默认 ~/ai-workspace。"
+            "description": "已安装工作区的绝对路径；原样传给 create_project 的 working_dir 与 send_to_session 的 project_path。"
+          },
+          "project_name": {
+            "type": "string",
+            "description": "可选的宿主项目名；不传用工作区目录名。"
+          },
+          "title": {
+            "type": "string",
+            "description": "可选的协调会话标题；不传用「AI 工作区 · 协调会话」。"
           }
-        }
+        },
+        "required": ["workspace"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "dispatch_ticket",
+      "description": "返回「派发一张已领取工单」的调用计划，不执行任何宿主写操作。步骤与工作区 <workspace>/onboard.py --json 的 dispatch_ticket 计划一致：get_ticket → claim_ticket → send_to_session → list_sessions；send_to_session 与 bootstrap 同一份参数。失败路径：get_ticket 不是 ready / rework 就停下；claim_ticket 遇 DISPATCH_BUSY 先做完在途单，遇 SELF_DISPATCH 换执行会话，遇 STALE_ATTEMPT 重新取 revision；send_to_session 返回 NOT_FOUND / ARCHIVED / DELETED 先修会话再重派，回执标题不是本单时停掉误建任务再带 target_session_id 重发；list_sessions 找不到匹配会话即派发未完成，不要自己 bind_session 顶替执行者。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "description": "工作区绝对路径；传给计划里的 project_path 与 coordinator_workdir。"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "中心库里的项目 id；先 list_projects 或 get_ticket 核对，不要猜。"
+          },
+          "ticket_id": {
+            "type": "string",
+            "description": "已 claim、等待派发的工单号。"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "get_ticket 返回的当前 revision，原样传给 claim_ticket。"
+          },
+          "coordinator_session_id": {
+            "type": "string",
+            "description": "协调会话自己的 session id，用 get_current_session_id 取；不能是执行会话的 id。"
+          }
+        },
+        "required": ["workspace", "project_id", "ticket_id", "expected_revision", "coordinator_session_id"],
+        "additionalProperties": false
       }
     }
   ]

@@ -27,7 +27,7 @@ English version: [README.en.md](README.en.md)
 
 ## 它是什么
 
-它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 25 个技能，5 个工作区技能加 20 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
+它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 26 个技能，6 个工作区技能加 20 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
 
 ### 拆活
 
@@ -202,7 +202,21 @@ python tools/run_tests.py            # 应全绿
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；`v0.3.0` 装出来是 453 项。
+装完还要把工作区接进宿主、把业务仓库接进工作区：
+
+```bash
+cd ~/ai-workspace
+python onboard.py --json                       # create_project → 开会话 → 第一条指令，每步完整参数
+python tools/add_project.py D:/my-project      # 业务仓库写 .agents/ticket-config.json 并指向 .githooks
+```
+
+套件仓库里还有一条九步自检，它在临时 HOME 里真装一遍再走完闭环：
+
+```bash
+python verify/verify_onboard.py
+```
+
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 481 项。
 
 `examples/demo.py` 用一个临时库把闭环走一遍：建工单、派发、提交、验收。它不连真实会话，不写你的工作区，结束时删掉临时库。
 
@@ -240,9 +254,9 @@ ai-workspace/
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.3.0` 共 25 个：
+技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.3.0` 共 26 个：
 
-- **工作区技能（5）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`
+- **工作区技能（6）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`bootstrap-workspace`
 - **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
   `systematic-debugging`、`verification-before-completion`、`code-review-and-quality`、
   `requesting-code-review`、`receiving-code-review`、`merge-latest-branches`、`writing-skills`、
