@@ -165,6 +165,47 @@ class UsageTest(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class EmptyTest(unittest.TestCase):
+    """一处也没核到时不能与「核了很多处、都成立」长得一样。
+
+    退 0 不变（没东西可核不是错），但 stdout 要有一行 `EMPTY`。以前两者都只是
+    「引用闸门通过：核了 0 处引用」/「核了 N 处引用」，看起来一样。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_no_references_prints_empty_and_still_exits_zero(self):
+        sample = self.root / "plain.md"
+        sample.write_text("# 无引用的文档\n\n这里没有任何引用。\n", encoding="utf-8")
+        code, out = run(["--paths", str(sample), "--kinds", "all"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("核了 0 处引用", out)
+        self.assertIn("EMPTY", out, f"核到 0 处时必须打出 EMPTY，实际输出：{out}")
+
+    def test_references_found_do_not_print_empty(self):
+        sample = self.root / "with-ref.md"
+        target = self.root / "sub" / "target.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("line one\nline two\n", encoding="utf-8")
+        # 带目录分隔符的相对路径才进 checked；裸文件名会被跳过（算 0 处）。
+        sample.write_text("见 `sub/target.md:2` 那一行\n", encoding="utf-8")
+        code, out = run(["--paths", str(sample), "--root", str(self.root), "--kinds", "line"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("核了 1 处引用", out)
+        self.assertNotIn("EMPTY", out, f"真核到了就不许报 EMPTY，实际输出：{out}")
+
+    def test_relative_reference_still_counts_when_the_file_is_missing(self):
+        """指不到东西时走不成立分支（退 1），不会被 EMPTY 遮掉。"""
+        sample = self.root / "broken.md"
+        sample.write_text("见 `sub/nope.md:1`\n", encoding="utf-8")
+        code, out = run(["--paths", str(sample), "--root", str(self.root), "--kinds", "line"])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("EMPTY", out, f"有真问题时报的是不成立，不是 EMPTY：{out}")
+
+
 class RepositoryScopeTest(unittest.TestCase):
     def test_repository_scope_passes(self):
         """本轮结束条件里那条全仓命令，用例里也跑一遍。"""

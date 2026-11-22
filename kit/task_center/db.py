@@ -28,23 +28,31 @@ def now():
 
 
 SCHEMA = """
-CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE);
+CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE,
+ next_number INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE batches(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ resource_key TEXT NOT NULL, owner_session_id TEXT,
+ planned_at TEXT NOT NULL, closed_at TEXT);
 CREATE TABLE tickets(
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
  deliverable TEXT NOT NULL,
- prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL, criteria TEXT NOT NULL,
- revision INTEGER NOT NULL, state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL);
+ prd_path TEXT NOT NULL, prd_sha256 TEXT, criteria TEXT NOT NULL,
+ revision INTEGER NOT NULL, criteria_version INTEGER NOT NULL DEFAULT 1,
+ state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL,
+ batch_id TEXT REFERENCES batches(id));
 CREATE TABLE attempts(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), revision INTEGER NOT NULL,
+ criteria_version INTEGER NOT NULL DEFAULT 1,
  prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL,
  state TEXT NOT NULL, session_id TEXT, coordinator_session_id TEXT, coordinator_workdir TEXT,
- created_at TEXT NOT NULL);
+ created_at TEXT NOT NULL, batch_key TEXT);
 CREATE UNIQUE INDEX active_session ON attempts(session_id)
- WHERE session_id IS NOT NULL AND state IN ('blocked','running','submitted');
+ WHERE batch_key IS NULL AND session_id IS NOT NULL AND state IN ('blocked','running','submitted');
 CREATE TABLE submissions(
  id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
  summary TEXT NOT NULL, artifacts TEXT NOT NULL, evidence TEXT NOT NULL, risks TEXT NOT NULL,
- created_at TEXT NOT NULL, head_sha TEXT);
+ created_at TEXT NOT NULL, head_sha TEXT, base_sha TEXT, conflict_preview TEXT);
 CREATE TABLE reviews(
  id TEXT PRIMARY KEY, submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(id),
  reviewer_session_id TEXT NOT NULL, verdict TEXT NOT NULL, checks TEXT NOT NULL,
@@ -75,6 +83,12 @@ CREATE INDEX questions_ticket ON questions(ticket_id, asked_at);
 CREATE INDEX events_ticket ON events(ticket_id, id);
 CREATE INDEX tickets_project ON tickets(project_id, created_at);
 CREATE TABLE requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
+CREATE TABLE ticket_links(
+ from_ticket TEXT NOT NULL REFERENCES tickets(id), kind TEXT NOT NULL,
+ to_ticket TEXT NOT NULL REFERENCES tickets(id), created_at TEXT NOT NULL,
+ PRIMARY KEY (from_ticket, kind, to_ticket),
+ CHECK (kind IN ('blocked_by','related','rides_with')));
+CREATE INDEX ticket_links_to ON ticket_links(to_ticket, kind);
 """
 
 
@@ -83,53 +97,91 @@ def expected_tables(conn):
     return names
 
 
-REQUIRED_TABLES = {"projects", "tickets", "attempts", "submissions", "reviews", "events", "merges", "requests",
-                   "questions", "answers", "notices"}
+REQUIRED_TABLES = {"projects", "batches", "tickets", "attempts", "submissions", "reviews", "events", "merges",
+                   "requests", "questions", "answers", "notices", "ticket_links"}
 
 # Version 2 adds the PRD snapshot columns on attempts. Version 3 adds tickets.deliverable.
 # Version 4 adds attempts.coordinator_session_id so a coordinator cannot bind its own claim.
 # Version 5 adds merges so an accepted ticket can carry a queryable "landed" record.
 # Version 6 adds questions/answers so "waiting for one sentence" is a recorded state, and
-# widens the active_session predicate to include 'blocked' (see docs/protocol.md "blocked").
+# widens the active_session predicate to include 'blocked' (PRD-005 4.4).
 # Version 7 adds attempts.coordinator_workdir and the notices table so a handoff receipt that
-# was or was not sent is a recorded fact, not something a coordinator has to remember (docs/decisions.md "回执一条").
+# was or was not sent is a recorded fact, not something a coordinator has to remember (PRD-009 R5).
 # Version 8 adds notices.target_session_id and notices.wake_kind so "who it was sent to" and
 # "how the host treated it" are recorded too; a wake_kind of created means the host started a
-# new task instead of delivering, which is recorded as a failed notice (docs/decisions.md "送达判据").
+# new task instead of delivering, which is recorded as a failed notice (PRD-009 R5, AW-060).
 # Version 9 adds submissions.head_sha and merges.reviewed_sha so "which tree was accepted" and
 # "which tree is being merged" are two recorded values that can be compared (R-009 goal 2).
 # Both columns are nullable on purpose: rows written before this version have no sha, and
 # inventing one would turn a guess into a fact. `merge_ticket` therefore requires the literal
 # `unverified` for such a ticket instead of letting it through silently.
-# Only the 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 upgrades have known paths; everything else is rejected loudly.
-SCHEMA_VERSION = 9
+# Version 10 splits "the criteria changed" from "this attempt is dead" (PRD-013 R6/R7):
+# tickets.criteria_version and attempts.criteria_version count criteria revisions only, while
+# tickets.revision keeps counting generations (recover / cancel / restart / reopen).
+# submissions.base_sha records which commit the submitted tree branched from. Existing rows get
+# criteria_version = 1 (they were dispatched against the only criteria set that existed) and
+# base_sha = NULL (no commit was recorded then; a guessed sha would be a fact nobody verified).
+#
+# Version 11 gives "not started yet" a place in the database (PRD-014 R1/R2/R3/R5):
+# tickets.prd_sha256 becomes nullable so a planned ticket carries no fingerprint until it is
+# claimed; projects.next_number turns the ticket id into a number the database issues instead of
+# one the caller announces; ticket_links records blocked_by / related / rides_with edges. The
+# tickets table has to be rebuilt to drop NOT NULL from prd_sha256 — that is the one step in this
+# chain that is not a plain ALTER, and it copies every row verbatim (no value is invented: a
+#
+# Version 12 gives "several tickets in one trip" a place in the database (PRD-014 R4): batches holds the
+# window (resource_key + owner_session_id + planned_at/closed_at), tickets.batch_id says which trip a ticket
+# rides in, and attempts.batch_key copies it at claim time so the active_session index can be narrowed to
+# `batch_key IS NULL`. That narrowing is the whole point: a trip's tickets are outside the one-session-one-
+# ticket index, so one session may hold several active attempts in the same trip; ownership of a trip is not
+# an index but a runtime check in claim_ticket against batches.owner_session_id (BATCH_OWNED_BY_OTHER).
+# Nothing is backfilled: existing tickets get batch_id NULL and existing attempts batch_key NULL, so a
+# migrated database behaves exactly like it did before (one session, one ticket without a trip).
+#
+# Version 13 records the merge preview taken at submit time (PRD-015 R2): submissions.conflict_preview keeps
+# `{target_branch, target_sha, command, exit_code, conflicts}` as JSON text. An empty `conflicts` array means
+# "the preview ran and the merge is clean"; NULL means "no preview" — either the row predates this column or the
+# preview could not be computed (not a repository, head_sha not local, git unavailable). The two are kept apart
+# on purpose: writing an empty array for an uncomputed preview would claim every historical submission had
+# been previewed and come out clean.
+# Only the 3 -> 4 -> 5 -> … -> 12 -> 13 upgrades have known paths; everything else is rejected loudly.
+SCHEMA_VERSION = 13
+
+# 冻结形状的起点：v3 的 tickets / attempts 列。后面每一级的冻结形状都从这两个集合长出来，
+# 而不是从 REQUIRED_COLUMNS 做减法——后者会把「以后新增的列」自动算进旧版本应该有的形状里，
+# 升级链一加级就拦下本该放行的旧库。
+V3_TICKET_COLUMNS = {"id", "project_id", "title", "deliverable", "prd_path", "prd_sha256", "criteria",
+                     "revision", "state", "current_attempt", "created_at"}
+V3_ATTEMPT_COLUMNS = {"id", "ticket_id", "revision", "prd_path", "prd_sha256", "state", "session_id",
+                      "created_at"}
 
 REQUIRED_COLUMNS = {
-    "tickets": {"id", "project_id", "title", "deliverable", "prd_path", "prd_sha256", "criteria", "revision", "state", "current_attempt"},
-    "attempts": {"id", "ticket_id", "revision", "prd_path", "prd_sha256", "state", "session_id", "coordinator_session_id",
-                 "coordinator_workdir", "created_at"},
-    "submissions": {"id", "attempt_id", "summary", "artifacts", "evidence", "risks", "created_at", "head_sha"},
+    "projects": {"id", "name", "root", "next_number"},
+    "batches": {"id", "project_id", "resource_key", "owner_session_id", "planned_at", "closed_at"},
+    "tickets": V3_TICKET_COLUMNS | {"criteria_version", "batch_id"},
+    "attempts": V3_ATTEMPT_COLUMNS | {"coordinator_session_id", "coordinator_workdir", "criteria_version",
+                                   "batch_key"},
+    "submissions": {"id", "attempt_id", "summary", "artifacts", "evidence", "risks", "created_at", "head_sha",
+                    "base_sha", "conflict_preview"},
     "merges": {"id", "ticket_id", "commit_sha", "target_branch", "tests", "created_at", "reviewed_sha"},
     "questions": {"id", "ticket_id", "attempt_id", "question", "options", "state", "asked_at"},
     "answers": {"id", "question_id", "answer", "answered_by", "answered_by_session_id", "created_at"},
     "notices": {"id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail", "created_at",
                 "target_session_id", "wake_kind"},
+    "ticket_links": {"from_ticket", "kind", "to_ticket", "created_at"},
 }
 
 # 冻结的 v3 形状：升级前先核对它确实是本工具的旧库，而不是碰巧带 user_version=3 的别的文件。
 # 三条冻结形状都写全，不用 REQUIRED_TABLES 做集合减法——那会把「以后新增的表」
 # 自动算进旧版本应该有的形状里，升级链一加级就拦下本该放行的旧库。
 V3_REQUIRED_TABLES = {"projects", "tickets", "attempts", "submissions", "reviews", "events", "requests"}
-V3_REQUIRED_COLUMNS = {
-    "tickets": REQUIRED_COLUMNS["tickets"],
-    "attempts": REQUIRED_COLUMNS["attempts"] - {"coordinator_session_id", "coordinator_workdir"},
-}
+V3_REQUIRED_COLUMNS = {"tickets": V3_TICKET_COLUMNS, "attempts": V3_ATTEMPT_COLUMNS}
 
 # v4 有 coordinator_session_id、还没有 merges 与 coordinator_workdir；同样是冻结形状。
 V4_REQUIRED_TABLES = V3_REQUIRED_TABLES
 V4_REQUIRED_COLUMNS = {
-    "tickets": REQUIRED_COLUMNS["tickets"],
-    "attempts": REQUIRED_COLUMNS["attempts"] - {"coordinator_workdir"},
+    "tickets": V3_TICKET_COLUMNS,
+    "attempts": V3_ATTEMPT_COLUMNS | {"coordinator_session_id"},
 }
 
 # v5 有 merges（但还没有 reviewed_sha），还没有 questions/answers，active_session 谓词不含 blocked。
@@ -143,15 +195,63 @@ V6_REQUIRED_COLUMNS = {**V5_REQUIRED_COLUMNS, "questions": REQUIRED_COLUMNS["que
 
 # v7 有 notices 与 coordinator_workdir，notices 还没有 target_session_id / wake_kind 两列。
 V7_REQUIRED_TABLES = V6_REQUIRED_TABLES | {"notices"}
-V7_REQUIRED_COLUMNS = {**V6_REQUIRED_COLUMNS, "notices": REQUIRED_COLUMNS["notices"] - {"target_session_id", "wake_kind"}}
+V7_REQUIRED_COLUMNS = {**V6_REQUIRED_COLUMNS,
+                       "attempts": V3_ATTEMPT_COLUMNS | {"coordinator_session_id", "coordinator_workdir"},
+                       "notices": REQUIRED_COLUMNS["notices"] - {"target_session_id", "wake_kind"}}
 
 # v8 有 notices 的两列，还没有 submissions.head_sha 与 merges.reviewed_sha。
 V8_REQUIRED_TABLES = V7_REQUIRED_TABLES
-V8_REQUIRED_COLUMNS = {**V7_REQUIRED_COLUMNS, "submissions": REQUIRED_COLUMNS["submissions"] - {"head_sha"}}
+# 13 之前 submissions 的列：冻结形状从这里减，不从 REQUIRED_COLUMNS 直接减——
+# 后者会把以后新增的列自动算进旧版本应有的形状里（`conflict_preview` 刚踩过这一下）。
+SUBMISSIONS_BEFORE_PREVIEW = REQUIRED_COLUMNS["submissions"] - {"conflict_preview"}
+V8_REQUIRED_COLUMNS = {**V7_REQUIRED_COLUMNS,
+                       "submissions": SUBMISSIONS_BEFORE_PREVIEW - {"head_sha", "base_sha"}}
+
+# v9 有 head_sha 与 reviewed_sha，还没有 criteria_version 与 base_sha。
+V9_REQUIRED_TABLES = V8_REQUIRED_TABLES
+V9_REQUIRED_COLUMNS = {**V8_REQUIRED_COLUMNS, "submissions": SUBMISSIONS_BEFORE_PREVIEW - {"base_sha"}}
+
+# v10 有 criteria_version 与 base_sha，还没有 ticket_links 与 projects.next_number；
+# 它是最后一版「tickets.prd_sha256 是 NOT NULL」的形状，所以升级要重建 tickets 表。
+V10_REQUIRED_TABLES = V9_REQUIRED_TABLES
+V10_REQUIRED_COLUMNS = {**V9_REQUIRED_COLUMNS, "tickets": V3_TICKET_COLUMNS | {"criteria_version"},
+                        "projects": {"id", "name", "root"}}
+
+# v11 有发号盘与依赖边，还没有批次表、`tickets.batch_id` 与 `attempts.batch_key`；
+# 它的 `active_session` 仍只按会话收窄（没有 `batch_key IS NULL` 那一半）。
+V11_REQUIRED_TABLES = V10_REQUIRED_TABLES | {"ticket_links"}
+V11_TICKET_COLUMNS = V3_TICKET_COLUMNS | {"criteria_version"}
+V11_ATTEMPT_COLUMNS = V3_ATTEMPT_COLUMNS | {"coordinator_session_id", "coordinator_workdir", "criteria_version"}
+V11_REQUIRED_COLUMNS = {**V10_REQUIRED_COLUMNS,
+                        "tickets": V11_TICKET_COLUMNS,
+                        "attempts": V11_ATTEMPT_COLUMNS,
+                        "projects": {"id", "name", "root", "next_number"},
+                        "ticket_links": REQUIRED_COLUMNS["ticket_links"]}
+
+# v12 有车次表与两个指针列，还没有 `submissions.conflict_preview`——13 要加的正是那一列。
+V12_REQUIRED_TABLES = V11_REQUIRED_TABLES | {"batches"}
+V12_TICKET_COLUMNS = V11_TICKET_COLUMNS | {"batch_id"}
+V12_ATTEMPT_COLUMNS = V11_ATTEMPT_COLUMNS | {"batch_key"}
+V12_REQUIRED_COLUMNS = {**V11_REQUIRED_COLUMNS,
+                        "tickets": V12_TICKET_COLUMNS,
+                        "attempts": V12_ATTEMPT_COLUMNS,
+                        "batches": REQUIRED_COLUMNS["batches"]}
 
 
 def column_names(conn, table):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def column_notnull(conn, table, column):
+    """这一列是否 NOT NULL；列不存在时返回 None（不是 False）。
+
+    v11 要放宽的正是 `tickets.prd_sha256` 的 NOT NULL，而表名与列名在 v10 里已经全在——
+    只看列集合分不出 10 与 11，所以形状守卫多看这一位。
+    """
+    for row in conn.execute(f"PRAGMA table_info({table})"):
+        if row[1] == column:
+            return bool(row[3])
+    return None
 
 
 def validate_columns(conn, required, tables=None):
@@ -244,6 +344,98 @@ MIGRATIONS = {
                                          or "reviewed_sha" in column_names(conn, "merges")),
         "already_applied_message": "Database claims version 8 but already has submissions.head_sha or merges.reviewed_sha; inspect it, do not migrate",
     },
+    9: {
+        "tables": V9_REQUIRED_TABLES,
+        "columns": V9_REQUIRED_COLUMNS,
+        "statements": [
+            # 存量行填 1，不填 0：它们派发时确实只有一版判据，0 是一个谁都没用过的编号。
+            "ALTER TABLE tickets ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE attempts ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1",
+            # 老提交没有记过基座 sha，留 NULL 表示「那时没有这一项」。
+            "ALTER TABLE submissions ADD COLUMN base_sha TEXT",
+        ],
+        "already_applied": lambda conn: ("criteria_version" in column_names(conn, "tickets")
+                                         or "criteria_version" in column_names(conn, "attempts")
+                                         or "base_sha" in column_names(conn, "submissions")),
+        "already_applied_message": "Database claims version 9 but already has criteria_version or submissions.base_sha; inspect it, do not migrate",
+    },
+    10: {
+        "tables": V10_REQUIRED_TABLES,
+        "columns": V10_REQUIRED_COLUMNS,
+        "statements": [
+            # 发号盘：每个项目一条独立序列，存量项目下一个号由下面那条 UPDATE 按已有最大号算出。
+            "ALTER TABLE projects ADD COLUMN next_number INTEGER NOT NULL DEFAULT 1",
+            # prd_sha256 从 NOT NULL 改成可空，SQLite 只能重建表；逐列抄写、不补任何值——
+            # 存量单的指纹原样保留，状态也原样保留（不回溯改成 planned）。
+            "CREATE TABLE tickets_v11("
+            " id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,"
+            " deliverable TEXT NOT NULL, prd_path TEXT NOT NULL, prd_sha256 TEXT, criteria TEXT NOT NULL,"
+            " revision INTEGER NOT NULL, criteria_version INTEGER NOT NULL DEFAULT 1,"
+            " state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL)",
+            "INSERT INTO tickets_v11(id,project_id,title,deliverable,prd_path,prd_sha256,criteria,revision,"
+            "criteria_version,state,current_attempt,created_at)"
+            " SELECT id,project_id,title,deliverable,prd_path,prd_sha256,criteria,revision,"
+            "criteria_version,state,current_attempt,created_at FROM tickets",
+            "DROP TABLE tickets",
+            "ALTER TABLE tickets_v11 RENAME TO tickets",
+            # 跟随 tickets 一起被 DROP 掉的索引要重建，否则按项目查工单会变成全表扫。
+            "CREATE INDEX tickets_project ON tickets(project_id, created_at)",
+            "CREATE TABLE ticket_links("
+            " from_ticket TEXT NOT NULL REFERENCES tickets(id), kind TEXT NOT NULL,"
+            " to_ticket TEXT NOT NULL REFERENCES tickets(id), created_at TEXT NOT NULL,"
+            " PRIMARY KEY (from_ticket, kind, to_ticket),"
+            " CHECK (kind IN ('blocked_by','related','rides_with')))",
+            "CREATE INDEX ticket_links_to ON ticket_links(to_ticket, kind)",
+            # 按已有最大号初始化（AW-096 -> 下一次 97）。历史号不改、不重排、不复用；
+            # 带不出数字的 id（例如早期的 t1 之外的写法）不参与取最大，没有可用的就从 1 开始。
+            "UPDATE projects SET next_number = COALESCE(("
+            " SELECT MAX(CAST(substr(t.id, length(rtrim(t.id,'0123456789'))+1) AS INTEGER)) + 1"
+            " FROM tickets t WHERE t.project_id = projects.id"
+            "   AND rtrim(t.id,'0123456789') <> t.id"
+            "   AND substr(t.id, length(rtrim(t.id,'0123456789'))+1) <> ''), 1)",
+        ],
+        "already_applied": lambda conn: ("next_number" in column_names(conn, "projects")
+                                         or "ticket_links" in expected_tables(conn)
+                                         or column_notnull(conn, "tickets", "prd_sha256") is False),
+        "already_applied_message": "Database claims version 10 but already has projects.next_number, the ticket_links table or a nullable tickets.prd_sha256; inspect it, do not migrate",
+    },
+    11: {
+        "tables": V11_REQUIRED_TABLES,
+        "columns": V11_REQUIRED_COLUMNS,
+        "statements": [
+            # 车次表按 PRD-014 R4.1 的列建全；没有单独的「状态列」——open / closed 由 closed_at 一列表达，
+            # 空即仍占用、非空即关闭，多一列 status 就多一处要与 closed_at 同步的真相。
+            "CREATE TABLE batches("
+            " id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),"
+            " resource_key TEXT NOT NULL, owner_session_id TEXT,"
+            " planned_at TEXT NOT NULL, closed_at TEXT)",
+            # 存量单一个值都不写：batch_id / batch_key 留 NULL，所以升级后的行为与升级前逐字一致
+            # （同一会话的第二张无车次单仍被 active_session 拒成 CONFLICT）。
+            "ALTER TABLE tickets ADD COLUMN batch_id TEXT REFERENCES batches(id)",
+            "ALTER TABLE attempts ADD COLUMN batch_key TEXT",
+            # 索引收窄成只守无车次的那一半：车次内的多张单根本不在它的范围内。
+            "DROP INDEX IF EXISTS active_session",
+            "CREATE UNIQUE INDEX active_session ON attempts(session_id)"
+            " WHERE batch_key IS NULL AND session_id IS NOT NULL AND state IN ('blocked','running','submitted')",
+        ],
+        # 声称 11 却已经有 12 的东西，或 tickets 还是 v10 的形状（prd_sha256 NOT NULL），一律拒。
+        "already_applied": lambda conn: ("batches" in expected_tables(conn)
+                                         or "batch_key" in column_names(conn, "attempts")
+                                         or "batch_id" in column_names(conn, "tickets")
+                                         or column_notnull(conn, "tickets", "prd_sha256") is not False),
+        "already_applied_message": "Database claims version 11 but already has the batches table, attempts.batch_key or tickets.batch_id (or a v10-shaped tickets table); inspect it, do not migrate",
+    },
+    12: {
+        "tables": V12_REQUIRED_TABLES,
+        "columns": V12_REQUIRED_COLUMNS,
+        "statements": [
+            # 存量行留 NULL=「那时没有这一项」：补成空数组就等于声称历史提交都预演过且干净。
+            # 可空正是这一列的语义：NULL 是「没跑过」，`{"conflicts":[]}` 才是「跑过且没撞」。
+            "ALTER TABLE submissions ADD COLUMN conflict_preview TEXT",
+        ],
+        "already_applied": lambda conn: "conflict_preview" in column_names(conn, "submissions"),
+        "already_applied_message": "Database claims version 12 but already has submissions.conflict_preview; inspect it, do not migrate",
+    },
 }
 
 
@@ -329,7 +521,7 @@ def migrate_database(path):
             # 事务内再确认一次，避免两次读之间版本被换掉。
             require(conn.execute("PRAGMA user_version").fetchone()[0] == version, "SCHEMA_MISMATCH",
                     "Schema version changed while migrating")
-            # 逐级升级：3 -> 4 -> 5 -> 6 -> 7 -> 8，每一级只跑自己那几条语句。
+            # 逐级升级：3 → 4 → 5 → … → 11，每一级只跑自己那几条语句。
             current = version
             while current < SCHEMA_VERSION:
                 for statement in MIGRATIONS[current]["statements"]:

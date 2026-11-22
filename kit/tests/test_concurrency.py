@@ -37,17 +37,25 @@ class DualProjectConcurrencyTest(unittest.TestCase):
         self.center = Center(self.db)
         self.counter = 0
         self.ok(self.center, "init")
+        # 库发号之后，测试里仍用 alpha-t1 / beta-t1 指代两张单；resolve() 发请求前换真号。
+        self.ids = {}
         for pid, name, path in (("alpha", "甲", self.alpha), ("beta", "乙", self.beta)):
             self.ok(self.center, "register_project", {"project_id": pid, "name": name, "root": str(path)})
-            self.ok(self.center, "create_ticket", {
-                "ticket_id": f"{pid}-t1", "project_id": pid, "title": "整理检查清单",
+            created = self.ok(self.center, "create_ticket", {
+                "project_id": pid, "title": "整理检查清单",
                 "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
-                "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+                "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
             })
+            self.ids[f"{pid}-t1"] = created["id"]
+
+    def resolve(self, payload):
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
 
     def call(self, center, operation, payload=None, request_id=None):
         self.counter += 1
-        return center.execute(operation, payload or {}, request_id or f"req-{self.counter}")
+        return center.execute(operation, self.resolve(payload or {}), request_id or f"req-{self.counter}")
 
     def ok(self, center, operation, payload=None, request_id=None):
         result = self.call(center, operation, payload, request_id)
@@ -91,6 +99,7 @@ class DualProjectConcurrencyTest(unittest.TestCase):
                     "session_id": session, "artifacts": ["result.md"],
                     "summary": f"{tid} 的清单", "evidence": ["按 PRD 逐条核对"], "risks": [],
                     "head_sha": "0123456789abcdef0123456789abcdef01234567",
+                    "base_sha": "0123456789abcdef0123456789abcdef01234567",
                 })
             except BaseException as exc:  # noqa: BLE001 - 收集到主线程再断言，避免线程里静默失败
                 errors.append(exc)
@@ -156,6 +165,8 @@ class DualProjectConcurrencyTest(unittest.TestCase):
             "project_id": "beta", "ticket_id": "beta-t1", "attempt_id": claim["attempt_id"],
             "session_id": "exec-beta", "summary": "引用别项目材料", "evidence": ["读了别的项目"],
             "risks": [],
+            "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "base_sha": "89abcdef0123456789abcdef0123456789abcdef",
         }
         for artifact in (str(self.alpha / "alpha-only.md"), "../项目甲/alpha-only.md"):
             result = self.call(self.center, "submit_result", {**payload, "artifacts": [artifact]})

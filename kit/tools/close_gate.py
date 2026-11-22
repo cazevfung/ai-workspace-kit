@@ -23,6 +23,8 @@
 4. 第 7 节第一个非空行是 `已收尾` / `等一句答复` / `需重开一轮` 之一。
 5. `--check` 三条现场事实：`git status --porcelain` 为空；中心库里本项目没有在途
    工单（只读打开，照 `tools/session_roster.py` 的写法）；状态位与第 7 节结论一致。
+   在途集合从 `tools/work_gate.py` **导入**，不在这里再写一份：`planned` 不算在途，
+   `dispatching` / `running` / `awaiting_review` / `blocked` / `ready` / `rework` 算。
 
 只查形状与三条事实，不查真假：证据是不是真跑过、第 4 节的取舍合不合理，脚本判
 不了，那一步由独立验收与人看。**也不执行** `round.md` 里的任意命令——那是代码
@@ -38,6 +40,13 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# 在途集合只有一份定义，就在 work_gate：判定与 `--list` 都从那里取值。以前这里自己
+# 写一份四个状态的元组，钩子那边六个——同一件事两个答案，于是 AW-094 留在 `ready`
+# 时 close_gate --check 说可以收、收尾提交被连拒三次（PRD-014 R1 / docs/closing.md）。
+from work_gate import CLOSING_BLOCKING_STATES
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
@@ -57,8 +66,9 @@ VERDICTS = ("已收尾", "等一句答复", "需重开一轮")
 # 状态位四档与三档结论的对应：需重开一轮在 round.md 里写作「需重开」。
 STATUSES = ("进行中", "等一句答复", "已收尾", "需重开")
 VERDICT_STATUS = {"已收尾": "已收尾", "等一句答复": "等一句答复", "需重开一轮": "需重开"}
-# 在途 = 这张单还在跑，与 session_roster.py 用的是同一组值。
-IN_FLIGHT = ("dispatching", "running", "awaiting_review", "blocked")
+# 在途 = 这张单还在跑或还欠着人领走，与 work_gate / session_roster 用的是同一组值。
+# 真值只有 `tools/work_gate.py` 那一份（`planned` 不算，见那里的说明），这里只是引用。
+IN_FLIGHT_STATES = CLOSING_BLOCKING_STATES
 
 PLACEHOLDER = re.compile(r"^(?:无|暂无|没有|待补充|待定|补充|todo|tbd)[\s。.；;!！?？]*$", re.I)
 ROUND_NO = re.compile(r"^轮次[：:]\s*(R-\d{3})\s*$", re.M)
@@ -256,10 +266,11 @@ def read_only(path):
 
 def in_flight_tickets(db, project):
     conn = read_only(db)
+    placeholders = ",".join("?" for _ in IN_FLIGHT_STATES)
     try:
         return conn.execute(
-            "SELECT id, state FROM tickets WHERE project_id=? AND state IN (?,?,?,?) ORDER BY id",
-            (project, *IN_FLIGHT),
+            f"SELECT id, state FROM tickets WHERE project_id=? AND state IN ({placeholders}) ORDER BY id",
+            (project, *IN_FLIGHT_STATES),
         ).fetchall()
     except sqlite3.Error as exc:
         raise GateError(f"查不了 {db} 的工单（目标不是本工具的库？）：{exc}") from exc

@@ -72,7 +72,7 @@ FAILURES = {
                          "它成立与否由 verify/verify_receipt.py 事后核。",
     },
     "dispatch_ticket": {
-        "get_ticket": "工单不是 ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
+        "get_ticket": "工单不是 planned / ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
         "claim_ticket": "DISPATCH_BUSY → 同项目已有在途单，先做完那张；SELF_DISPATCH → 换一个执行会话，"
                         "不要协调会话自己做；STALE_ATTEMPT → 重新 get_ticket 取当前 revision。",
         "send_to_session": "返回 NOT_FOUND / ARCHIVED / DELETED → 不要换一个字符串冒充执行者；先修会话再重派。"
@@ -181,7 +181,7 @@ def build_plans(workspace: str, *, project_name: str | None = None,
                 "server": "task_center",
                 "call_via": "python -m task_center --db <中心库> get_ticket",
                 "args": {"project_id": project_id, "ticket_id": ticket_id},
-                "check": "state 必须是 ready / rework；不是就先看它停在哪一步。",
+                "check": "state 必须是 planned / ready / rework；不是就先看它停在哪一步。",
             },
             {
                 "order": 2,

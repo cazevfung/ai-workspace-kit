@@ -75,7 +75,7 @@ const PLANS = {
         "server": "task_center",
         "call_via": "python -m task_center --db <中心库> get_ticket",
         "args": { "project_id": "{{PROJECT_ID}}", "ticket_id": "{{TICKET_ID}}" },
-        "check": "state 必须是 ready / rework；不是就先看它停在哪一步。"
+        "check": "state 必须是 planned / ready / rework；不是就先看它停在哪一步。"
       },
       {
         "order": 2,
@@ -129,7 +129,7 @@ const FAILURES = {
     "write_receipt": "没有反查到的 target_session_id → 不要拿猜的 id 凑一份回执；写不进去（目录只读、.data 建不出来）→ 停下说明，不要说已经开工。回执只是一份声称，它成立与否由 verify/verify_receipt.py 事后核。"
   },
   "dispatch_ticket": {
-    "get_ticket": "工单不是 ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
+    "get_ticket": "工单不是 planned / ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
     "claim_ticket": "DISPATCH_BUSY → 同项目已有在途单，先做完那张；SELF_DISPATCH → 换一个执行会话，不要协调会话自己做；STALE_ATTEMPT → 重新 get_ticket 取当前 revision。",
     "send_to_session": "返回 NOT_FOUND / ARCHIVED / DELETED → 不要换一个字符串冒充执行者；先修会话再重派。返回 created 但标题不是本单 → 回执发错了地方，停掉误建任务再带 target_session_id 重发。",
     "list_sessions": "找不到 title/workingDir 匹配的执行会话 → 派发未完成；不要自己 bind_session 顶替执行者。"

@@ -9,6 +9,7 @@
 不是本工具的库，它必须什么都不做，让调用方去看清楚那是什么文件。
 """
 import hashlib
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -360,6 +361,223 @@ def build_v8(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     return path
 
 
+# 冻结的 schema 9：`submissions` 已有 head_sha、`merges` 已有 reviewed_sha，
+# 还没有 `criteria_version` 与 `base_sha`。正式库（2026-11-21）就是这个形状。
+# 写全而不是从 SCHEMA 做减法：升级链每加一级，旧形状都不该跟着变。
+V9_SCHEMA = """
+CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL UNIQUE);
+CREATE TABLE tickets(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+ deliverable TEXT NOT NULL,
+ prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL, criteria TEXT NOT NULL,
+ revision INTEGER NOT NULL, state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL);
+CREATE TABLE attempts(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), revision INTEGER NOT NULL,
+ prd_path TEXT NOT NULL, prd_sha256 TEXT NOT NULL,
+ state TEXT NOT NULL, session_id TEXT, coordinator_session_id TEXT, coordinator_workdir TEXT,
+ created_at TEXT NOT NULL);
+CREATE UNIQUE INDEX active_session ON attempts(session_id)
+ WHERE session_id IS NOT NULL AND state IN ('blocked','running','submitted');
+CREATE TABLE submissions(
+ id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(id),
+ summary TEXT NOT NULL, artifacts TEXT NOT NULL, evidence TEXT NOT NULL, risks TEXT NOT NULL,
+ created_at TEXT NOT NULL, head_sha TEXT);
+CREATE TABLE reviews(
+ id TEXT PRIMARY KEY, submission_id TEXT NOT NULL UNIQUE REFERENCES submissions(id),
+ reviewer_session_id TEXT NOT NULL, verdict TEXT NOT NULL, checks TEXT NOT NULL,
+ reason TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE events(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT REFERENCES tickets(id),
+ operation TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE merges(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
+ commit_sha TEXT NOT NULL, target_branch TEXT NOT NULL, tests TEXT NOT NULL, created_at TEXT NOT NULL,
+ reviewed_sha TEXT);
+CREATE TABLE questions(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
+ attempt_id TEXT NOT NULL REFERENCES attempts(id),
+ question TEXT NOT NULL, options TEXT NOT NULL, state TEXT NOT NULL, asked_at TEXT NOT NULL);
+CREATE UNIQUE INDEX one_open_question ON questions(attempt_id) WHERE state='open';
+CREATE TABLE notices(
+ id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
+ attempt_id TEXT NOT NULL REFERENCES attempts(id), origin_session_id TEXT NOT NULL,
+ status TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL,
+ target_session_id TEXT NOT NULL DEFAULT '', wake_kind TEXT NOT NULL DEFAULT '');
+CREATE UNIQUE INDEX one_sent_notice ON notices(ticket_id) WHERE status='sent';
+CREATE INDEX notices_ticket ON notices(ticket_id, created_at);
+CREATE TABLE answers(
+ id TEXT PRIMARY KEY, question_id TEXT NOT NULL UNIQUE REFERENCES questions(id),
+ answer TEXT NOT NULL, answered_by TEXT NOT NULL, answered_by_session_id TEXT, created_at TEXT NOT NULL);
+CREATE INDEX questions_ticket ON questions(ticket_id, asked_at);
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX tickets_project ON tickets(project_id, created_at);
+CREATE TABLE requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response TEXT NOT NULL);
+"""
+
+
+def build_v9(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
+    """写一个内容完整的 v9 库：一张在跑、一张已验收、一条带 sha 的提交与一条老提交。
+
+    故意造两种提交：一条有 `head_sha`（v9 才有的列），一条没有——迁移给
+    `base_sha` 补值时，正是这两种行要一起留空。
+    """
+    prd_sha = hashlib.sha256((Path(project_root) / "PRD.md").read_bytes()).hexdigest()
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(V9_SCHEMA)
+        conn.execute("INSERT INTO projects VALUES ('p1','项目一',?)", (str(project_root),))
+        conn.execute("INSERT INTO tickets VALUES ('t1','p1','还在做','一份清单','PRD.md',?,'[]',1,'running','a1',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO tickets VALUES ('t2','p1','已验收','另一份清单','PRD.md',?,'[]',1,'done','a2',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts VALUES ('a1','t1',1,'PRD.md',?,'running','executor-1','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts VALUES ('a2','t2',1,'PRD.md',?,'accepted','executor-2','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO submissions VALUES ('s1','a2','已交付','[]','[\"自检\"]','[]',?,?)",
+                     (stamp, "0123456789abcdef0123456789abcdef01234567"))
+        conn.execute("INSERT INTO reviews VALUES ('r1','s1','reviewer-1','accept','[]','逐项核对',?)", (stamp,))
+        conn.execute("INSERT INTO merges VALUES ('m1','t2','abc1234','master','300 项全绿',?,NULL)", (stamp,))
+        conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES ('t1','bind_session','{}',?)",
+                     (stamp,))
+        conn.execute("INSERT INTO requests VALUES ('req-1','fp','{}')")
+        conn.execute("PRAGMA user_version=9")
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+
+def build_v10(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
+    """写一个内容完整的 v10 库：正式库 2026-11-21 迁移前的形状。
+
+    在 v9 形状上补上 9 -> 10 那三列（criteria_version ×2、base_sha），再把
+    `tickets.prd_sha256` 留着 NOT NULL —— 10 -> 11 要放宽的正是这一位。
+    工单号故意用 `AW-095` / `AW-096`：发号盘的初始化要按已有最大号算出下一个 97。
+    """
+    path = build_v9(path, project_root, stamp)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("ALTER TABLE tickets ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1")
+        conn.execute("ALTER TABLE attempts ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1")
+        conn.execute("ALTER TABLE submissions ADD COLUMN base_sha TEXT")
+        conn.execute("DELETE FROM attempts")
+        conn.execute("DELETE FROM submissions")
+        conn.execute("DELETE FROM reviews")
+        conn.execute("DELETE FROM merges")
+        conn.execute("DELETE FROM events")
+        conn.execute("DELETE FROM requests")
+        conn.execute("DELETE FROM tickets")
+        conn.execute("DELETE FROM projects")
+        prd_sha = hashlib.sha256((Path(project_root) / "PRD.md").read_bytes()).hexdigest()
+        conn.execute("INSERT INTO projects VALUES ('ai-workspace','工作区',?)", (str(project_root),))
+        conn.execute("INSERT INTO tickets(id,project_id,title,deliverable,prd_path,prd_sha256,criteria,revision,"
+                     "criteria_version,state,current_attempt,created_at)"
+                     " VALUES ('AW-095','ai-workspace','已经验收','一份清单','PRD.md',?,'[]',1,1,'done','a1',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO tickets(id,project_id,title,deliverable,prd_path,prd_sha256,criteria,revision,"
+                     "criteria_version,state,current_attempt,created_at)"
+                     " VALUES ('AW-096','ai-workspace','还在做','另一份清单','PRD.md',?,'[]',1,1,'running','a2',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts(id,ticket_id,revision,criteria_version,prd_path,prd_sha256,state,"
+                     "session_id,coordinator_session_id,coordinator_workdir,created_at)"
+                     " VALUES ('a1','AW-095',1,1,'PRD.md',?,'accepted','executor-1','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO attempts(id,ticket_id,revision,criteria_version,prd_path,prd_sha256,state,"
+                     "session_id,coordinator_session_id,coordinator_workdir,created_at)"
+                     " VALUES ('a2','AW-096',1,1,'PRD.md',?,'running','executor-2','coordinator-1','D:/协调者',?)",
+                     (prd_sha, stamp))
+        conn.execute("INSERT INTO submissions VALUES ('s1','a1','已交付','[]','[\"自检\"]','[]',?,?,NULL)",
+                     (stamp, "0123456789abcdef0123456789abcdef01234567"))
+        conn.execute("INSERT INTO reviews VALUES ('r1','s1','reviewer-1','accept','[]','逐项核对',?)", (stamp,))
+        conn.execute("INSERT INTO merges VALUES ('m1','AW-095','abc1234','master','300 项全绿',?,NULL)", (stamp,))
+        conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES ('AW-096','bind_session','{}',?)",
+                     (stamp,))
+        conn.execute("INSERT INTO requests VALUES ('req-1','fp','{}')")
+        conn.execute("PRAGMA user_version=10")
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+# 「声称 v10 却已经有 v11 的指纹放宽」的现场：把 tickets 表按无 NOT NULL 的形状重建。
+# 只用于形状守卫那一条用例——列集合没变，变的正是 PRAGMA table_info 里的 notnull 位。
+_NULLABLE_TICKETS_REBUILD = """
+CREATE TABLE tickets_nullable(
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+ deliverable TEXT NOT NULL, prd_path TEXT NOT NULL, prd_sha256 TEXT, criteria TEXT NOT NULL,
+ revision INTEGER NOT NULL, criteria_version INTEGER NOT NULL DEFAULT 1,
+ state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL);
+INSERT INTO tickets_nullable SELECT id,project_id,title,deliverable,prd_path,prd_sha256,criteria,revision,
+ criteria_version,state,current_attempt,created_at FROM tickets;
+DROP TABLE tickets;
+ALTER TABLE tickets_nullable RENAME TO tickets;
+"""
+
+
+V11_TABLES = TABLES + ("merges", "questions", "answers", "notices", "ticket_links")
+# v12 多出车次表；v13 只给 submissions 加一列、不改表清单，所以 v13 与 v12 的表清单逐字相同。
+V12_TABLES = V11_TABLES + ("batches",)
+
+
+def build_v11(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
+    """写一个内容完整的 v11 库：正式库 2026-11-21 升 schema 12 之前的形状。
+
+    在 v10 形状上补上 10 -> 11 那三样（发号盘 `next_number`、可空的 `tickets.prd_sha256`、
+    `ticket_links` 与反向索引），还没有 `batches` 表、`tickets.batch_id` 与 `attempts.batch_key`
+    ——12 要加的正是这三样，且一个值都不回溯。
+    """
+    path = build_v10(path, project_root, stamp)
+    conn = sqlite3.connect(path)
+    try:
+        # 真实登记走 register_project，库里存的是规范化后的绝对路径；这里对齐它，
+        # 否则临时目录的 8.3 短名会让 bind_session 的目录核对对不上。
+        conn.execute("UPDATE projects SET root=? WHERE id='ai-workspace'",
+                     (os.path.normcase(str(Path(project_root).resolve())),))
+        conn.execute("ALTER TABLE projects ADD COLUMN next_number INTEGER NOT NULL DEFAULT 97")
+        conn.executescript(_NULLABLE_TICKETS_REBUILD)
+        conn.execute("CREATE TABLE ticket_links("
+                     " from_ticket TEXT NOT NULL REFERENCES tickets(id), kind TEXT NOT NULL,"
+                     " to_ticket TEXT NOT NULL REFERENCES tickets(id), created_at TEXT NOT NULL,"
+                     " PRIMARY KEY (from_ticket, kind, to_ticket),"
+                     " CHECK (kind IN ('blocked_by','related','rides_with')))")
+        conn.execute("CREATE INDEX ticket_links_to ON ticket_links(to_ticket, kind)")
+        conn.execute("PRAGMA user_version=11")
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+def build_v12(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
+    """写一个内容完整的 v12 库：正式库升 schema 13 之前的形状。
+
+    在 v11 形状上补上 11 -> 12 那三样（`batches` 表、`tickets.batch_id`、`attempts.batch_key`，
+    并把 `active_session` 收窄成只守无车次单），还没有 `submissions.conflict_preview`
+    ——13 要加的正是那一列，且存量提交一个值都不回溯。
+    """
+    path = build_v11(path, project_root, stamp)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE batches("
+                     " id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),"
+                     " resource_key TEXT NOT NULL, owner_session_id TEXT,"
+                     " planned_at TEXT NOT NULL, closed_at TEXT)")
+        conn.execute("ALTER TABLE tickets ADD COLUMN batch_id TEXT REFERENCES batches(id)")
+        conn.execute("ALTER TABLE attempts ADD COLUMN batch_key TEXT")
+        conn.execute("DROP INDEX IF EXISTS active_session")
+        conn.execute("CREATE UNIQUE INDEX active_session ON attempts(session_id)"
+                     " WHERE batch_key IS NULL AND session_id IS NOT NULL"
+                     " AND state IN ('blocked','running','submitted')")
+        conn.execute("PRAGMA user_version=12")
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
 def build_v7(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     """写一个内容完整的 v7 库：两张工单（running / done）与三条存量 notices。"""
     prd_sha = hashlib.sha256((Path(project_root) / "PRD.md").read_bytes()).hexdigest()
@@ -454,9 +672,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(3, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(self.db))
+        self.assertEqual(13, user_version(self.db))
         self.assertIn("coordinator_session_id", columns(self.db, "attempts"))
         self.assertIn("merges", table_names(self.db))
         self.assertEqual(before, counts(self.db))
@@ -472,6 +690,7 @@ class MigrateTest(unittest.TestCase):
         claim = Center(self.db).execute("claim_ticket", {
             "project_id": "p1", "ticket_id": "t2", "expected_revision": 1,
             "coordinator_session_id": "coordinator-1", "allow_parallel": True,
+            "parallel_reason": "验的是升级后新字段可写，不是项目串行",
         }, "claim-after-migrate")
         self.assertTrue(claim["ok"], claim)
         after = Center(self.db).execute("get_ticket", {"project_id": "p1", "ticket_id": "t2"})
@@ -483,7 +702,7 @@ class MigrateTest(unittest.TestCase):
         before = counts(db)
         result = Center(db).execute("migrate", {})
         self.assertTrue(result["ok"], result)
-        self.assertEqual(9, result["result"]["schema_version"])
+        self.assertEqual(13, result["result"]["schema_version"])
         self.assertFalse(result["result"]["migrated"])
         self.assertIn("已是最新", result["result"]["message"])
         self.assertEqual(before, counts(db))
@@ -499,7 +718,7 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(second["ok"], second)
         self.assertFalse(second["result"]["migrated"])
         self.assertFalse(second["result"]["migrated"])
-        self.assertEqual(9, user_version(self.db))
+        self.assertEqual(13, user_version(self.db))
         self.assertEqual(before, counts(self.db))
 
     # --- 5 -> 6：问答两张表与 blocked 索引谓词 ------------------------------
@@ -511,9 +730,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(5, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(13, user_version(legacy))
         self.assertLessEqual({"questions", "answers"}, table_names(legacy))
         index = index_sql(legacy, "active_session")
         self.assertIn("'blocked'", index)
@@ -554,9 +773,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(7, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(13, user_version(legacy))
         self.assertIn("target_session_id", columns(legacy, "notices"))
         self.assertIn("wake_kind", columns(legacy, "notices"))
         self.assertEqual(before, counts(legacy))
@@ -610,9 +829,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(8, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(13, user_version(legacy))
         self.assertIn("head_sha", columns(legacy, "submissions"))
         self.assertIn("reviewed_sha", columns(legacy, "merges"))
         # 旧数据一行不丢：两张提交、一条合并记录、一条回执与事件全在。
@@ -657,6 +876,71 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(8, user_version(legacy))
         self.assertEqual(before, digest(legacy))
 
+    # --- 9 -> 10：判据版本与基座身份 ---------------------------------------
+
+    def test_upgrade_from_v9_adds_criteria_version_and_base_sha(self):
+        legacy = build_v9(self.root / "center-v9.sqlite3", self.project)
+        before = counts(legacy, TABLES + ("merges",))
+        result = Center(legacy).execute("migrate", {})
+        self.assertTrue(result["ok"], result)
+        receipt = result["result"]
+        self.assertEqual(9, receipt["from_version"])
+        self.assertEqual(13, receipt["schema_version"])
+        self.assertTrue(receipt["migrated"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertIn("criteria_version", columns(legacy, "tickets"))
+        self.assertIn("criteria_version", columns(legacy, "attempts"))
+        self.assertIn("base_sha", columns(legacy, "submissions"))
+        # 行数一行不少：两张单、两条尝试、一条提交、一条验收与一条合并记录。
+        self.assertEqual(before, counts(legacy, TABLES + ("merges",)))
+        conn = sqlite3.connect(legacy)
+        try:
+            # 存量行不编值：判据版本一律填 1（不是 0），基座 sha 一律留 NULL
+            # （老提交没有这一项，补一个猜测值就把推定写成了事实）。
+            self.assertEqual([1, 1], [row[0] for row in conn.execute(
+                "SELECT criteria_version FROM tickets ORDER BY rowid")])
+            self.assertEqual([1, 1], [row[0] for row in conn.execute(
+                "SELECT criteria_version FROM attempts ORDER BY rowid")])
+            self.assertEqual([None], [row[0] for row in conn.execute(
+                "SELECT base_sha FROM submissions ORDER BY rowid")])
+        finally:
+            conn.close()
+        # 升级后的库能正常读写这两个新字段。
+        center = Center(legacy)
+        detail = center.execute("get_ticket", {"project_id": "p1", "ticket_id": "t2"})["result"]
+        self.assertEqual(1, detail["criteria_version"])
+        self.assertEqual(1, detail["attempts"][0]["criteria_version"])
+        self.assertIsNone(detail["submissions"][0]["base_sha"])
+        self.assertEqual("0123456789abcdef0123456789abcdef01234567",
+                         detail["submissions"][0]["head_sha"])
+        listed = center.execute("list_tickets", {})["result"]
+        self.assertIn("criteria_v", listed["columns"])
+        self.assertIn("behind", listed["columns"])
+
+    def test_second_migration_on_v9_upgrade_reports_current(self):
+        legacy = build_v9(self.root / "center-v9-again.sqlite3", self.project)
+        self.assertTrue(Center(legacy).execute("migrate", {})["ok"])
+        before = counts(legacy, TABLES + ("merges",))
+        again = Center(legacy).execute("migrate", {})
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["result"]["migrated"])
+        self.assertIn("已是最新", again["result"]["message"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertEqual(before, counts(legacy, TABLES + ("merges",)))
+
+    def test_v9_header_with_new_columns_is_rejected_untouched(self):
+        legacy = build_v9(self.root / "center-v9-claims-new.sqlite3", self.project)
+        conn = sqlite3.connect(legacy)
+        conn.execute("ALTER TABLE tickets ADD COLUMN criteria_version INTEGER NOT NULL DEFAULT 1")
+        conn.commit()
+        conn.close()
+        before = digest(legacy)
+        result = Center(legacy).execute("migrate", {})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
+        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(before, digest(legacy))
+
     def test_v7_header_with_new_notice_columns_is_rejected_untouched(self):
         legacy = build_v7(self.root / "center-v7-claims-new.sqlite3", self.project)
         conn = sqlite3.connect(legacy)
@@ -693,9 +977,9 @@ class MigrateTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(6, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(13, user_version(legacy))
         self.assertIn("coordinator_workdir", columns(legacy, "attempts"))
         self.assertIn("notices", table_names(legacy))
         self.assertIn("status='sent'", index_sql(legacy, "one_sent_notice"))
@@ -778,6 +1062,241 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual("INVALID_INPUT", result["error"]["code"])
         self.assertEqual(3, user_version(self.db))
+
+
+    # --- 10 -> 11：可空的指纹、依赖边与发号盘 -------------------------------
+
+    def test_upgrade_from_v10_keeps_rows_and_allows_a_null_fingerprint(self):
+        """C6：迁移不给历史行编值也不丢行，存量 prd_sha256 原样保留、状态不被改写。"""
+        legacy = build_v10(self.root / "center-v10.sqlite3", self.project)
+        prd_sha = hashlib.sha256((self.project / "PRD.md").read_bytes()).hexdigest()
+        counted = counts(legacy, TABLES + ("merges",))
+        result = Center(legacy).execute("migrate", {})
+        self.assertTrue(result["ok"], result)
+        receipt = result["result"]
+        self.assertEqual(10, receipt["from_version"])
+        self.assertEqual(13, receipt["schema_version"])
+        self.assertTrue(receipt["migrated"])
+        self.assertEqual(13, user_version(legacy))
+        # 新增的两样：依赖边表与发号盘。
+        self.assertIn("ticket_links", table_names(legacy))
+        self.assertIn("next_number", columns(legacy, "projects"))
+        # 行数逐表一致（ticket_links 迁移前不存在，迁移后是空表）。
+        self.assertEqual(counted, counts(legacy, TABLES + ("merges",)))
+        self.assertEqual({"ticket_links"} - table_names(legacy), set())
+        self.assertEqual(0, counts(legacy, ("ticket_links",))["ticket_links"])
+        conn = sqlite3.connect(legacy)
+        try:
+            rows = [(row[0], row[1]) for row in conn.execute(
+                "SELECT id, prd_sha256 FROM tickets ORDER BY id")]
+            states = [row[0] for row in conn.execute("SELECT state FROM tickets ORDER BY id")]
+            next_number = conn.execute("SELECT next_number FROM projects").fetchone()[0]
+            nullable = [row for row in conn.execute("PRAGMA table_info(tickets)") if row[1] == "prd_sha256"][0][3]
+        finally:
+            conn.close()
+        # 存量指纹原样保留：没有把历史单的 prd_sha256 清空成 NULL。
+        self.assertEqual([("AW-095", prd_sha), ("AW-096", prd_sha)], rows)
+        # 也没有把存量单回溯改成 planned。
+        self.assertEqual(["done", "running"], states)
+        # 发号盘按已有最大号初始化：AW-096 之后是 AW-097（R5.3）。
+        self.assertEqual(97, next_number)
+        # 放宽的是列约束，不是数据：迁移后这一列允许为空了。
+        self.assertEqual(0, nullable)
+        center = Center(legacy)
+        # 升级后的库立刻能发号：下一张就是 AW-097，前缀取自项目短名。
+        created = center.execute("create_ticket", {
+            "project_id": "ai-workspace", "title": "迁移后新开",
+            "deliverable": "一份清单", "prd_path": "PRD.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        }, "create-after-v11")
+        self.assertTrue(created["ok"], created)
+        self.assertEqual("AW-097", created["result"]["id"])
+        self.assertIsNone(created["result"]["prd_sha256"])
+        # 历史单仍读得出来，指纹与合并记录都在。
+        detail = center.execute("get_ticket", {"project_id": "ai-workspace", "ticket_id": "AW-095"})
+        self.assertTrue(detail["ok"], detail)
+        self.assertEqual(prd_sha, detail["result"]["prd_sha256"])
+        self.assertEqual(["m1"], [item["id"] for item in detail["result"]["merges"]])
+        self.assertEqual({"out": [], "in": []}, detail["result"]["links"])
+
+    def test_second_migration_on_v10_reports_current(self):
+        legacy = build_v10(self.root / "center-v10-again.sqlite3", self.project)
+        self.assertTrue(Center(legacy).execute("migrate", {})["ok"])
+        before = counts(legacy, TABLES + ("merges", "ticket_links"))
+        again = Center(legacy).execute("migrate", {})
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["result"]["migrated"])
+        self.assertIn("已是最新", again["result"]["message"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertEqual(before, counts(legacy, TABLES + ("merges", "ticket_links")))
+
+    def test_v10_header_with_the_new_table_or_a_nullable_fingerprint_is_rejected(self):
+        """形状守卫：声称 10 却已经有 11 的东西，一律拒且一个字节不改。"""
+        for step, mutate in (
+            ("new-table", lambda conn: conn.execute("CREATE TABLE ticket_links(kind TEXT)")),
+            ("next-number", lambda conn: conn.execute(
+                "ALTER TABLE projects ADD COLUMN next_number INTEGER NOT NULL DEFAULT 1")),
+            ("nullable-fingerprint", lambda conn: conn.executescript(_NULLABLE_TICKETS_REBUILD)),
+        ):
+            with self.subTest(step=step):
+                legacy = build_v10(self.root / f"center-v10-{step}.sqlite3", self.project)
+                conn = sqlite3.connect(legacy)
+                try:
+                    mutate(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+                before = digest(legacy)
+                result = Center(legacy).execute("migrate", {})
+                self.assertFalse(result["ok"], result)
+                self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
+                # 拒绝时版本号与文件字节都不许变。
+                self.assertEqual(10, user_version(legacy))
+                self.assertEqual(before, digest(legacy))
+
+
+    # --- 11 -> 12：车次表与两个指针列 ---------------------------------------
+
+    def test_upgrade_from_v11_adds_batches_without_backfilling(self):
+        """C5：迁移不回溯——batch_key 全为 NULL、行数逐表不变、无车次的行为与迁移前一致。"""
+        legacy = build_v11(self.root / "center-v11.sqlite3", self.project)
+        before = counts(legacy, V11_TABLES)
+        result = Center(legacy).execute("migrate", {})
+        self.assertTrue(result["ok"], result)
+        receipt = result["result"]
+        self.assertEqual(11, receipt["from_version"])
+        self.assertEqual(13, receipt["schema_version"])
+        self.assertTrue(receipt["migrated"])
+        self.assertEqual(13, user_version(legacy))
+        # 新增的两样：车次表与两个指针列。
+        self.assertIn("batches", table_names(legacy))
+        self.assertIn("batch_id", columns(legacy, "tickets"))
+        self.assertIn("batch_key", columns(legacy, "attempts"))
+        # 行数逐表不变（batches 迁移前不存在，迁移后是空表）。
+        self.assertEqual(before, counts(legacy, V11_TABLES))
+        self.assertEqual(0, counts(legacy, ("batches",))["batches"])
+        conn = sqlite3.connect(legacy)
+        try:
+            batch_ids = [row[0] for row in conn.execute("SELECT batch_id FROM tickets ORDER BY id")]
+            batch_keys = [row[0] for row in conn.execute("SELECT batch_key FROM attempts ORDER BY id")]
+            index = conn.execute("SELECT sql FROM sqlite_master WHERE name='active_session'").fetchone()[0]
+        finally:
+            conn.close()
+        # 不回溯：一个值都不补，NULL 而不是空串。
+        self.assertEqual([None, None], batch_ids)
+        self.assertEqual([None, None], batch_keys)
+        # 索引收窄成只守无车次那一半。
+        self.assertIn("WHERE batch_key IS NULL", index)
+        center = Center(legacy)
+        # 行为与迁移前一致：同一会话在无车次单上仍旧一张，第二张被 CONFLICT 拒。
+        created = center.execute("create_ticket", {
+            "project_id": "ai-workspace", "title": "迁移后新开",
+            "deliverable": "一份清单", "prd_path": "PRD.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        }, "create-after-v12")
+        self.assertTrue(created["ok"], created)
+        new_id = created["result"]["id"]
+        self.assertEqual("AW-097", new_id)
+        claimed = center.execute("claim_ticket", {
+            "project_id": "ai-workspace", "ticket_id": new_id, "expected_revision": 1,
+            "coordinator_session_id": "coordinator-9",
+            "allow_parallel": True, "parallel_reason": "迁移验证：与在跑的 AW-096 并行",
+        }, "claim-after-v12")
+        self.assertTrue(claimed["ok"], claimed)
+        self.assertIsNone(claimed["result"]["batch_id"])
+        # executor-2 在迁移前就持着 AW-096 的活跃尝试（batch_key 为 NULL），
+        # 所以它在这里领第二张无车次单仍然要被拒——这就是「行为与迁移前一致」。
+        stored_root = center.execute("list_projects", {})["result"]["items"][0]["root"]
+        bound = center.execute("bind_session", {
+            "project_id": "ai-workspace", "ticket_id": new_id,
+            "attempt_id": claimed["result"]["attempt_id"], "session_id": "executor-2",
+            "project_root": stored_root,
+        }, "bind-after-v12")
+        self.assertFalse(bound["ok"], bound)
+        self.assertEqual("CONFLICT", bound["error"]["code"])
+
+    def test_second_migration_on_v11_reports_current(self):
+        legacy = build_v11(self.root / "center-v11-again.sqlite3", self.project)
+        self.assertTrue(Center(legacy).execute("migrate", {})["ok"])
+        before = counts(legacy, V11_TABLES + ("batches",))
+        again = Center(legacy).execute("migrate", {})
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["result"]["migrated"])
+        self.assertIn("已是最新", again["result"]["message"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertEqual(before, counts(legacy, V11_TABLES + ("batches",)))
+
+    def test_v11_header_with_batch_structures_is_rejected_untouched(self):
+        """形状守卫：声称 11 却已经有 12 的东西，一律拒且一个字节不改。"""
+        for step, mutate in (
+            ("batches-table", lambda conn: conn.execute("CREATE TABLE batches(id TEXT)")),
+            ("batch-key", lambda conn: conn.execute("ALTER TABLE attempts ADD COLUMN batch_key TEXT")),
+            ("batch-id", lambda conn: conn.execute("ALTER TABLE tickets ADD COLUMN batch_id TEXT")),
+        ):
+            with self.subTest(step=step):
+                legacy = build_v11(self.root / f"center-v11-{step}.sqlite3", self.project)
+                conn = sqlite3.connect(legacy)
+                try:
+                    mutate(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+                before = digest(legacy)
+                result = Center(legacy).execute("migrate", {})
+                self.assertFalse(result["ok"], result)
+                self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
+                self.assertEqual(11, user_version(legacy))
+                self.assertEqual(before, digest(legacy))
+
+    def test_upgrade_from_v12_adds_conflict_preview_without_backfilling(self):
+        """C5：12 → 13 只多一列，存量提交的 conflict_preview 留 NULL（那时没这一项）。"""
+        legacy = build_v12(self.root / "center-v12.sqlite3", self.project)
+        before = counts(legacy, V12_TABLES)
+        result = Center(legacy).execute("migrate", {})
+        self.assertTrue(result["ok"], result)
+        receipt = result["result"]
+        self.assertEqual(12, receipt["from_version"])
+        self.assertEqual(13, receipt["schema_version"])
+        self.assertTrue(receipt["migrated"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertIn("conflict_preview", columns(legacy, "submissions"))
+        # 行数逐表不变：这一列不给任何一行写值。
+        self.assertEqual(before, counts(legacy, V12_TABLES))
+        conn = sqlite3.connect(legacy)
+        try:
+            values = [row[0] for row in conn.execute("SELECT conflict_preview FROM submissions ORDER BY id")]
+        finally:
+            conn.close()
+        # 不回溯：NULL 而不是 `[]` 或 `{"conflicts":[]}`——补成空数组就等于声称
+        # 那些历史提交都预演过且干净，那是编出来的事实。
+        self.assertEqual([None], values)
+
+    def test_second_migration_on_v12_reports_current(self):
+        legacy = build_v12(self.root / "center-v12-again.sqlite3", self.project)
+        self.assertTrue(Center(legacy).execute("migrate", {})["ok"])
+        before = counts(legacy, V12_TABLES)
+        again = Center(legacy).execute("migrate", {})
+        self.assertTrue(again["ok"], again)
+        self.assertFalse(again["result"]["migrated"])
+        self.assertIn("已是最新", again["result"]["message"])
+        self.assertEqual(13, user_version(legacy))
+        self.assertEqual(before, counts(legacy, V12_TABLES))
+
+    def test_v12_header_with_conflict_preview_is_rejected_untouched(self):
+        """形状守卫：声称 12 却已经有 13 的那一列，一律拒且一个字节不改。"""
+        legacy = build_v12(self.root / "center-v12-shape.sqlite3", self.project)
+        conn = sqlite3.connect(legacy)
+        try:
+            conn.execute("ALTER TABLE submissions ADD COLUMN conflict_preview TEXT")
+            conn.commit()
+        finally:
+            conn.close()
+        before = digest(legacy)
+        result = Center(legacy).execute("migrate", {})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
+        self.assertEqual(12, user_version(legacy))
+        self.assertEqual(before, digest(legacy))
 
 
 if __name__ == "__main__":

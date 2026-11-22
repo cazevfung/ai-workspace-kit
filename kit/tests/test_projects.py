@@ -4,7 +4,7 @@
 代价从「无所谓」变成「永久」。这一组用例锁住撤销路径与它的保护条件。
 
 `RootIsIdentityTest` 那一组锁另一件事：`root` 是身份、`project_id` 是标签
-（口径见 `docs/decisions.md`「项目接入面」）——同一 root 重复登记复用原记录且不改标签，开单不要求先登记。
+（PRD-009 §4.4 / AC05）——同一 root 重复登记复用原记录且不改标签，开单不要求先登记。
 """
 import tempfile
 import unittest
@@ -26,12 +26,23 @@ class RegistryCase(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 这类短名指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "alpha", "name": "甲", "root": str(self.alpha)})
 
     def call(self, operation, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(operation, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(operation, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, operation, payload=None, request_id=None):
         result = self.call(operation, payload, request_id)
@@ -44,19 +55,16 @@ class RegistryCase(unittest.TestCase):
         self.assertEqual(code, result["error"]["code"], result)
         return result["error"]
 
-    def ticket(self, ticket_id="t1", project="alpha"):
-        root = self.alpha if project == "alpha" else self.beta
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": project, "title": "整理检查清单",
-            "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
-            "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
-        })
+    def ticket(self, alias="t1", project="alpha"):
+        created = self.ok("create_ticket", self.ticket_payload(project))
+        self.ids[alias] = created["id"]
+        return created
 
-    def ticket_payload(self, ticket_id, project, root=None):
+    def ticket_payload(self, project, root=None):
         payload = {
-            "ticket_id": ticket_id, "project_id": project, "title": "整理检查清单",
+            "project_id": project, "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
-            "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         }
         if root is not None:
             payload["root"] = str(root)
@@ -78,9 +86,9 @@ class ProjectRegistryTest(RegistryCase):
         self.ok("unregister_project", {"project_id": "alpha"})
         self.assertEqual([], self.ok("list_projects")["items"])
         self.error("NOT_FOUND", "create_ticket", {
-            "ticket_id": "t1", "project_id": "alpha", "title": "任务",
+            "project_id": "alpha", "title": "任务",
             "deliverable": "一份清单", "prd_path": "PRD.md",
-            "criteria": [{"id": "C1", "text": "条件"}],
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
         # 撤销的意义在于同一个路径能重新登记，且名字可以换掉。
         self.ok("register_project", {"project_id": "alpha-fixed", "name": "甲（修正）", "root": str(self.alpha)})
@@ -89,7 +97,7 @@ class ProjectRegistryTest(RegistryCase):
     def test_unregister_refuses_while_tickets_refer_to_the_project(self):
         self.ticket()
         error = self.error("PROJECT_HAS_TICKETS", "unregister_project", {"project_id": "alpha"})
-        self.assertIn("t1", error["message"])
+        self.assertIn(self.tid("t1"), error["message"])
         self.assertEqual(["alpha"], [item["project_id"] for item in self.ok("list_projects")["items"]])
 
     def test_unregister_unknown_project_reports_not_found(self):
@@ -99,11 +107,12 @@ class ProjectRegistryTest(RegistryCase):
         self.ok("register_project", {"project_id": "beta", "name": "乙", "root": str(self.beta)})
         self.ticket("t1", "alpha")
         self.ok("unregister_project", {"project_id": "beta"})
-        self.assertEqual("t1", self.ok("get_ticket", {"project_id": "alpha", "ticket_id": "t1"})["id"])
+        self.assertEqual(self.tid("t1"),
+                         self.ok("get_ticket", {"project_id": "alpha", "ticket_id": self.tid("t1")})["id"])
 
 
 class RootIsIdentityTest(RegistryCase):
-    """`root` 是身份、`project_id` 是标签（口径见 `docs/decisions.md`「项目接入面」）。
+    """`root` 是身份、`project_id` 是标签（PRD-009 §4.4 / AC05）。
 
     这组用例锁两件事：同一 root 重复登记复用原记录且不改已有标签；开单不要求先登记，
     但已登记的 root 不能被另一张单悄悄换掉。
@@ -123,30 +132,30 @@ class RootIsIdentityTest(RegistryCase):
         self.assertEqual([("alpha", "甲"), ("beta", "乙")], self.labels())
 
     def test_create_ticket_with_root_registers_the_project_on_the_way(self):
-        ticket = self.ok("create_ticket", self.ticket_payload("t9", "beta", self.beta))
+        ticket = self.ok("create_ticket", self.ticket_payload("beta", self.beta))
         self.assertEqual("beta", ticket["project_id"])
         # 名字默认取目录名，不要求调用方另外起一个。
         self.assertEqual([("alpha", "甲"), ("beta", "项目乙")], self.labels())
 
     def test_create_ticket_without_root_still_reports_not_found(self):
-        error = self.error("NOT_FOUND", "create_ticket", self.ticket_payload("t9", "beta"))
+        error = self.error("NOT_FOUND", "create_ticket", self.ticket_payload("beta"))
         self.assertIn("root", error["message"])
         self.assertEqual([("alpha", "甲")], self.labels())
 
     def test_create_ticket_with_matching_root_keeps_the_existing_record(self):
-        ticket = self.ok("create_ticket", self.ticket_payload("t9", "alpha", self.alpha))
+        ticket = self.ok("create_ticket", self.ticket_payload("alpha", self.alpha))
         self.assertEqual("alpha", ticket["project_id"])
         self.assertEqual([("alpha", "甲")], self.labels())
 
     def test_create_ticket_with_different_root_reports_mismatch_and_changes_nothing(self):
         before = self.ok("list_projects")["items"]
-        self.error("ROOT_MISMATCH", "create_ticket", self.ticket_payload("t9", "alpha", self.beta))
+        self.error("ROOT_MISMATCH", "create_ticket", self.ticket_payload("alpha", self.beta))
         self.assertEqual(before, self.ok("list_projects")["items"])
         self.assertEqual([], self.ok("list_tickets")["items"])
 
     def test_create_ticket_cannot_claim_a_root_owned_by_another_label(self):
         self.ok("register_project", {"project_id": "beta", "name": "乙", "root": str(self.beta)})
-        self.error("ROOT_MISMATCH", "create_ticket", self.ticket_payload("t9", "gamma", self.beta))
+        self.error("ROOT_MISMATCH", "create_ticket", self.ticket_payload("gamma", self.beta))
         self.assertEqual([("alpha", "甲"), ("beta", "乙")], self.labels())
 
     def test_same_directory_name_under_two_roots_stays_two_rows(self):
@@ -165,8 +174,8 @@ class RootIsIdentityTest(RegistryCase):
     def test_auto_registration_rolls_back_when_the_ticket_fails(self):
         # 一张单一次事务：建单没成，刚记的那一行也不该留下。
         self.error("FILE_NOT_FOUND", "create_ticket", {
-            "ticket_id": "t9", "project_id": "beta", "title": "任务", "deliverable": "一份清单",
-            "prd_path": "不存在的文件.md", "criteria": [{"id": "C1", "text": "条件"}],
+            "project_id": "beta", "title": "任务", "deliverable": "一份清单",
+            "prd_path": "不存在的文件.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
             "root": str(self.beta),
         })
         self.assertEqual([("alpha", "甲")], self.labels())

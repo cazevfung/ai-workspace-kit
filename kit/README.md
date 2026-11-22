@@ -21,8 +21,8 @@ python -m task_center --db "<工作区>/.data/task-center.sqlite3" list_projects
 第一张工单的完整流程：
 
 ```bash
-# 1. 建单（request-id 是幂等键，重试时沿用同一个）
-echo '{"project_id":"ai-workspace","ticket_id":"T-001","title":"第一张工单","deliverable":"...","prd_path":"PRD/PRD-001-工作区使用与工单体系.md","criteria":"...","root":"<工作区>"}' \
+# 1. 建单（request-id 是幂等键，重试时沿用同一个；不传 ticket_id，号由发号盘发，回执里的 id 才是真号）
+echo '{"project_id":"ai-workspace","title":"第一张工单","deliverable":"...","prd_path":"PRD/PRD-001-工作区使用与工单体系.md","criteria":[{"id":"C1","text":"含 `python tools/run_tests.py`，退出码 0"}],"root":"<工作区>"}' \
   | python -m task_center --db "<工作区>/.data/task-center.sqlite3" create_ticket --request-id c1
 
 # 2. 领取 → 3. 绑定会话 → 4. 提交成果 → 5. 另一个会话发起验收

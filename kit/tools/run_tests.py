@@ -24,6 +24,8 @@ schema 4 那次改动让 tools 下 7 项变红，却因为没人跑而没被发�
   现在按「整条包链都有 __init__.py」判断它是否真会被跑到，是就不报。
 - **`.agents` 下的脚本测试被当成漏跑**：那里的技能/插件脚本另有开发线与验收节奏，
   不是本仓库主线 suite 的交付单元，漏跑的前提不成立，所以整个目录不扫。
+  `skills/<名>/` 里的脚本测试同理，属于技能自己的交付线，不进主线 suite
+  （2026-11-21，AW-081：`skills/ui-design/scripts/test_check_ui.py` 要单独跑）。
 
 用法（在仓库根 {{WORKSPACE}}）：
 
@@ -61,8 +63,11 @@ SUITES = (
 # 有自己的交付单元与验收节奏，不是本仓库主线 suite 的用例。把它们扫进来报「未声明」，
 # 说的是一件不成立的事——那不是漏跑，而是不是同一个交付单元。要收它们，
 # 该在那条线上挂 SUITES，不是在这里加一行声明替别人的交付背书。
+# `skills/` 同理（2026-11-21，AW-081）：仓库里的 `skills/<名>/` 是技能源码，技能随身的
+# 脚本用例（例如 `skills/ui-design/scripts/test_check_ui.py`）按 PRD-011 §6 不进主线套件，
+# 要单独跑自己的命令。不跳过它，这条自检会把「按规范放的用例」报成漏跑。
 SKIP_DIRS = frozenset(
-    {".git", ".worktrees", "_sandbox", "__pycache__", ".data", ".claude", ".agents"}
+    {".git", ".worktrees", "_sandbox", "__pycache__", ".data", ".claude", ".agents", "skills"}
 )
 
 

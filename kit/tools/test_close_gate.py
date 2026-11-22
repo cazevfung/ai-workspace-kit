@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import close_gate
+import work_gate
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -181,6 +182,40 @@ class PackageTest(unittest.TestCase):
         self.assertMentions(problems, "状态")
 
 
+class InFlightSetTest(unittest.TestCase):
+    """在途集合只能有一份定义：两个闸门得指向同一个对象（AC-R1-3 / C4）。
+
+    这条用例就是用「两处分别写一份」做反例：那种情况下有人改一处、忘另一处，
+    上面那几条事实用例会各自继续绿，而现场又会回到 AW-094 那种两个答案。
+    """
+
+    def test_close_gate_reuses_the_work_gate_definition(self):
+        self.assertIs(close_gate.IN_FLIGHT_STATES, work_gate.CLOSING_BLOCKING_STATES)
+
+    def test_the_set_is_exactly_these_six_states(self):
+        # 逐项写死，两边一起悄悄改也拦得住。
+        self.assertEqual(
+            ("dispatching", "running", "awaiting_review", "blocked", "ready", "rework"),
+            close_gate.IN_FLIGHT_STATES,
+        )
+
+    def test_planned_is_not_in_the_set(self):
+        self.assertNotIn("planned", close_gate.IN_FLIGHT_STATES)
+        self.assertNotIn("planned", work_gate.WAITING_STATES)
+
+    def test_waiting_states_are_a_subset_of_the_set(self):
+        self.assertTrue(set(work_gate.WAITING_STATES) <= set(close_gate.IN_FLIGHT_STATES))
+        self.assertEqual(("ready", "rework"), work_gate.WAITING_STATES)
+
+    def test_the_documented_six_states_appear_in_the_closing_doc(self):
+        """代码与 docs/closing.md 逐项对得上（C5）：文档里那一段列出同一个六个。"""
+        text = (ROOT / "docs" / "closing.md").read_text(encoding="utf-8")
+        section = text.split("## 在途集合只有一份定义", 1)[1].split("\n## ", 1)[0]
+        for state in close_gate.IN_FLIGHT_STATES:
+            self.assertIn(state, section, f"文档里少了 {state}")
+        self.assertIn("`planned` 不算在途", section)
+
+
 class FactsTest(unittest.TestCase):
     """`--check` 的三条现场事实：工作区、在途工单、状态与结论一致。"""
 
@@ -223,6 +258,36 @@ class FactsTest(unittest.TestCase):
         problems = self.facts()
         self.assertMentions(problems, "在途工单")
         self.assertMentions(problems, "AW-999")
+
+    def test_planned_ticket_does_not_block(self):
+        """排着的单不挡收尾：`planned` 不在在途集合里（PRD-014 R1 / AC-R1-1）。"""
+        make_db(self.db, [("AW-996", "test-project", "planned")])
+        self.assertEqual([], self.facts())
+
+    def test_ready_ticket_blocks(self):
+        """`ready` 是「等人领走」，仍是没干完的活：钩子一直这么判，闸门得跟上。
+
+        以前闸门只有四个状态，于是 AW-094 留在 `ready` 时 `--check` 说可以收、
+        收尾提交被连拒三次：同一件事两个答案。
+        """
+        make_db(self.db, [("AW-995", "test-project", "ready")])
+        problems = self.facts()
+        self.assertMentions(problems, "在途工单")
+        self.assertMentions(problems, "AW-995")
+
+    def test_rework_ticket_blocks(self):
+        make_db(self.db, [("AW-994", "test-project", "rework")])
+        problems = self.facts()
+        self.assertMentions(problems, "在途工单")
+        self.assertMentions(problems, "AW-994")
+
+    def test_planned_and_ready_together_still_block(self):
+        """放行的只是 `planned` 那一格：同一张库里还有 ready 就照旧拦。"""
+        make_db(self.db, [("AW-993", "test-project", "planned"),
+                          ("AW-992", "test-project", "ready")])
+        problems = self.facts()
+        self.assertMentions(problems, "AW-992")
+        self.assertFalse(any("AW-993" in p for p in problems), problems)
 
     def test_other_project_ticket_does_not_block(self):
         make_db(self.db, [("HP-001", "another-project", "running")])

@@ -19,6 +19,21 @@ import contextlib
 import io
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
+
+
+def resolve(ids, payload):
+    """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+    alias = payload.get("ticket_id")
+    real = ids.get(alias) if isinstance(alias, str) else None
+    return {**payload, "ticket_id": real} if real else payload
+
+
+def create_numbered(ok, ids, alias, payload):
+    """建一张单并把库发的号记进 ids[alias]；payload 里不带 ticket_id。"""
+    created = ok("create_ticket", payload)
+    ids[alias] = created["id"]
+    return created
 
 
 class WorkGateTest(unittest.TestCase):
@@ -35,19 +50,26 @@ class WorkGateTest(unittest.TestCase):
         (self.other / "PRD.md").write_text("需求", encoding="utf-8")
         self.db = self.root / "center.sqlite3"
         self.counter = 0
+        # 发号之后，测试里仍用 repo-1 / other-1 这类短名指代工单。
+        self.ids = {}
         self.ok("init", {})
         self.ok("register_project", {"project_id": "repo", "name": "仓库", "root": str(self.project)})
         self.ok("register_project", {"project_id": "other", "name": "另一个", "root": str(self.other)})
         for pid, path in (("repo", self.project), ("other", self.other)):
-            self.ok("create_ticket", {
-                "project_id": pid, "ticket_id": f"{pid}-1", "title": "改动工具",
+            create_numbered(self.ok, self.ids, f"{pid}-1", {
+                "project_id": pid, "title": "改动工具",
                 "deliverable": "一个会拒绝无工单提交的闸门",
                 "prd_path": "PRD/PRD-001-示例.md" if pid == "repo" else "PRD.md",
-                "criteria": [{"id": "C1", "text": "无工单时拒绝"}],
+                "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
             })
+
+    def tid(self, alias):
+        """短名 → 库发的号。"""
+        return self.ids[alias]
 
     def ok(self, operation, payload):
         self.counter += 1
+        payload = resolve(self.ids, payload)
         result = work_gate.load_center()(self.db).execute(operation, payload, request_id=f"req-{self.counter}")
         self.assertTrue(result["ok"], result)
         return result["result"]
@@ -83,7 +105,7 @@ class WorkGateTest(unittest.TestCase):
         self.git("config", "core.hooksPath", str(Path(work_gate.REPO) / ".githooks"))
         result = self.git("-c", "user.name=t", "-c", "user.email=t@t",
                           "commit", "--allow-empty", "-m", "有工单",
-                          env={"TASK_CENTER_DB": str(self.db), "TASK_CENTER_TICKET": "repo-1"})
+                          env={"TASK_CENTER_DB": str(self.db), "TASK_CENTER_TICKET": self.tid("repo-1")})
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("放行", result.stdout + result.stderr)
 
@@ -97,7 +119,7 @@ class WorkGateTest(unittest.TestCase):
     def test_forced_other_project_cannot_lend_its_ticket(self):
         """残留的 TASK_CENTER_PROJECT 不能把 B 项目工单借给 A 项目目录。"""
         self.bind("other")
-        ok, payload = self.check("other-1", project="other")
+        ok, payload = self.check(self.tid("other-1"), project="other")
         self.assertFalse(ok, payload)
         self.assertEqual("PROJECT_MISMATCH", payload["error"])
 
@@ -107,8 +129,9 @@ class WorkGateTest(unittest.TestCase):
         self.ok("submit_result", {"project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
                                   "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
                                   "evidence": ["核对"], "risks": [],
-                                  "head_sha": "0123456789abcdef0123456789abcdef01234567"})
-        ok, payload = self.check("repo-1")
+                                  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+                                  "base_sha": "89abcdef0123456789abcdef0123456789abcdef"})
+        ok, payload = self.check(self.tid("repo-1"))
         self.assertFalse(ok, payload)
         self.assertIn("recover_ticket", payload["fix"])
 
@@ -120,22 +143,22 @@ class WorkGateTest(unittest.TestCase):
 
     def test_bound_running_ticket_passes_and_names_what_it_authorises(self):
         attempt = self.bind()
-        ok, payload = self.check("repo-1")
+        ok, payload = self.check(self.tid("repo-1"))
         self.assertTrue(ok, payload)
-        self.assertEqual("repo-1", payload["ticket_id"])
+        self.assertEqual(self.tid("repo-1"), payload["ticket_id"])
         self.assertEqual(attempt, payload["attempt_id"])
         self.assertEqual("session-repo", payload["session_id"])
         self.assertEqual("PRD/PRD-001-示例.md", payload["prd_path"])
 
     def test_ready_ticket_without_any_attempt_is_rejected(self):
-        ok, payload = self.check("repo-1")
+        ok, payload = self.check(self.tid("repo-1"))
         self.assertFalse(ok, payload)
         self.assertIn("claim", payload["fix"])
 
     def test_claimed_but_unbound_ticket_is_rejected(self):
         self.ok("claim_ticket", {"project_id": "repo", "ticket_id": "repo-1", "expected_revision": 1,
                               "coordinator_session_id": "session-coordinator"})
-        ok, payload = self.check("repo-1")
+        ok, payload = self.check(self.tid("repo-1"))
         self.assertFalse(ok, payload)
         self.assertIn("bind_session", payload["fix"])
 
@@ -146,19 +169,19 @@ class WorkGateTest(unittest.TestCase):
 
     def test_ticket_belonging_to_another_project_is_rejected(self):
         self.bind("other")
-        ok, payload = self.check("other-1")
+        ok, payload = self.check(self.tid("other-1"))
         self.assertFalse(ok, payload)
         self.assertIn("PROJECT_MISMATCH", json.dumps(payload, ensure_ascii=False))
 
     def test_missing_database_names_the_problem(self):
-        ok, payload = work_gate.verify(self.root / "nope.sqlite3", "repo-1", repo=self.project)
+        ok, payload = work_gate.verify(self.root / "nope.sqlite3", self.tid("repo-1"), repo=self.project)
         self.assertFalse(ok, payload)
         self.assertIn("center.json", payload["fix"])
 
     def test_list_shows_active_attempts_only(self):
         self.bind("repo")
         items = work_gate.active(self.db)
-        self.assertEqual(["repo-1"], [item["ticket_id"] for item in items])
+        self.assertEqual([self.tid("repo-1")], [item["ticket_id"] for item in items])
         self.assertEqual("running", items[0]["state"])
 
 
@@ -183,13 +206,15 @@ class ListCommandTest(unittest.TestCase):
         (self.project / "PRD" / "PRD-001-示例.md").write_text("需求", encoding="utf-8")
         self.db = self.root / "center.sqlite3"
         self.counter = 0
+        # 发号之后，测试里仍用 repo-1 / other-1 这类短名指代工单。
+        self.ids = {}
         self.ok("init", {})
         self.ok("register_project", {"project_id": "repo", "name": "仓库", "root": str(self.project)})
-        self.ok("create_ticket", {
-            "project_id": "repo", "ticket_id": "repo-1", "title": "改动工具",
+        create_numbered(self.ok, self.ids, "repo-1", {
+            "project_id": "repo", "title": "改动工具",
             "deliverable": "一个不撒谎的活跃尝试清单",
             "prd_path": "PRD/PRD-001-示例.md",
-            "criteria": [{"id": "C1", "text": "读库失败时非零退出"}],
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
         claim = self.ok("claim_ticket", {"project_id": "repo", "ticket_id": "repo-1", "expected_revision": 1,
                                        "coordinator_session_id": "coordinator-repo"})
@@ -197,8 +222,13 @@ class ListCommandTest(unittest.TestCase):
                                  "attempt_id": claim["attempt_id"], "session_id": "session-repo",
                                  "project_root": str(self.project)})
 
+    def tid(self, alias):
+        """短名 → 库发的号。"""
+        return self.ids[alias]
+
     def ok(self, operation, payload):
         self.counter += 1
+        payload = resolve(self.ids, payload)
         result = work_gate.load_center()(self.db).execute(operation, payload, request_id=f"req-{self.counter}")
         self.assertTrue(result["ok"], result)
         return result["result"]
@@ -214,11 +244,18 @@ class ListCommandTest(unittest.TestCase):
         copy.close()
         return target
 
-    def list_command(self, db):
+    def list_command(self, db, *extra):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = work_gate.main(["work_gate.py", "--list", "--db", str(db)])
+            code = work_gate.main(["work_gate.py", "--list", "--db", str(db), *extra])
         return code, out.getvalue(), err.getvalue()
+
+    def backdate_last_event(self, db, minutes):
+        """把 repo-1 的事件时间推到 N 分钟前：只改副本上的那几行，真实库不碰。"""
+        stamp = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        with contextlib.closing(sqlite3.connect(str(db))) as conn:
+            with conn:
+                conn.execute("UPDATE events SET created_at=? WHERE ticket_id=?", (stamp, self.tid("repo-1")))
 
     def test_copy_with_a_wrong_schema_fails_loudly(self):
         """v6 副本给 v7 代码读：必须非零退出，stderr 里看得见错误码。"""
@@ -256,9 +293,67 @@ class ListCommandTest(unittest.TestCase):
         good = self.copy_database("center-copy.sqlite3")
         code, out, err = self.list_command(good)
         self.assertEqual(0, code, out + err)
-        self.assertIn("repo-1", out)
+        self.assertIn(self.tid("repo-1"), out)
         self.assertIn("running", out)
         self.assertIn("session-repo", out)
+
+    # --- AW-087 / PRD-013 R4：等了多少、谁该动手，看得见 ------------------
+
+    def test_list_table_prints_six_columns_with_parseable_timestamps(self):
+        """第四列之后补「尝试开始时间」「最后事件时间」；表格行必须是 6 列时间戳。"""
+        good = self.copy_database("center-cols.sqlite3")
+        code, out, err = self.list_command(good)
+        self.assertEqual(0, code, out + err)
+        rows = [line for line in out.splitlines() if line.strip()]
+        self.assertTrue(rows, out)
+        for line in rows:
+            fields = line.split("\t")
+            self.assertEqual(6, len(fields), line)
+            for value in fields[4:]:
+                # 占位文字（例如「-」）过不了这一关：要的是能算间隔的时间。
+                self.assertIsNotNone(datetime.fromisoformat(value), line)
+
+    def test_list_json_is_really_json_and_carries_both_timestamps(self):
+        """`--json` 在 `--list` 分支里以前被忽略：打的是表格，json.load 直接抛。"""
+        good = self.copy_database("center-json.sqlite3")
+        code, out, err = self.list_command(good, "--json")
+        self.assertEqual(0, code, out + err)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"], payload)
+        items = payload["result"]["items"]
+        self.assertGreaterEqual(len(items), 1)
+        for item in items:
+            self.assertIn("started_at", item)
+            self.assertIn("last_event_at", item)
+            self.assertIsNotNone(datetime.fromisoformat(item["started_at"]))
+            self.assertIsNotNone(datetime.fromisoformat(item["last_event_at"]))
+
+    def test_stalled_minutes_turns_a_stale_ticket_into_a_failure(self):
+        """判据是退出码，不是输出措辞：最后事件 46 分钟前 + 阈值 45 必须退出 1。"""
+        stale = self.copy_database("center-stale.sqlite3")
+        self.backdate_last_event(stale, 46)
+        code, out, err = self.list_command(stale, "--stalled-minutes", "45")
+        self.assertEqual(1, code, out + err)
+        self.assertIn("疑似停住", out + err)
+        # 不传阈值时不据它判红：这一条挡的是「退出码恒为 1」
+        code, out, err = self.list_command(stale)
+        self.assertEqual(0, code, out + err)
+
+    def test_stalled_minutes_stays_green_below_the_threshold(self):
+        fresh = self.copy_database("center-fresh.sqlite3")
+        code, out, err = self.list_command(fresh, "--stalled-minutes", "45")
+        self.assertEqual(0, code, out + err)
+
+    def test_list_summary_counts_how_many_tickets_are_stalled(self):
+        """R4 要求末尾报「共 N 张在途，其中 M 张最后落库超过 45 分钟」。"""
+        stale = self.copy_database("center-summary.sqlite3")
+        self.backdate_last_event(stale, 46)
+        code, out, err = self.list_command(stale)
+        self.assertEqual(0, code, out + err)
+        self.assertIn("共 1 张在途", err)
+        self.assertIn("其中 1 张最后落库超过 45 分钟", err)
+        # 汇总行走 stderr：stdout 只有 6 列表格，机器解析不会被最后一行绊倒。
+        self.assertNotIn("共 1 张在途", out)
 
 
 class MergeCommitGateTest(unittest.TestCase):
@@ -281,19 +376,26 @@ class MergeCommitGateTest(unittest.TestCase):
         (self.project / "PRD" / "PRD-001-示例.md").write_text("需求", encoding="utf-8")
         self.db = self.root / "center.sqlite3"
         self.counter = 0
+        # 发号之后，测试里仍用 repo-1 / other-1 这类短名指代工单。
+        self.ids = {}
         self.ok("init", {})
         self.ok("register_project", {"project_id": "repo", "name": "仓库", "root": str(self.project)})
-        self.ok("create_ticket", {
-            "project_id": "repo", "ticket_id": "repo-1", "title": "改动工具",
+        create_numbered(self.ok, self.ids, "repo-1", {
+            "project_id": "repo", "title": "改动工具",
             "deliverable": "一个会拒绝无工单提交的闸门",
             "prd_path": "PRD/PRD-001-示例.md",
-            "criteria": [{"id": "C1", "text": "无工单时拒绝"}],
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
 
     # --- 小工具 -----------------------------------------------------------
 
+    def tid(self, alias):
+        """短名 → 库发的号。"""
+        return self.ids[alias]
+
     def ok(self, operation, payload):
         self.counter += 1
+        payload = resolve(self.ids, payload)
         result = work_gate.load_center()(self.db).execute(operation, payload, request_id=f"req-{self.counter}")
         self.assertTrue(result["ok"], result)
         return result["result"]
@@ -327,6 +429,7 @@ class MergeCommitGateTest(unittest.TestCase):
             "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
             "evidence": ["核对"], "risks": [],
             "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "base_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
@@ -335,7 +438,7 @@ class MergeCommitGateTest(unittest.TestCase):
             "checks": [{"id": "C1", "passed": True, "evidence": "核对了"}],
         })
         detail = work_gate.load_center()(self.db).execute(
-            "get_ticket", {"project_id": "repo", "ticket_id": "repo-1"})
+            "get_ticket", {"project_id": "repo", "ticket_id": self.tid("repo-1")})
         self.assertEqual("done", detail["result"]["state"], detail)
         # schema 8 起「没过回执的单」写不进合并记录；这些用例判的是合并闸门，先把回执补上。
         self.ok("record_notice", {
@@ -363,7 +466,7 @@ class MergeCommitGateTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = work_gate.main([
-                "work_gate.py", "--ticket", "repo-1", "--db", str(self.db),
+                "work_gate.py", "--ticket", self.tid("repo-1"), "--db", str(self.db),
                 "--repo", str(self.project),
             ])
         return code, out.getvalue(), err.getvalue()
@@ -418,13 +521,13 @@ class MergeCommitGateTest(unittest.TestCase):
         self.start_conflicted_merge()
         code, out, err = self.gate()
         self.assertEqual(0, code, out + err)
-        self.assertIn("合并提交：repo-1", out)
+        self.assertIn(f"合并提交：{self.tid('repo-1')}", out)
 
     def test_running_ticket_is_still_allowed_while_a_merge_is_open(self):
         """MERGE_HEAD 在不在都不影响普通规则：running + 已绑定本会话照样放行。"""
         self.bind()
         self.start_conflicted_merge()
-        ok, payload = work_gate.verify(self.db, "repo-1", repo=self.project)
+        ok, payload = work_gate.verify(self.db, self.tid("repo-1"), repo=self.project)
         self.assertTrue(ok, payload)
         self.assertEqual("running", payload["mode"])
 
@@ -445,7 +548,7 @@ class MergeCommitGateTest(unittest.TestCase):
         self.assertTrue((self.project / ".git" / "MERGE_HEAD").is_file())
         self.git("config", "core.hooksPath", str(Path(work_gate.REPO) / ".githooks"))
         result = self.git("commit", "-m", "合并 side",
-                          env={"TASK_CENTER_DB": str(self.db), "TASK_CENTER_TICKET": "repo-1"})
+                          env={"TASK_CENTER_DB": str(self.db), "TASK_CENTER_TICKET": self.tid("repo-1")})
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("合并提交：", result.stdout + result.stderr)
         parents = self.git("rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
@@ -546,6 +649,8 @@ class ClosingCommitGateTest(unittest.TestCase):
         self.write_round()
         self.db = self.root / "center.sqlite3"
         self.counter = 0
+        # 发号之后，测试里仍用 repo-1 / other-1 这类短名指代工单。
+        self.ids = {}
         self.ok("init", {})
         self.ok("register_project", {"project_id": "repo", "name": "仓库", "root": str(self.project)})
         self.git("init", "-q", "-b", "master")
@@ -554,8 +659,13 @@ class ClosingCommitGateTest(unittest.TestCase):
 
     # --- 小工具 -----------------------------------------------------------
 
+    def tid(self, alias):
+        """短名 → 库发的号。"""
+        return self.ids[alias]
+
     def ok(self, operation, payload):
         self.counter += 1
+        payload = resolve(self.ids, payload)
         result = work_gate.load_center()(self.db).execute(operation, payload, request_id=f"req-{self.counter}")
         self.assertTrue(result["ok"], result)
         return result["result"]
@@ -584,13 +694,22 @@ class ClosingCommitGateTest(unittest.TestCase):
     def closing(self):
         return work_gate.closing_commit(self.project, self.db)
 
+    def planned(self, alias="repo-plan-1", state="planned"):
+        """造一张没开工的排期单：收尾不该被它挡住（PRD-014 R1 / AC-R1-1）。"""
+        return create_numbered(self.ok, self.ids, alias, {
+            "project_id": "repo", "title": "排在池子里的单", "state": state,
+            "deliverable": "一张只有到了轮到它的时候才开工的单",
+            "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        })
+
     def bind(self):
         """造一张在途工单：收尾提交要求本项目一张在飞的单都没有。"""
-        self.ok("create_ticket", {
-            "project_id": "repo", "ticket_id": "repo-1", "title": "改动工具",
+        create_numbered(self.ok, self.ids, "repo-1", {
+            "project_id": "repo", "title": "改动工具",
             "deliverable": "一条能被核对的收尾提交路径",
             "prd_path": "PRD/PRD-001-示例.md",
-            "criteria": [{"id": "C1", "text": "只放开收尾文件"}],
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
         claim = self.ok("claim_ticket", {"project_id": "repo", "ticket_id": "repo-1", "expected_revision": 1,
                                         "coordinator_session_id": "coordinator-repo"})
@@ -641,7 +760,28 @@ class ClosingCommitGateTest(unittest.TestCase):
         verdict = self.closing()
         self.assertEqual("reject", verdict["verdict"], verdict)
         self.assertIn("在途", verdict["detail"])
-        self.assertIn("repo-1", verdict["detail"])
+        self.assertIn(self.tid("repo-1"), verdict["detail"])
+
+    def test_closing_commit_allows_a_ticket_that_is_only_planned(self):
+        """池子里排着的单不挡收尾：这就是 AW-094 那类现场不再逼人取消单子。"""
+        self.planned()
+        self.packet()
+        self.write_round(status="已收尾")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("allow", verdict["verdict"], verdict)
+        self.assertEqual("R-900", verdict["round"])
+
+    def test_closing_commit_still_rejects_a_ready_ticket_nobody_claimed(self):
+        """放行的只是 `planned`：`ready` 是「等人领走」，还是没干完的活。"""
+        self.planned("repo-ready-1", state="ready")
+        self.packet()
+        self.write_round(status="已收尾")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn(self.tid("repo-ready-1"), verdict["detail"])
+        self.assertIn("ready", verdict["detail"])
 
     def test_closing_commit_rejects_round_body_edit(self):
         """状态行之外的改动不许借这条路走：本轮目标改了也要拒。"""
@@ -693,6 +833,21 @@ class ClosingCommitGateTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("收尾提交：R-900", result.stdout + result.stderr)
 
+    def test_hook_allows_a_closing_commit_with_a_planned_ticket_in_the_pool(self):
+        """钩子不因为库里留着一张 planned 单而拒（C6）：2026-11-21 收尾 R-015 就是那样。
+
+        那次 AW-094 留在 `ready`，收尾提交被连拒三次，最后只能把它 `cancel_ticket`
+        才收得了尾。`planned` 落库之后，同样现场必须能提交。
+        """
+        self.planned()
+        self.packet()
+        self.write_round(status="已收尾")
+        self.git("add", "-A")
+        self.hooks()
+        result = self.git("commit", "-m", "收尾 R-900", env={"TASK_CENTER_DB": str(self.db)})
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("收尾提交：R-900", result.stdout + result.stderr)
+
     def test_hook_still_blocks_a_ticketless_commit_with_an_extra_path(self):
         """例外没变成后门：夹带别的文件、又没有工单，照旧拦。"""
         self.packet()
@@ -727,17 +882,24 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.set_status("进行中")
         self.db = self.root / "center.sqlite3"
         self.counter = 0
+        # 发号之后，测试里仍用 repo-1 / other-1 这类短名指代工单。
+        self.ids = {}
         self.ok("init", {})
         self.ok("register_project", {"project_id": "repo", "name": "仓库", "root": str(self.project)})
-        self.ok("create_ticket", {
-            "project_id": "repo", "ticket_id": "repo-1", "title": "改动工具",
+        create_numbered(self.ok, self.ids, "repo-1", {
+            "project_id": "repo", "title": "改动工具", "state": "planned",
             "deliverable": "一个会非零的收尾判定",
             "prd_path": "PRD/PRD-001-示例.md",
-            "criteria": [{"id": "C1", "text": "本轮没收回就非零"}],
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
+
+    def tid(self, alias):
+        """短名 → 库发的号。"""
+        return self.ids[alias]
 
     def ok(self, operation, payload):
         self.counter += 1
+        payload = resolve(self.ids, payload)
         result = work_gate.load_center()(self.db).execute(operation, payload, request_id=f"req-{self.counter}")
         self.assertTrue(result["ok"], result)
         return result["result"]
@@ -764,6 +926,7 @@ class UnclosedRoundListTest(unittest.TestCase):
             "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
             "evidence": ["核对"], "risks": [],
             "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "base_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
             "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
@@ -799,6 +962,46 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertIn("closing-R-900.md", out + err)
         self.assertIn("收尾再开新单", out + err)
 
+    # -- 在途集合：planned 不算、ready 算（PRD-014 AC-R1-2）-------------------
+
+    def test_list_reports_zero_in_flight_when_only_planned_is_queued(self):
+        """池子里只排着一张 planned：退出 0，并打印「在途 0 张」。"""
+        code, out, err = self.list_command()
+        self.assertEqual(0, code, out + err)
+        self.assertIn("在途 0 张", err)
+        self.assertIn("1 张 planned 排着，不算在途", err)
+        # 它没有尝试，所以不在那张表里：池子里的单只在那一句里计数，明细看
+        # `list_tickets --planned`（PRD-014 R6）。
+        self.assertNotIn(self.tid("repo-1"), out)
+
+    def test_list_fails_and_names_a_ready_ticket(self):
+        """同一张单改成 ready：同一条命令非零，并点名这张单（钩子也是这么判的）。"""
+        create_numbered(self.ok, self.ids, "repo-2", {
+            "project_id": "repo", "title": "等人领走的单",
+            "deliverable": "一张已经可以开工但还没人接的单",
+            "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        })
+        code, out, err = self.list_command()
+        self.assertEqual(1, code, out + err)
+        self.assertIn(self.tid("repo-2"), err)
+        self.assertIn("在等人领走", err)
+        self.assertIn("在途 1 张", err)
+        # planned 那一张不出现在点名的名单里：放行的只是它。
+        self.assertNotIn(f"{self.tid('repo-1')}（planned）", err)
+
+    def test_list_json_carries_the_in_flight_set(self):
+        """--json 也要能看出这六个格各几张，不然机器没法核对。"""
+        _code, payload, err = self.list_json()
+        in_flight = payload["result"]["in_flight"]
+        self.assertEqual(0, in_flight["total"])
+        self.assertEqual(1, in_flight["planned"])
+        self.assertEqual([], in_flight["waiting"])
+        self.assertEqual(
+            ["dispatching", "running", "awaiting_review", "blocked", "ready", "rework"],
+            list(in_flight["states"]),
+        )
+
     def test_list_passes_when_round_closed(self):
         """状态位已经是三档之一：退出 0，不再提这件事。"""
         self.land_and_merge()
@@ -817,6 +1020,75 @@ class UnclosedRoundListTest(unittest.TestCase):
         code, out, err = self.list_command()
         self.assertEqual(0, code, out + err)
         self.assertNotIn("未收尾", out + err)
+
+    # --json 里的 ok 必须与退出码一致 -------------------------------------------
+
+    def list_json(self):
+        code, out, err = self.run_main(
+            ["--list", "--json", "--db", str(self.db), "--repo", str(self.project)]
+        )
+        return code, json.loads(out), err
+
+    def test_list_json_unclosed_round_is_not_ok(self):
+        """「本轮未收尾」现场：退出 1 时 JSON 不能说 ok=true，并要写清为什么。
+
+        以前 JSON 先打印、收尾判定在后面单走 return 1，于是同一份回执一边写
+        ok=true 一边退 1：调用方看哪个都能得出相反的结论。
+        """
+        self.land_and_merge()
+        code, payload, err = self.list_json()
+        self.assertEqual(1, code, err)
+        self.assertFalse(payload["ok"], f"退出 1 时 ok 必须为 false：{payload}")
+        reason = payload["result"].get("reason", "")
+        self.assertIn("unclosed-round", reason, f"失败要写清原因：{payload}")
+        self.assertIn("R-900", reason, f"原因里要点名轮次：{payload}")
+
+    def test_list_json_ok_and_exit_code_agree_when_clear(self):
+        """现场没问题时两者也要一致：ok=true 且退出 0，不写 reason。"""
+        self.land_and_merge()
+        self.set_status("已收尾")
+        code, payload, err = self.list_json()
+        self.assertEqual(0, code, err)
+        self.assertTrue(payload["ok"], f"退出 0 时 ok 必须为 true：{payload}")
+        self.assertNotIn("reason", payload["result"], f"通过时不该写失败原因：{payload}")
+
+    def test_list_json_stalled_threshold_and_exit_code_agree(self):
+        """另一种失败源（停住阈值）同样要 ok=false + reason，不能只挂一个退出码。"""
+        self.land_and_merge()
+        self.set_status("已收尾")
+        # 另一张在途单：造「有人在做」的现场，才能用阈值判它停住。
+        create_numbered(self.ok, self.ids, "repo-2", {
+            "project_id": "repo", "title": "另一张",
+            "deliverable": "造一个在途单",
+            "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        })
+        claim = self.ok("claim_ticket", {"project_id": "repo", "ticket_id": "repo-2",
+                                       "expected_revision": 1,
+                                       "coordinator_session_id": "coordinator-repo"})
+        self.ok("bind_session", {"project_id": "repo", "ticket_id": "repo-2",
+                                 "attempt_id": claim["attempt_id"], "session_id": "session-repo",
+                                 "project_root": str(self.project)})
+        # 把这张单的最后事件时间拉到很久以前：刚建的单不算「停住」。
+        # 连接要显式关：`with sqlite3.connect(...)` 只提交事务，不关文件；
+        # Windows 上没关的句柄会让临时目录删不掉（PermissionError WinError 32）。
+        conn = sqlite3.connect(str(self.db))
+        try:
+            conn.execute("UPDATE events SET created_at='2020-01-01T00:00:00+00:00' WHERE ticket_id=?",
+                         (self.tid("repo-2"),))
+            conn.execute("UPDATE attempts SET created_at='2020-01-01T00:00:00+00:00' WHERE ticket_id=?",
+                         (self.tid("repo-2"),))
+            conn.commit()
+        finally:
+            conn.close()
+        code, out, err = self.run_main(
+            ["--list", "--json", "--stalled-minutes", "1",
+             "--db", str(self.db), "--repo", str(self.project)]
+        )
+        payload = json.loads(out)
+        self.assertEqual(1, code, err)
+        self.assertFalse(payload["ok"], f"退出 1 时 ok 必须为 false：{payload}")
+        self.assertIn("stalled", payload["result"].get("reason", ""), f"要点名停住：{payload}")
 
 
 if __name__ == "__main__":

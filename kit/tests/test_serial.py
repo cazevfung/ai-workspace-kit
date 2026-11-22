@@ -35,6 +35,8 @@ class SerialDispatchTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         for pid, name in (("p1", "项目一"), ("p2", "项目二")):
             self.ok("register_project", {"project_id": pid, "name": name, "root": str(self.projects[pid])})
@@ -43,7 +45,16 @@ class SerialDispatchTest(unittest.TestCase):
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
@@ -60,11 +71,13 @@ class SerialDispatchTest(unittest.TestCase):
         return {"project_id": project_id, "ticket_id": ticket_id, **extra}
 
     def ticket(self, ticket_id="t1", project_id="p1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": project_id, "title": "整理检查清单",
+        created = self.ok("create_ticket", {
+            "project_id": project_id, "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[ticket_id] = created["id"]
+        return created
 
     def claim(self, ticket_id="t1", project_id="p1", revision=1, coordinator="coordinator-1", **extra):
         return self.ok("claim_ticket", self.scope(
@@ -96,7 +109,8 @@ class SerialDispatchTest(unittest.TestCase):
         self.ok("submit_result", self.scope(
             ticket_id=ticket_id, project_id=project_id, attempt_id=attempt, session_id=session,
             artifacts=[result.name], summary="清单已完成", evidence=["人工检查条目"], risks=[],
-            head_sha="0123456789abcdef0123456789abcdef01234567"))
+            head_sha="0123456789abcdef0123456789abcdef01234567",
+            base_sha="89abcdef0123456789abcdef0123456789abcdef"))
         return attempt
 
     def events(self, ticket_id="t1", project_id="p1"):
@@ -112,7 +126,7 @@ class SerialDispatchTest(unittest.TestCase):
             ticket_id="t2", expected_revision=1, coordinator_session_id="coordinator-2"))
         message = rejected["error"]["message"]
         # 拒绝要能直接回答「谁占着」：光说 busy，协调会话还得自己去翻。
-        self.assertIn("t1", message)
+        self.assertIn(self.tid("t1"), message)
         self.assertIn("dispatching", message)
         self.assertIn("allow_parallel", message)
         second = self.ok("get_ticket", self.scope("t2"))
@@ -129,7 +143,7 @@ class SerialDispatchTest(unittest.TestCase):
                 self.advance(state, "t1")
                 rejected = self.error("DISPATCH_BUSY", "claim_ticket", self.scope(
                     ticket_id="t2", expected_revision=1, coordinator_session_id="coordinator-2"))
-                self.assertIn(f"t1 ({state})", rejected["error"]["message"])
+                self.assertIn(f"{self.tid('t1')} ({state})", rejected["error"]["message"])
 
     # --- 显式越过 ----------------------------------------------------------
 
@@ -137,15 +151,17 @@ class SerialDispatchTest(unittest.TestCase):
         self.ticket("t1")
         self.ticket("t2")
         self.advance("running", "t1")
-        receipt = self.claim(ticket_id="t2", coordinator="coordinator-2", allow_parallel=True)
+        receipt = self.claim(ticket_id="t2", coordinator="coordinator-2", allow_parallel=True,
+                             parallel_reason="两张单改的文件不重叠，t1 只动测试夹具")
         self.assertTrue(receipt["allow_parallel"])
-        self.assertEqual([{"ticket_id": "t1", "state": "running"}], receipt["parallel_with"])
+        self.assertEqual([{"ticket_id": self.tid("t1"), "state": "running"}], receipt["parallel_with"])
         self.assertEqual("dispatching", receipt["state"])
         # 越过要留一行事件：事后看事件表就知道这次并行是故意的，不是漏了检查。
         overrides = [item for item in self.events("t2")
                      if item["detail"].get("allow_parallel_override") is True]
         self.assertEqual(1, len(overrides))
-        self.assertEqual([{"ticket_id": "t1", "state": "running"}], overrides[0]["detail"]["parallel_with"])
+        self.assertEqual([{"ticket_id": self.tid("t1"), "state": "running"}],
+                         overrides[0]["detail"]["parallel_with"])
         # 没越过时回执也说得清楚：allow_parallel 与 parallel_with 都在，值是空的。
         first = [item for item in self.events("t1") if item["operation"] == "claim_ticket"][0]
         self.assertEqual([], first["detail"]["result"]["parallel_with"])
@@ -214,10 +230,11 @@ class SerialDispatchTest(unittest.TestCase):
         # 拒收不改 revision（rework 原地等待），所以依然是 1。
         rejected = self.error("DISPATCH_BUSY", "claim_ticket", self.scope(
             ticket_id="t1", expected_revision=1, coordinator_session_id="coordinator-1"))
-        self.assertIn("t2 (dispatching)", rejected["error"]["message"])
+        self.assertIn(f"{self.tid('t2')} (dispatching)", rejected["error"]["message"])
         # 显式开口才能同时推进两张单。
-        resumed = self.claim(ticket_id="t1", revision=1, coordinator="coordinator-1", allow_parallel=True)
-        self.assertEqual([{"ticket_id": "t2", "state": "dispatching"}], resumed["parallel_with"])
+        resumed = self.claim(ticket_id="t1", revision=1, coordinator="coordinator-1", allow_parallel=True,
+                             parallel_reason="复工的 t1 只改文档，t2 只改代码")
+        self.assertEqual([{"ticket_id": self.tid("t2"), "state": "dispatching"}], resumed["parallel_with"])
 
 
 if __name__ == "__main__":

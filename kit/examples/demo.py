@@ -29,10 +29,13 @@ def main():
 
         call("init")
         call("register_project", project_id="demo", name="模拟试点项目", root=str(project))
-        scope = {"project_id": "demo", "ticket_id": "DEMO-1"}
-        call("create_ticket", **scope, title="制作两项检查清单", prd_path="PRD.md",
-             deliverable="一份含两个可勾选步骤的检查清单",
-             criteria=[{"id": "C1", "text": "至少包含两个检查步骤"}])
+        # 工单号由库里发（schema 11 起）：以回执为准，不再由调用方自报一个。
+        created = call("create_ticket", project_id="demo", title="制作两项检查清单", prd_path="PRD.md",
+                       deliverable="一份含两个可勾选步骤的检查清单",
+                       criteria=[{"id": "C1",
+                                  "text": "判断类：清单至少有两个可勾选的步骤；"
+                                          "反例：只有一行「1. 检查输入」时不算通过"}])
+        scope = {"project_id": "demo", "ticket_id": created["id"]}
         for cycle in (1, 2):
             aid = call("claim_ticket", **scope, expected_revision=1,
                        coordinator_session_id=f"SIMULATED-coordinator-{cycle}")["attempt_id"]
@@ -42,7 +45,8 @@ def main():
                 (project / "result.md").write_text("1. 检查输入\n2. 检查输出", encoding="utf-8")
             sid = call("submit_result", **scope, attempt_id=aid, session_id=session, summary="模拟执行提交",
                        artifacts=["result.md"], evidence=["演示数据，不代表真实会话执行"], risks=[],
-                       head_sha="0000000000000000000000000000000000000000")["submission_id"]
+                       head_sha="0000000000000000000000000000000000000000",
+                       base_sha="1111111111111111111111111111111111111111")["submission_id"]
             passed = len((project / "result.md").read_text(encoding="utf-8").splitlines()) >= 2
             call("review_result", **scope, attempt_id=aid, submission_id=sid,
                  reviewer_session_id="SIMULATED-reviewer", verdict="accept" if passed else "reject",

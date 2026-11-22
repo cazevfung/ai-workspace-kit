@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from task_center import Center
@@ -126,13 +127,24 @@ class MergeTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "p1", "name": "项目一", "root": str(self.project)})
         self.ok("register_project", {"project_id": "p2", "name": "项目二", "root": str(self.other)})
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
@@ -148,11 +160,13 @@ class MergeTest(unittest.TestCase):
         return {"project_id": "p1", "ticket_id": "t1", **extra}
 
     def ticket(self, ticket_id="t1", project_id="p1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": project_id, "title": "整理检查清单",
+        created = self.ok("create_ticket", {
+            "project_id": project_id, "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[ticket_id] = created["id"]
+        return created
 
     def done(self, ticket_id="t1", project_id="p1", executor="executor-1", reviewer="reviewer-1"):
         """走完整流程把一张工单做到 done：领取、绑定、提交、独立验收。"""
@@ -167,6 +181,7 @@ class MergeTest(unittest.TestCase):
             **scope, "attempt_id": claim["attempt_id"], "session_id": executor,
             "artifacts": [f"{ticket_id}-result.md"], "summary": "清单已完成",
             "evidence": ["人工检查条目"], "risks": [], "head_sha": HEAD_SHA,
+            "base_sha": "89abcdef0123456789abcdef0123456789abcdef",
         })
         return self.ok("review_result", {
             **scope, "attempt_id": claim["attempt_id"], "submission_id": submission["submission_id"],
@@ -207,7 +222,7 @@ class MergeTest(unittest.TestCase):
         self.done()
         self.notice()
         receipt = self.ok("merge_ticket", self.merge_payload(), "merge-once")
-        self.assertEqual("t1", receipt["ticket_id"])
+        self.assertEqual(self.tid("t1"), receipt["ticket_id"])
         self.assertEqual("a1b2c3d", receipt["commit"])
         self.assertEqual("master", receipt["target_branch"])
         self.assertEqual("python tools/run_tests.py：全绿", receipt["tests"])
@@ -251,11 +266,11 @@ class MergeTest(unittest.TestCase):
         self.done()
         self.error("NO_NOTICE", "merge_ticket", self.merge_payload())
         self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
-        self.assertEqual(["t1"], [item["id"] for item in self.ok("list_unmerged")["items"]])  # 还没合，仍列出
+        self.assertEqual([self.tid("t1")], [item["id"] for item in self.ok("list_unmerged")["items"]])  # 还没合，仍列出
         # failed 也算走过回执：回执没送达但原因记下来了，这是事实，不是可越过的门。
         self.notice(status="failed")
         receipt = self.ok("merge_ticket", self.merge_payload())
-        self.assertEqual("t1", receipt["ticket_id"])
+        self.assertEqual(self.tid("t1"), receipt["ticket_id"])
         self.assertEqual(1, len(self.ok("get_ticket", self.scope())["merges"]))
 
     def test_already_merged_still_wins_over_the_notice_gate(self):
@@ -287,7 +302,7 @@ class MergeTest(unittest.TestCase):
         self.notice()
         self.error("SHA_MISMATCH", "merge_ticket", self.merge_payload(reviewed_sha=OTHER_SHA))
         self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
-        self.assertEqual(["t1"], [item["id"] for item in self.ok("list_unmerged")["items"]])
+        self.assertEqual([self.tid("t1")], [item["id"] for item in self.ok("list_unmerged")["items"]])
         # 校验顺序：大小写不影响比对（git 给的是小写，人手里可能大写）。
         self.ok("merge_ticket", self.merge_payload(reviewed_sha=HEAD_SHA.upper()), "merge-upper")
 
@@ -332,7 +347,7 @@ class MergeTest(unittest.TestCase):
         self.done()
         self.ticket("t2")  # 还没开始做
         listed = self.ok("list_unmerged")
-        self.assertEqual(["t1"], [item["id"] for item in listed["items"]])
+        self.assertEqual([self.tid("t1")], [item["id"] for item in listed["items"]])
         item = listed["items"][0]
         self.assertEqual("整理检查清单", item["title"])
         self.assertEqual("done", item["state"])
@@ -349,7 +364,7 @@ class MergeTest(unittest.TestCase):
         self.notice()
         self.ok("merge_ticket", self.merge_payload())
         listed = self.ok("list_unmerged")
-        self.assertEqual(["t2"], [item["id"] for item in listed["items"]])
+        self.assertEqual([self.tid("t2")], [item["id"] for item in listed["items"]])
         self.assertEqual(1, listed["count"])
         self.assertFalse(listed["items"][0]["has_merge"])
 
@@ -357,12 +372,46 @@ class MergeTest(unittest.TestCase):
         self.done("t1", project_id="p1")
         self.ticket("t2", project_id="p2")
         # p2 的工单还没做，不该出现在任何清单里。
-        self.assertEqual(["t1"], [item["id"] for item in self.ok("list_unmerged", {"project_id": "p1"})["items"]])
+        self.assertEqual([self.tid("t1")], [item["id"] for item in self.ok("list_unmerged", {"project_id": "p1"})["items"]])
         self.assertEqual([], self.ok("list_unmerged", {"project_id": "p2"})["items"])
         self.assertEqual([], self.ok("list_unmerged", {"project_id": "unknown"})["items"])
         for bad in (None, "", 7):
             self.error("INVALID_INPUT", "list_unmerged", {"project_id": bad})
         self.error("INVALID_INPUT", "list_unmerged", {"project_id": "p1", "limit": 1})
+
+    # --- AW-087 / PRD-013 R4：只想看最近这几天的单 --------------------------
+
+    def backdate(self, ticket_id, days):
+        """把工单的 created_at 往前挪几天：只改副本库里的这一行。"""
+        stamp = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        # 连接必须关掉：Windows 上开着句柄的临时目录删不掉，用例会以清理错误收场。
+        conn = sqlite3.connect(str(self.db))
+        try:
+            with conn:
+                conn.execute("UPDATE tickets SET created_at=? WHERE id=?",
+                             (stamp, self.ids.get(ticket_id, ticket_id)))
+        finally:
+            conn.close()
+
+    def test_list_unmerged_since_days_keeps_only_recent_tickets(self):
+        self.done("t1")
+        self.done("t2", executor="executor-2", reviewer="reviewer-2")
+        self.backdate("t2", 10)
+        # 不传 since_days 时行为与现在完全一致：两张都在。
+        self.assertEqual(sorted([self.tid("t1"), self.tid("t2")]),
+                         sorted(item["id"] for item in self.ok("list_unmerged")["items"]))
+        recent = self.ok("list_unmerged", {"since_days": 1})
+        self.assertEqual([self.tid("t1")], [item["id"] for item in recent["items"]])
+        self.assertEqual(1, recent["count"])
+        # 10 天前的单放回够宽的口子照样看得到：不是被永久隐去。
+        self.assertIn(self.tid("t2"), [item["id"] for item in self.ok("list_unmerged", {"since_days": 30})["items"]])
+
+    def test_list_unmerged_rejects_a_since_days_out_of_range(self):
+        self.done("t1")
+        self.assertEqual([self.tid("t1")], [item["id"] for item in self.ok("list_unmerged", {"since_days": 365})["items"]])
+        # 布尔是 int 的子类（True == 1），不能因为它看着像 1 就收。
+        for bad in (0, 366, -1, True, "1", 1.5, None):
+            self.error("INVALID_INPUT", "list_unmerged", {"since_days": bad})
 
     # --- migrate 4 -> 5 -> 6 -----------------------------------------------
 
@@ -373,9 +422,9 @@ class MergeTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(4, receipt["from_version"])
-        self.assertEqual(9, receipt["schema_version"])
+        self.assertEqual(13, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(9, user_version(legacy))
+        self.assertEqual(13, user_version(legacy))
         self.assertIn("merges", table_names(legacy))
         self.assertEqual(before, counts(legacy))
         center = Center(legacy)

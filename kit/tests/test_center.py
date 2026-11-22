@@ -12,6 +12,8 @@ from task_center import Center
 # 这里只要是一个合法的 40 位十六进制串：用例验的是「记下来、读得回、比得上」，
 # 不是 sha 本身对不对。
 HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
+# 这次提交是从哪个 commit 分出来的（`git merge-base HEAD master` 的输出）。
+BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 
 
 class CenterTest(unittest.TestCase):
@@ -25,12 +27,27 @@ class CenterTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 这类短名指代工单；resolve() 在发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "p1", "name": "项目一", "root": str(self.project)})
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号。
+
+        别名只活在测试里：`create_ticket` 不再收自报号，所以「哪张单是 t1」只能取自回执。
+        只替换值、不删字段——`create_ticket` 带着 ticket_id 仍然要被拒。
+        """
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
@@ -42,16 +59,18 @@ class CenterTest(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual(code, result["error"]["code"], result)
 
-    def ticket(self, ticket_id="t1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": "p1", "title": "整理检查清单",
+    def ticket(self, alias="t1"):
+        created = self.ok("create_ticket", {
+            "project_id": "p1", "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[alias] = created["id"]
+        return created
 
     def test_create_ticket_requires_deliverable(self):
-        base = {"ticket_id": "t1", "project_id": "p1", "title": "整理检查清单",
-                "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含检查步骤"}]}
+        base = {"project_id": "p1", "title": "整理检查清单",
+                "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}]}
         for bad in (None, "", "   "):
             payload = dict(base) if bad is None else {**base, "deliverable": bad}
             self.error("INVALID_INPUT", "create_ticket", payload)
@@ -63,7 +82,7 @@ class CenterTest(unittest.TestCase):
         revised = self.ok("revise_ticket", {
             "ticket_id": "t1", "project_id": "p1", "expected_revision": 1,
             "reason": "交付物形状变了", "deliverable": "一份带负责人栏的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
         self.assertEqual("一份带负责人栏的检查清单", revised["deliverable"])
         self.assertEqual("一份带负责人栏的检查清单", self.ok("get_ticket", {"ticket_id": "t1", "project_id": "p1"})["deliverable"])
@@ -73,7 +92,7 @@ class CenterTest(unittest.TestCase):
         revised = self.ok("revise_ticket", {
             "ticket_id": "t1", "project_id": "p1", "expected_revision": 1,
             "reason": "只改验收条件", "prd_path": "PRD.md",
-            "criteria": [{"id": "C1", "text": "包含检查步骤与回滚步骤"}],
+            "criteria": [{"id": "C1", "text": "含 `git diff --stat` 且退出码 0"}],
         })
         self.assertEqual("一份逐项可勾选的检查清单", revised["deliverable"])
 
@@ -81,7 +100,8 @@ class CenterTest(unittest.TestCase):
         created = self.ticket()
         self.assertEqual("ready", created["state"])
         self.assertEqual(1, created["revision"])
-        self.assertEqual(64, len(created["prd_sha256"]))
+        # R2.1：建单那一刻只记 prd_path，指纹由 claim 取，所以这里必须是 None。
+        self.assertIsNone(created["prd_sha256"])
         result = self.ok("get_ticket", {"ticket_id": "t1", "project_id": "p1"})
         self.assertEqual("整理检查清单", result["title"])
         self.assertEqual([], result["attempts"])
@@ -113,35 +133,35 @@ class CenterTest(unittest.TestCase):
 
     def test_project_must_exist(self):
         self.error("NOT_FOUND", "create_ticket", {
-            "ticket_id": "t1", "project_id": "unknown", "title": "任务",
+            "project_id": "unknown", "title": "任务",
             "deliverable": "一份清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "条件"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
 
     def test_prd_path_cannot_escape_project(self):
         (self.root / "outside.md").write_text("outside")
         self.error("PATH_OUTSIDE_PROJECT", "create_ticket", {
-            "ticket_id": "t1", "project_id": "p1", "title": "任务",
+            "project_id": "p1", "title": "任务",
             "deliverable": "一份清单",
-            "prd_path": "../outside.md", "criteria": [{"id": "C1", "text": "条件"}],
+            "prd_path": "../outside.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
 
     def test_nonempty_unique_criteria_required(self):
         for criteria in [[], [{"id": "C1", "text": ""}], [{"id": "C1", "text": "a"}] * 2]:
             self.error("INVALID_INPUT", "create_ticket", {
-                "ticket_id": "t1", "project_id": "p1", "title": "任务",
+                "project_id": "p1", "title": "任务",
                 "deliverable": "一份清单",
                 "prd_path": "PRD.md", "criteria": criteria,
             })
 
     def test_exact_retry_returns_original_receipt(self):
-        payload = {"ticket_id": "t1", "project_id": "p1", "title": "任务",
+        payload = {"project_id": "p1", "title": "任务",
                    "deliverable": "一份清单",
-                   "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "条件"}]}
+                   "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}]}
         first = self.ok("create_ticket", payload, "same")
         self.assertEqual(first, self.ok("create_ticket", payload, "same"))
         self.assertEqual(1, len(self.ok("list_tickets")["items"]))
-        self.assertEqual(1, len(self.ok("events", {"ticket_id": "t1", "project_id": "p1"})["items"]))
+        self.assertEqual(1, len(self.ok("events", {"ticket_id": first["id"], "project_id": "p1"})["items"]))
         self.error("REQUEST_CONFLICT", "create_ticket", {**payload, "title": "不同"}, "same")
 
     def test_write_requires_request_id_and_rejects_extra_fields(self):
@@ -170,10 +190,11 @@ class CenterTest(unittest.TestCase):
                                           project_root=str(self.project)))
         return claim["attempt_id"]
 
-    def result_payload(self, attempt, session="executor-1", head_sha=HEAD_SHA):
+    def result_payload(self, attempt, session="executor-1", head_sha=HEAD_SHA, base_sha=BASE_SHA):
         (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
         return self.scope(attempt_id=attempt, session_id=session, artifacts=["result.md"],
-                          summary="清单已完成", evidence=["人工检查条目"], risks=[], head_sha=head_sha)
+                          summary="清单已完成", evidence=["人工检查条目"], risks=[],
+                          head_sha=head_sha, base_sha=base_sha)
 
     def test_claim_requires_coordinator_session_id(self):
         self.ticket()
@@ -214,7 +235,8 @@ class CenterTest(unittest.TestCase):
     def test_two_processes_cannot_claim_twice(self):
         self.ticket()
         code = "import json,sys; from task_center import Center; print(json.dumps(Center(sys.argv[1]).execute('claim_ticket',json.loads(sys.argv[2]),sys.argv[3])))"
-        args = [sys.executable, "-c", code, str(self.db), json.dumps(self.claim_payload(expected_revision=1))]
+        args = [sys.executable, "-c", code, str(self.db),
+                json.dumps(self.resolve(self.claim_payload(expected_revision=1)))]
         processes = [subprocess.Popen(args + [f"parallel-{i}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(2)]
         results = []
         for proc in processes:
@@ -223,7 +245,8 @@ class CenterTest(unittest.TestCase):
             results.append(json.loads(stdout))
         self.assertEqual(1, sum(item["ok"] for item in results), results)
         self.assertEqual(1, len(self.ok("get_ticket", self.scope())["attempts"]))
-        self.assertEqual(2, len(self.ok("events", self.scope())["items"]))
+        # 三行：建单、赢的那次领取，以及输的那次被拒后的留痕（PRD-013 R3）。
+        self.assertEqual(3, len(self.ok("events", self.scope())["items"]))
 
     def test_binding_wrong_project_directory_rolls_back(self):
         self.ticket()
@@ -238,7 +261,8 @@ class CenterTest(unittest.TestCase):
         self.ticket("t2")
         # 这里验的是会话唯一性，不是项目串行；显式越过串行（AW-061）。
         claim = self.ok("claim_ticket", self.claim_payload(ticket_id="t2", expected_revision=1,
-                                                         allow_parallel=True))
+                                                         allow_parallel=True,
+                                                         parallel_reason="验的是会话唯一性，不是项目串行"))
         self.error("CONFLICT", "bind_session", self.scope(ticket_id="t2", attempt_id=claim["attempt_id"],
                    session_id="executor-1", project_root=str(self.project)))
         self.assertEqual("dispatching", self.ok("get_ticket", self.scope(ticket_id="t2"))["state"])
@@ -309,8 +333,11 @@ class CenterTest(unittest.TestCase):
         payload = self.result_payload(attempt)
         (self.project / "PRD.md").write_text("需求第二版", encoding="utf-8")
         self.error("STALE_PRD", "submit_result", payload)
+        # 要作废在飞的尝试、换一代次，就显式写 restart: true（PRD-013 R6）；
+        # 不写它时 revise 只推判据版本，旧尝试照旧能交成果。
         revised = self.ok("revise_ticket", self.scope(expected_revision=1, reason="用户修改需求", prd_path="PRD.md",
-                          criteria=[{"id": "C2", "text": "新条件"}]))
+                          criteria=[{"id": "C2", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+                          restart=True))
         self.assertEqual(2, revised["revision"])
         self.error("STALE_ATTEMPT", "submit_result", payload)
         self.ok("claim_ticket", self.claim_payload(expected_revision=2))
@@ -336,7 +363,7 @@ class CenterTest(unittest.TestCase):
         self.error("INVALID_STATE", "recover_ticket", self.scope(expected_revision=2, reason="不能自动恢复",
                    attempt_id="missing"))
         self.error("INVALID_STATE", "revise_ticket", self.scope(expected_revision=2, reason="不能自动恢复",
-                   prd_path="PRD.md", criteria=[{"id": "C1", "text": "条件"}]))
+                   prd_path="PRD.md", criteria=[{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}]))
 
     def test_recovery_requires_reason_and_expected_revision(self):
         self.ticket()
@@ -378,7 +405,7 @@ class CenterTest(unittest.TestCase):
         attempt, sid = self.submitted()
         self.ok("review_result", self.review_payload(attempt, sid))
         revised = self.ok("revise_ticket", self.scope(expected_revision=1, reason="补充验收项",
-                          prd_path="PRD.md", criteria=[{"id": "C2", "text": "补充条件"}], reopen=True))
+                          prd_path="PRD.md", criteria=[{"id": "C2", "text": "含 `python tools/run_tests.py` 且退出码 0"}], reopen=True))
         self.assertEqual("done", revised["previous_state"])
         result = self.ok("get_ticket", self.scope())
         self.assertEqual("ready", result["state"])
@@ -389,14 +416,14 @@ class CenterTest(unittest.TestCase):
         attempt, sid = self.submitted()
         self.ok("review_result", self.review_payload(attempt, sid, "reject"))
         self.ok("revise_ticket", self.scope(expected_revision=1, reason="换写法",
-                 prd_path="PRD.md", criteria=[{"id": "C2", "text": "新条件"}]))
+                 prd_path="PRD.md", criteria=[{"id": "C2", "text": "含 `python tools/run_tests.py` 且退出码 0"}]))
         self.assertEqual("rejected", self.ok("get_ticket", self.scope())["attempts"][0]["state"])
 
     def test_revising_done_ticket_requires_explicit_reopen(self):
         attempt, sid = self.submitted()
         self.ok("review_result", self.review_payload(attempt, sid))
         payload = self.scope(expected_revision=1, reason="改错别字", prd_path="PRD.md",
-                             criteria=[{"id": "C2", "text": "新条件"}])
+                             criteria=[{"id": "C2", "text": "含 `python tools/run_tests.py` 且退出码 0"}])
         self.error("INVALID_STATE", "revise_ticket", payload)
         self.assertEqual("done", self.ok("get_ticket", self.scope())["state"])
         self.ok("revise_ticket", {**payload, "reopen": True})
@@ -404,8 +431,10 @@ class CenterTest(unittest.TestCase):
     def test_revision_receipt_and_attempts_keep_prd_location(self):
         self.ticket()
         (self.project / "PRD-v2.md").write_text("需求第二版", encoding="utf-8")
+        # 换需求文件再换一代人做：restart 显式要求作废，revision 才 +1（PRD-013 R6）。
         revised = self.ok("revise_ticket", self.scope(expected_revision=1, reason="换需求文件",
-                          prd_path="PRD-v2.md", criteria=[{"id": "C2", "text": "新条件"}]))
+                          prd_path="PRD-v2.md", restart=True,
+                          criteria=[{"id": "C2", "text": "含 `python tools/run_tests.py` 且退出码 0"}]))
         self.assertEqual("PRD-v2.md", revised["prd_path"])
         claim = self.ok("claim_ticket", self.claim_payload(expected_revision=2))
         attempt = [a for a in self.ok("get_ticket", self.scope())["attempts"] if a["id"] == claim["attempt_id"]][0]
@@ -423,7 +452,7 @@ class CenterTest(unittest.TestCase):
         for _ in range(20000):
             nested = [nested]
         result = self.center.execute("create_ticket", {
-            "project_id": "p1", "ticket_id": "t1", "title": "深层嵌套",
+            "project_id": "p1", "title": "深层嵌套",
             "deliverable": "一份清单",
             "prd_path": "PRD.md", "criteria": nested,
         }, "deep-1")
@@ -433,7 +462,7 @@ class CenterTest(unittest.TestCase):
     def test_init_reports_current_schema_version(self):
         fresh = self.root / "fresh.sqlite3"
         result = Center(fresh).execute("init", {})
-        self.assertEqual(9, result["result"]["schema_version"])
+        self.assertEqual(13, result["result"]["schema_version"])
 
     def test_current_shape_with_old_version_header_is_rejected(self):
         # v2 shape but user_version=1: only the version gate can reject this.
@@ -562,9 +591,9 @@ class CenterTest(unittest.TestCase):
         self.ticket()
         backup = self.root / "backup.sqlite3"
         self.ok("backup", {"destination": str(backup)})
-        result = Center(backup).execute("get_ticket", self.scope())
+        result = Center(backup).execute("get_ticket", {"project_id": "p1", "ticket_id": self.tid("t1")})
         self.assertTrue(result["ok"], result)
-        self.assertEqual("t1", result["result"]["id"])
+        self.assertEqual(self.tid("t1"), result["result"]["id"])
         self.error("BACKUP_EXISTS", "backup", {"destination": str(backup)})
         self.error("BACKUP_EXISTS", "backup", {"destination": str(self.db)})
 
@@ -615,18 +644,18 @@ class CenterTest(unittest.TestCase):
         except (OSError, NotImplementedError):
             self.skipTest("symbolic links are unavailable on this system")
         self.error("PATH_OUTSIDE_PROJECT", "create_ticket", {
-            "ticket_id": "t1", "project_id": "p1", "title": "任务",
+            "project_id": "p1", "title": "任务",
             "deliverable": "一份清单",
-            "prd_path": "linked/PRD.md", "criteria": [{"id": "C1", "text": "条件"}],
+            "prd_path": "linked/PRD.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         })
 
     def test_request_id_cannot_be_reused_across_operations(self):
         self.ticket()
         self.ok("register_project", {"project_id": "p9", "name": "九号", "root": str(self.root)}, "shared-id")
         self.error("REQUEST_CONFLICT", "create_ticket", {
-            "ticket_id": "t9", "project_id": "p9", "title": "跨操作复用",
+            "project_id": "p9", "title": "跨操作复用",
             "deliverable": "一份清单",
-            "prd_path": "center.sqlite3.md", "criteria": [{"id": "C1", "text": "条件"}],
+            "prd_path": "center.sqlite3.md", "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
         }, "shared-id")
 
     def test_non_utf8_text_names_the_encoding_problem(self):
