@@ -316,7 +316,13 @@ def scan_waiting_review(conn, now, hits, ignored) -> None:
 
 
 def has_sent_notice(conn: sqlite3.Connection, ticket_id: str) -> bool:
-    """这张单有没有任何一条 `sent` 回执。写 `failed` 的不算：那一次没到任何人手里。"""
+    """这张单有没有任何一条 `sent` 回执。
+
+    **只有 `sent` 算送达**：`failed` 只说明「曾经想发没发成」（`send_to_session` 投出去
+    被宿主当成新任务、目标会话查不到、网络断），那一条没有到任何人手里，所以不能拿它
+    当「走过回执」。2026-11-22 的 AWK-101 就是这样：回执记成了 `failed`，状态停在
+    `awaiting_review`，没有任何东西去催，靠人追问才发现。
+    """
     try:
         row = conn.execute(
             "SELECT 1 FROM notices WHERE ticket_id=? AND status='sent' LIMIT 1", (ticket_id,)
@@ -330,7 +336,10 @@ def scan_awaiting_receipt(conn, now, hits, ignored) -> None:
     """提交后 15 分钟还没有一条 sent 回执（AWK-101 的现场）。
 
     与第 1 类（4 小时没人验收）是两条链：一条问「有没有人看」，这条问「回执发没发出去」。
-    “等」从最新一条提交的 `created_at` 算起——那是回执应该发出的时刻。
+    「等」从最新一条提交的 `created_at` 算起——那是回执应该发出的时刻。
+    判据只有一条：`notices` 里没有 `sent`。**写 `failed` 的照样报**，因为 `failed` 说明
+    那次没送到（见 `has_sent_notice`），不是「已经走过回执」；拿它放行等于把「想发过」
+    当成「发到了」，AWK-101 的沉默就是这么来的。
     """
     for row in ticket_rows(conn, "awaiting_review"):
         submission = latest_submission(conn, row["id"])

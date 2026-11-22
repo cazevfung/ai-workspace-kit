@@ -225,6 +225,22 @@ class AwaitingReceiptTest(TempDbCase):
         result = self.run_scan()
         self.assertEqual([hit["ticket_id"] for hit in result["hits"]], ["AW-949"])
 
+    def test_failed_notice_is_not_a_delivered_receipt(self):
+        """`failed` 只说明曾经想发没发成：它在库里，但一样要报（AWK-101 的现场）。
+
+        判据只看有没有 `sent`。把 `failed` 当成「走过回执」等于把「想发过」当成「发到了」，
+        那一单就会停在 `awaiting_review` 且没有任何东西去催。
+        """
+        add_ticket(self.ticket, "AW-939", "awaiting_review")
+        add_attempt(self.ticket, "AW-939", "a-939", state="submitted")
+        add_submission(self.ticket, "a-939", "s-939", minutes_ago=20)
+        add_notice(self.ticket, "AW-939", "failed", notice_id="n-939-a")
+        add_notice(self.ticket, "AW-939", "failed", notice_id="n-939-b")
+        result = self.run_scan()
+        self.assertEqual(self.kinds(result), [wait_audit.AWAITING_RECEIPT])
+        self.assertIn("failed×2", result["hits"][0]["detail"])
+        self.assertNotIn("notice_sent", [item["reason"] for item in result["ignored"]])
+
     def test_not_hit_when_sent_notice_exists(self):
         add_ticket(self.ticket, "AW-944", "awaiting_review")
         add_attempt(self.ticket, "AW-944", "a-944", state="submitted")

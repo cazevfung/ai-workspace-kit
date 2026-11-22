@@ -236,7 +236,7 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的第 2 步就是「项目配置」——缺 `.agents/ticket-config.json`、缺 `test_cmd` 或 `target_branch`，它就停在那一步并指向 `add_project.py`，不会回落到任何默认测试命令。不配等于没有测试，而「没跑测试」绝不能长得像「跑过了」。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 672 项。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 673 项。
 
 #### 与工作区（`D:/AI工作区`）的已知差异
 

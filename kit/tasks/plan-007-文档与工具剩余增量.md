@@ -52,7 +52,7 @@
 
 ### 任务 4：两处盲点修补
 
-`wait_audit` 新增 `awaiting_receipt` 一类（阈值 15 分钟，判据是「`awaiting_review` 且 `notices` 里没有 `sent`」）；`auto_merge` 的 schema 闸门认 `kit/task_center/db.py`。
+`wait_audit` 新增 `awaiting_receipt` 一类（阈值 15 分钟，判据是「`awaiting_review` 且 `notices` 里没有 `sent`」，只有 `failed` 也报）；`auto_merge` 的 schema 闸门认 `kit/task_center/db.py`。
 
 验证：造一份「有 `awaiting_review` 单、`notices` 只有 `failed`、落库 20 分钟前」的临时库，`python kit/tools/wait_audit.py --db <临时库>` 退出码 1 且输出含 `awaiting_receipt`；`grep -c "kit/task_center/db.py" kit/tools/auto_merge.py` 输出大于等于 1。
 
@@ -72,5 +72,5 @@
 
 ## 未决
 
-- [待澄清：`wait_audit` 的 15 分钟阈值是否会误报] 默认：既要 `awaiting_review` 又没有 `sent`，且落库超过 15 分钟才报，写 `failed` 的算作「走过回执」不报。恢复条件：实测出现过多于一次的误报（例如执行会话本来就慢），把阈值提到 30 分钟并写清理由。
+- [已定：`wait_audit` 的 15 分钟阈值] 判据：`awaiting_review` 且 `notices` 里没有 `sent`、落库超过 15 分钟就报。**只有 `failed` 也一样要报**——`failed` 只说明「曾经想发没发成」，不等于送达；2026-11-22 AWK-101 就是把回执记成 `failed`，结果没有任何东西去催（本计划上一版在这里写成「写 `failed` 的算作走过回执不报」，那句话是错的，已改）。恢复条件：实测出现过多于一次的误报（例如执行会话本来就慢），把阈值提到 30 分钟并写清理由。
 - 判断类风险：PRD 正文搬过来但示例路径仍是工作区的。默认：用 `grep -rl "D:/AI工作区" kit/PRD/` 为空作为硬判据，不靠人眼。
