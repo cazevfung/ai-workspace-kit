@@ -7,7 +7,9 @@
 用法：
     python tools/work_gate.py --ticket T-1              # 通过则退出 0
     python tools/work_gate.py --ticket T-1 --repo {{WORKSPACE}}
-    python tools/work_gate.py --list                     # 现在有哪些活跃尝试（读不了库则非零退出）
+    python tools/work_gate.py --list                     # 现在有哪些活跃尝试 + 在途集合长什么样（读不了库则非零退出）
+    python tools/work_gate.py --list --json               # 同一份清单，机器可读
+    python tools/work_gate.py --list --stalled-minutes 45 # 有单超过这个分钟数没落库就退出 1
     python tools/work_gate.py --ticket T-1 --json
 
 钩子里的约定：`TASK_CENTER_TICKET` 给出工单号，`TASK_CENTER_PROJECT` 可选。
@@ -16,12 +18,17 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = Path.home() / ".agents" / "center.json"
+# 停住阈值默认 45 分钟（PRD-013 R4）。不传 --stalled-minutes 时这个值只用来算
+# 「其中 M 张最后落库超过 45 分钟」那一句；要不要因此非零退出，见 main() 里的说明。
+DEFAULT_STALLED_MINUTES = 45
 
 # 收尾提交（例外路径）只放开这三个位置。多一条路径就是多一扇门，将来要扩就显式改这里。
 CLOSING_EXACT_PATHS = ("tasks/round.md", "tasks/rounds.md")
@@ -33,8 +40,21 @@ ROUND_NUMBER_LINE = re.compile(r"^轮次[：:]\s*(R-\d{3})\s*$", re.M)
 ROUND_STATUS_LINE = re.compile(r"^状态[：:]\s*(\S+)\s*$", re.M)
 # 状态位是三档之一时这一轮已经有结论；只有「进行中」才可能是没收。
 ROUND_CLOSED_STATUSES = ("已收尾", "等一句答复", "需重开")
-# 收尾提交要求「本项目一张在飞的单都没有」：先把还没开始的 ready/rework 也算上。
+# 在途集合：**只有这一份定义**。`docs/closing.md` 的「在途集合只有一份定义」一节写的
+# 就是它，`tools/close_gate.py` 从这里导入、`--list` 也按它报（PRD-014 R1）。
+#
+# 为什么必须一份：两条判定问的是同一件事「本项目还有没有没干完的活」，各写一份就会
+# 各给一个答案。AW-094 就是那样：`close_gate --check` 说可以收（它只有四个状态），
+# 收尾提交的钩子连拒三次（它把 `ready` 也算上），最后只能把排好的单取消掉才收得了尾。
+#
+# `planned` **不在其中**：那是「还没轮到、在库里排着」，不产生尝试、没有人在做，
+# 排着队的单不该挡住一轮的收尾。`ready` / `rework` 仍在其中：那是「等人领走」，
+# 是没干完的活。
 CLOSING_BLOCKING_STATES = ("dispatching", "running", "awaiting_review", "blocked", "ready", "rework")
+# 在途里「没有会话在做、只在等人领走」的那两格：`--list` 据它判红并点名验收条件
+# AC-R1-2（`ready` 在场时同一条命令必须非零）。其余四格都有尝试、有会话在做，
+# 不该因为别人在跑就让 --list 变成一条恒红的命令。
+WAITING_STATES = ("ready", "rework")
 
 
 def center_candidates(repo=REPO, env=None):
@@ -234,7 +254,8 @@ def verify(db_path, ticket_id, project=None, repo=REPO, in_merge=None):
         "ready": "工单还没领取。跑 claim_ticket（带 expected_revision），然后 bind_session 绑定本会话。",
         "rework": "工单在待返工。重新 claim_ticket 会产生新尝试，然后 bind_session。",
         "dispatching": "已经 claim 但还没绑定会话。跑 bind_session，把 session_id 和项目 root 传进去。",
-        "awaiting_review": "成果已提交、等着验收。要改东西就先 recover_ticket 或 revise_ticket，不要直接改。",
+        "awaiting_review": "成果已提交、等着验收。要改东西就先 recover_ticket，"
+                           "或 revise_ticket 带 restart=true（不带 restart 时判据会改、这一代仍不换，槽位照旧占着）。",
         "done": "工单已完成。要再改就新建工单，或 revise_ticket 且显式 reopen；"
                 "如果这一步其实是合并提交，确认仓库里真的有未结束的合并（MERGE_HEAD），"
                 "合并要走 tools/auto_merge.py --ticket <编号>，别手动拼一个。",
@@ -263,7 +284,10 @@ class CenterUnreadable(RuntimeError):
 
 
 def active(db_path):
-    """列出所有带活跃尝试的工单：谁在做什么，一眼能看到。
+    """列出所有带活跃尝试的工单：谁在做什么、等了多久，一眼能看到。
+
+    每条带 `started_at`（尝试创建时间）与 `last_event_at`（本单最后一条事件时间）。
+    两个时间是这个清单的用处所在：「谁该动手」看前四列，「等了多久」看后两列。
 
     任何一步读失败都抛 `CenterUnreadable`：只列出读得通的那部分同样是撒谎，
     少掉的恰好可能是别人正在做的那张单。
@@ -287,8 +311,54 @@ def active(db_path):
                         "project_id": project["project_id"], "ticket_id": ticket["id"],
                         "attempt_id": attempt["id"], "session_id": attempt["session_id"],
                         "state": attempt["state"], "created_at": attempt["created_at"],
+                        "started_at": attempt["created_at"],
                     })
+    stamps = last_event_times(db_path, [item["ticket_id"] for item in items])
+    for item in items:
+        # 没有事件的单用尝试时间兑底：列里永远是能算间隔的时间戳，不是空字符串。
+        item["last_event_at"] = stamps.get(item["ticket_id"]) or item["started_at"]
     return items
+
+
+def last_event_times(db_path, ticket_ids):
+    """一次读出这些工单的最后一条事件时间：`events` 的最大 `created_at`。
+
+    直接读库而不是走 `events` 操作：那个操作按 id 分页返回，要拿「最大时间」得把
+    每张单的事件翻完，而这里只需要一个聚合值。只发 SELECT，不建表、不写行。
+    """
+    ids = [ticket_id for ticket_id in ticket_ids if ticket_id]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error as exc:
+        raise CenterUnreadable("STORAGE_ERROR", str(exc)) from exc
+    try:
+        rows = conn.execute(
+            f"SELECT ticket_id, MAX(created_at) FROM events WHERE ticket_id IN ({placeholders})"
+            " GROUP BY ticket_id", ids)
+        return {row[0]: row[1] for row in rows if row[1]}
+    except sqlite3.Error as exc:
+        raise CenterUnreadable("STORAGE_ERROR", str(exc)) from exc
+    finally:
+        conn.close()
+
+
+def stalled(items, threshold_minutes, now=None):
+    """返回最后落库超过阈值的条目。读不出时间的条目不算停住：不猜。"""
+    now = now or datetime.now(timezone.utc)
+    overdue = []
+    for item in items:
+        try:
+            stamp = datetime.fromisoformat(item["last_event_at"])
+        except (TypeError, ValueError):
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if (now - stamp).total_seconds() > threshold_minutes * 60:
+            overdue.append(item)
+    return overdue
 
 
 def read_staged_paths(repo=REPO):
@@ -371,7 +441,7 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
     三条前提同时成立才放行，其余一律拒（`decide()` 一字未动，新逻辑只在这里）：
 
     1. 暂存路径全部落在 `tasks/closing-*.md` / `tasks/round.md` / `tasks/rounds.md`；
-    2. 本项目在途集合为空（含还没开始的 ready / rework）；
+    2. 本项目在途集合为空（含还没开始的 ready / rework，不含排在池子里的 planned）；
     3. `tasks/round.md` 的暂存增删每一行都含 `状态：`，且至少有一份收尾包。
 
     返回 `{"verdict": "skip" | "allow" | "reject", "round": ..., "detail": ...}`。
@@ -444,33 +514,78 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
             "detail": f"收尾提交：{round_no}"}
 
 
-def unclosed_round(center_path, repo=REPO):
+def project_snapshot(center_path, repo=REPO):
+    """一次读全项目现场，`--list` 的三件事都从这一份快照读。
+
+    三件事是：谁在做（`active()` 的表）、本轮收了没有（`unclosed_round()`）、收尾会不会
+    被在途挡（`describe_in_flight()`）。以前后两件各自扫一遍库，现在一次扫完：`--list`
+    本来就慢在这里，而三处各自解释一遍状态名，正是「同一件事三个答案」的温床。
+
+    返回 `None` 表示项目没注册——那是「判不了」，不是「什么都没有」，调用方要分开说。
+    库读不了仍抛 `CenterUnreadable`。
+    """
+    try:
+        found, tickets = project_tickets(center_path, repo)
+    except CenterUnreadable as error:
+        if error.code == "PROJECT_NOT_REGISTERED":
+            return None
+        raise
+    counts = {state: 0 for state in CLOSING_BLOCKING_STATES}
+    waiting = []
+    planned = 0
+    landed = []
+    for ticket in tickets:
+        state = ticket["state"]
+        if state == "planned":
+            planned += 1
+        if state in counts:
+            counts[state] += 1
+            if state in WAITING_STATES:
+                waiting.append(f"{ticket['id']}（{state}）")
+        if state == "done" and ticket.get("merges"):
+            landed.append(ticket["id"])
+    return {
+        "project_id": found["project_id"],
+        "states": counts,
+        "total": sum(counts.values()),
+        "waiting": waiting,
+        "planned": planned,
+        "landed": landed,
+    }
+
+
+def describe_in_flight(snapshot):
+    """在途集合的人话版：六个状态各几张、池子里还排着几张 `planned`。
+
+    六个状态逐个写出来，是因为这一行就是那份定义本身：要核对「代码与
+    `docs/closing.md` 逐项对得上」，看这一行比读常量快。
+    """
+    detail = " / ".join(f"{state} {count}" for state, count in snapshot["states"].items())
+    return (f"在途 {snapshot['total']} 张（{detail}）；"
+            f"池子里另 {snapshot['planned']} 张 planned 排着，不算在途")
+
+
+def unclosed_round(snapshot, repo=REPO):
     """本轮该收却没收回：返回 (轮次, 说明) 或 (None, None)。
 
     三个条件同时成立才报：本项目在途集合为空、`tasks/round.md` 的状态是「进行中」、
     且本项目存在 done 且有合并记录的工单。成立时 `--list` 非零并给三步——它是每轮
     开工的第一条命令，`状态：进行中` 不该能合法地永远留着。
 
-    读不出轮次文件（比如别的仓库没有 tasks/）、或项目没注册，就不报：那是「判不了」，
-    不是「收过了」。库读不了仍抛 `CenterUnreadable`，由 `--list` 按既有出口报错。
+    读不出轮次文件（比如别的仓库没有 tasks/）、或项目没注册（`snapshot is None`），就不报：
+    那是「判不了」，不是「收过了」。
     """
     round_no, status, _error = read_round(repo)
     if round_no is None or status is None or status in ROUND_CLOSED_STATUSES:
         return None, None
-    try:
-        found, tickets = project_tickets(center_path, repo)
-    except CenterUnreadable as error:
-        if error.code == "PROJECT_NOT_REGISTERED":
-            return None, None
-        raise
-    if any(ticket["state"] in CLOSING_BLOCKING_STATES for ticket in tickets):
+    if snapshot is None or snapshot["total"]:
         return None, None
-    landed = [ticket["id"] for ticket in tickets if ticket["state"] == "done" and ticket.get("merges")]
+    landed = snapshot["landed"]
     if not landed:
         return None, None
     target = Path(repo) / "tasks" / f"closing-{round_no}.md"
     return round_no, (
-        f"本轮 {round_no} 未收尾：项目 {found['project_id']} 已经没有在途工单，已有验收并合并的工单"
+        f"本轮 {round_no} 未收尾：项目 {snapshot['project_id']} 已经没有在途工单，已有验收并合并的工单"
         f"（{'、'.join(landed[:3])}{' 等' if len(landed) > 3 else ''}），但 tasks/round.md 还写着 状态：{status}。\n"
         "这样补（三步）：\n"
         f"  1. 按 docs/closing.md 写 {target}（七节，第 7 节结论三档之一）\n"
@@ -495,7 +610,13 @@ def main(argv):
     parser.add_argument("--db", default=None)
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--json", action="store_true")
+    # 不给默认值：给了就没法分开「人传了阈值、要据此判红」与「没传、只看看」。理由见 --list 分支。
+    parser.add_argument("--stalled-minutes", type=int, default=None,
+                        help="在途单最后落库超过这么多分钟就判红（默认只统计 45 分钟，不判红）")
     args = parser.parse_args(argv[1:])
+    if args.stalled_minutes is not None and args.stalled_minutes < 1:
+        print("--stalled-minutes 必须是正整数（分钟）；不传就只统计不判红。", file=sys.stderr)
+        return 1
 
     db_path = find_db(args.db)
     if args.list:
@@ -512,20 +633,75 @@ def main(argv):
                   "（migrate 或恢复快照），再重新跑 --list；不要把它当成没人干活。",
                   file=sys.stderr)
             return 1
-        for item in items:
-            print(f"{item['ticket_id']}\t{item['project_id']}\t{item['state']}\t{item['session_id'] or '(未绑定)'}")
+        if not args.json:
+            # 六列：前四列回答「谁该动手」，后两列回答「等了多久」。
+            # `--json` 时不打表格：stdout 上一行表格一行 JSON 谁都解析不了。
+            for item in items:
+                print(f"{item['ticket_id']}\t{item['project_id']}\t{item['state']}\t{item['session_id'] or '(未绑定)'}"
+                      f"\t{item['started_at']}\t{item['last_event_at']}")
+        threshold = args.stalled_minutes if args.stalled_minutes is not None else DEFAULT_STALLED_MINUTES
+        overdue = stalled(items, threshold)
+        # 汇总行与判红都走 stderr：stdout 只留 6 列表格，机器解析不会被最后一行绊倒。
+        print(f"共 {len(items)} 张在途，其中 {len(overdue)} 张最后落库超过 {threshold} 分钟", file=sys.stderr)
+        # 传了阈值就据它判红；没传只统计。理由是同一份清单在两个场合用：巡检要一条
+        # 能变红的命令（传阈值），而开工前查「有没有人在做」不该因为别人在跑就跑不成——
+        # 后者一旦恒为 1，钩子与日常流程会把它当噪声跳过。
+        failing = bool(overdue) and args.stalled_minutes is not None
+        if failing:
+            names = "、".join(f"{item['ticket_id']}（{item['last_event_at']}）" for item in overdue)
+            print(f"疑似停住：{names}", file=sys.stderr)
+            print(f"  判据：最后事件时间距今超过 {threshold} 分钟。要么去问它一句，"
+                  "要么 recover_ticket 换一张再跑；不要看着不动当它在做。", file=sys.stderr)
         try:
-            round_no, unclosed = unclosed_round(db_path, args.repo)
+            snapshot = project_snapshot(db_path, args.repo)
         except CenterUnreadable as error:
-            # 清单已经打印出来了，但「本轮收了没有」判不了：同样非零，不说「没事」。
+            # 清单已经打印出来了，但「在途集合长什么样」「本轮收了没有」判不了：同样非零。
             print(f"读库失败：{error.code}（{db_path}）", file=sys.stderr)
             print(f"  {error.message}", file=sys.stderr)
             return 1
+        # 上面那张表数的是「有活跃尝试的单」，这一行数的是「在途集合」——收尾闸门与
+        # 收尾提交例外按同一个集合判，所以两条命令不会再给出相反的两句话。
+        if snapshot is not None:
+            print(describe_in_flight(snapshot), file=sys.stderr)
+            if snapshot["waiting"]:
+                # 直接点名：这一句就是「说没事却提交不了」的那个缺口（AW-094）。
+                print(f"没人在做，在等人领走：{'、'.join(snapshot['waiting'])}", file=sys.stderr)
+                print("  它们是 ready / rework，都算在途：收尾闸门会拦，收尾提交的钩子也会拦。"
+                      "没打算现在做就先 cancel_ticket 或在库里排成 planned。", file=sys.stderr)
+        round_no, unclosed = unclosed_round(snapshot, args.repo)
         if unclosed is not None:
             print(unclosed, file=sys.stderr)
             print(f"本轮 {round_no} 没有收尾：先收尾再开新单（判据与落点见 docs/closing.md）。", file=sys.stderr)
-            return 1
-        return 0
+        # 退出码先定下来，再打印：JSON 里的 ok 必须与它一致。以前 JSON 先打印、
+        # 「本轮未收尾」在后面单独 return 1，于是同一份回执会一边写 ok=true 一边退 1。
+        failures: list[str] = []
+        if failing:
+            failures.append(
+                f"stalled：{len(overdue)} 张在途单最后落库超过 {threshold} 分钟"
+                f"（{'、'.join(item['ticket_id'] for item in overdue)}）"
+            )
+        if snapshot is not None and snapshot["waiting"]:
+            # ready / rework 是「人领走」的活：没人做、但收尾会拦。以前只有钩子知道，
+            # 于是 --list 说没事、提交却连扫三次（AW-094）。现在这里就点名。
+            failures.append(
+                f"in-flight：{len(snapshot['waiting'])} 张在途单在等人领走"
+                f"（{'、'.join(snapshot['waiting'])}）；收尾闸门与收尾提交都会因此拦下这一轮"
+            )
+        if unclosed is not None:
+            failures.append(f"unclosed-round：本轮 {round_no} 没有收尾，先收尾再开新单")
+        if args.json:
+            result = {
+                "items": items, "count": len(items),
+                "stalled_count": len(overdue), "stalled_minutes": threshold,
+                "stalled": [item["ticket_id"] for item in overdue],
+            }
+            if snapshot is not None:
+                result["in_flight"] = snapshot
+            if failures:
+                # 失败时必须写清为什么，不然调用方只能看到一个 false。
+                result["reason"] = "；".join(failures)
+            print(json.dumps({"ok": not failures, "result": result}, ensure_ascii=False, indent=2))
+        return 1 if failures else 0
     # 收尾提交判定必须排在「没有工单号就拒」之前：收尾包本来就不该有工单能背书。
     closing = closing_commit(args.repo, db_path)
     if closing["verdict"] == "allow":

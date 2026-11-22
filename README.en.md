@@ -208,13 +208,17 @@ python onboard.py --json                       # create_project -> open session 
 python tools/add_project.py D:/my-project      # writes .agents/ticket-config.json and points core.hooksPath at .githooks
 ```
 
+**Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` reads that file at step 2 and stops there when it is missing — it never falls back to a default test command, because "no tests configured" must not look like "tests passed".
+
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 590.
+
+Known differences from the upstream workspace the engine was synced from: the task-centre engine matches its schema 13 (migrations 9–13, id issuing, `planned` queue and dependency links, trips, conflict preview, `criteria_version`), while the PRD texts of `PRD-005` / `PRD-009` / `PRD-013` / `PRD-014` / `PRD-015` and the skill texts are not shipped here; `auto_merge.py` keeps the kit variant that reads project config and does **not** migrate the shared database before recording a merge; usage lines keep the `{{WORKSPACE}}` placeholder instead of a fixed path; and test fixtures are scrubbed (`<session-id>`, `X:/sample-project`). `kit/docs/protocol.md` still documents the pre-sync command surface (no `planned` pool, trips, dependency links or conflict preview); the `ALLOWED` table in `task_center/core.py` and the fields `get_ticket` really returns are authoritative until that doc is updated along with the PRD texts.
+
 In the kit repository, the nine-step self-check installs into a temporary HOME and walks the whole loop:
 
 ```bash
 python verify/verify_onboard.py
 ```
-
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 491.
 
 `examples/demo.py` walks the whole loop in a temporary database — create, dispatch, submit, review — touching no real session or workspace, deleting the database when done.
 

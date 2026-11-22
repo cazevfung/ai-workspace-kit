@@ -210,13 +210,47 @@ python onboard.py --json                       # create_project → 开会话 �
 python tools/add_project.py D:/my-project      # 业务仓库写 .agents/ticket-config.json 并指向 .githooks
 ```
 
+### 接项目这一步：clone 之后先跑 `add_project.py`
+
+每个要开工的业务仓库都得先接进来，一条命令：
+
+```bash
+cd ~/ai-workspace
+python tools/add_project.py D:/my-project
+```
+
+它做两件事：写 `<仓库>/.agents/ticket-config.json`（`test_cmd` / `target_branch` / `test_timeout`，`project_id` 可选），并把那个仓库的 `core.hooksPath` 指向套件的 `.githooks`。写出来的文件长这样：
+
+```json
+{
+  "version": 1,
+  "project_id": "my-project",
+  "target_branch": "master",
+  "test_cmd": ["python", "tools/run_tests.py"],
+  "test_timeout": 1800
+}
+```
+
+**为什么这一步不能省**：`tools/auto_merge.py` 的第 2 步就是「项目配置」——缺 `.agents/ticket-config.json`、缺 `test_cmd` 或 `target_branch`，它就停在那一步并指向 `add_project.py`，不会回落到任何默认测试命令。不配等于没有测试，而「没跑测试」绝不能长得像「跑过了」。
+
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 590 项。
+
+#### 与工作区（`D:/AI工作区`）的已知差异
+
+引擎已经同步到工作区当前的状态（中心库 schema 13）：迁移 9–13、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version` 都跟工作区一致，`python kit/tools/auto_merge.py --list --db <共享库>` 读同一个库不再报 `SCHEMA_MISMATCH`。下面六条是**刻意留着的不一致**：
+
+1. **PRD 正文没有同步。** 包里只有 `kit/PRD/PRD-001-工作区使用与工单体系.md`；`PRD-005` / `PRD-009` / `PRD-013` / `PRD-014` / `PRD-015` 的正文与技能文本仍在工作区。引擎注释里出现的这些编号指的就是那几份文档，套件里没有正文，只作溯源。
+2. **`auto_merge.py` 保留套件这一版。** 它读项目配置、缺配置就拒；工作区那份多一道「写记录前把共享库 `migrate` 到新版本」的 schema 闸门，套件**不做**这件事——套件的合并不改任何库的 schema，库版本落后时照旧报 `SCHEMA_MISMATCH`，由人决定什么时候迁移。
+3. **占位符没有被换成固定路径。** `work_gate.py` / `close_gate.py` / `run_tests.py` / `intake_gate.py` 里的用法写的是 `{{WORKSPACE}}`，装的时候才替换成真实路径。
+4. **`doc_gate.py` 多认两处源码树里的技能路径**（`skills/workspace`、`skills/generic`），所以在没装过的源码仓库里直接跑测试也是绿的。
+5. **夹具已脱敏**：真实会话 id 换成 `<session-id>`，个人目录换成 `X:/示例项目`。
+6. **`kit/docs/protocol.md` 还是同步前的命令面**：它没有 `planned` 池子、车次、依赖边、冲突预演这几节。当下以 `task_center/core.py` 的 `ALLOWED` 与 `get_ticket` 实际回的字段为准；把协议文档补齐排下一张单（那要把 PRD-005/013/014/015 的正文一起带进来，不属于本单）。
+
 套件仓库里还有一条九步自检，它在临时 HOME 里真装一遍再走完闭环：
 
 ```bash
 python verify/verify_onboard.py
 ```
-
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 491 项。
 
 `examples/demo.py` 用一个临时库把闭环走一遍：建工单、派发、提交、验收。它不连真实会话，不写你的工作区，结束时删掉临时库。
 

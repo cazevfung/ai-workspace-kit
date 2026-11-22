@@ -48,6 +48,8 @@ class NoticeTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "p1", "name": "项目一", "root": str(self.project)})
 
@@ -55,7 +57,16 @@ class NoticeTest(unittest.TestCase):
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
@@ -71,12 +82,14 @@ class NoticeTest(unittest.TestCase):
     def scope(self, **extra):
         return {"project_id": "p1", "ticket_id": "t1", **extra}
 
-    def ticket(self, ticket_id="t1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": "p1", "title": "整理检查清单",
+    def ticket(self, alias="t1"):
+        created = self.ok("create_ticket", {
+            "project_id": "p1", "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[alias] = created["id"]
+        return created
 
     def dispatched(self, ticket_id="t1", coordinator="coordinator-1", workdir=None, session="executor-1",
                    allow_parallel=False):
@@ -86,6 +99,7 @@ class NoticeTest(unittest.TestCase):
             payload["coordinator_workdir"] = workdir
         if allow_parallel:
             payload["allow_parallel"] = True
+            payload["parallel_reason"] = "验的是工作目录落库，不是项目串行"
         claim = self.ok("claim_ticket", payload)
         self.ok("bind_session", self.scope(ticket_id=ticket_id, attempt_id=claim["attempt_id"],
                                            session_id=session, project_root=str(self.project)))
@@ -132,7 +146,7 @@ class NoticeTest(unittest.TestCase):
     def test_schema_eight_has_notices_with_target_and_wake_kind(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(9, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(13, conn.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(
                 ["id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail",
                  "created_at", "target_session_id", "wake_kind"],
@@ -322,7 +336,8 @@ class NoticeTest(unittest.TestCase):
         self.ticket()
         attempt, _ = self.dispatched()
         payload = self.root / "created.json"
-        payload.write_text(json.dumps(self.notice_payload(attempt, wake_kind="created")), encoding="utf-8")
+        payload.write_text(json.dumps(self.resolve(self.notice_payload(attempt, wake_kind="created"))),
+                           encoding="utf-8")
         done = subprocess.run(
             [sys.executable, "-m", "task_center", "--db", str(self.db), "record_notice",
              "--request-id", "created-cli", "--input", str(payload)],
@@ -346,24 +361,37 @@ class NoticeToolsTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "p1", "name": "项目一", "root": str(self.project)})
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
         self.assertTrue(result["ok"], result)
         return result["result"]
 
-    def ticket(self, ticket_id="t1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": "p1", "title": "整理检查清单",
+    def ticket(self, alias="t1"):
+        created = self.ok("create_ticket", {
+            "project_id": "p1", "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
-            "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[alias] = created["id"]
+        return created
 
     def run_tool(self, name, *args):
         return subprocess.run([sys.executable, str(ROOT / "tools" / name), *args],
@@ -371,11 +399,11 @@ class NoticeToolsTest(unittest.TestCase):
 
     def test_notice_payload_prints_send_and_record_blocks(self):
         self.ticket()
-        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": "t1", "expected_revision": 1,
+        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": self.tid("t1"), "expected_revision": 1,
                                           "coordinator_session_id": "coordinator-1"})
-        self.ok("bind_session", {"project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+        self.ok("bind_session", {"project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
                                  "session_id": "executor-1", "project_root": str(self.project)})
-        done = self.run_tool("notice_payload.py", "--ticket", "t1", "--db", str(self.db))
+        done = self.run_tool("notice_payload.py", "--ticket", self.tid("t1"), "--db", str(self.db))
         self.assertEqual(0, done.returncode, done.stdout + done.stderr)
         for needle in ('"target_session_id": "coordinator-1"', '"wake_kind": "queued"',
                        '"message"', claim["attempt_id"], "record_notice", "send_to_session"):
@@ -383,7 +411,7 @@ class NoticeToolsTest(unittest.TestCase):
 
     def test_notice_payload_refuses_a_ticket_with_no_coordinator(self):
         self.ticket()
-        done = self.run_tool("notice_payload.py", "--ticket", "t1", "--db", str(self.db))
+        done = self.run_tool("notice_payload.py", "--ticket", self.tid("t1"), "--db", str(self.db))
         self.assertEqual(2, done.returncode, done.stdout)
         self.assertIn("claim_ticket", done.stderr)
         missing = self.run_tool("notice_payload.py", "--ticket", "absent", "--db", str(self.db))
@@ -392,9 +420,9 @@ class NoticeToolsTest(unittest.TestCase):
 
     def bind(self):
         self.ticket()
-        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": "t1", "expected_revision": 1,
+        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": self.tid("t1"), "expected_revision": 1,
                                           "coordinator_session_id": "coordinator-1"})
-        self.ok("bind_session", {"project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+        self.ok("bind_session", {"project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
                                  "session_id": "executor-1", "project_root": str(self.project)})
         return claim
 
@@ -410,7 +438,7 @@ class NoticeToolsTest(unittest.TestCase):
         """
         self.bind()
         self.assertEqual([], self.side_files(), "夹具本身不该带 -wal/-shm，否则测的是另一条路")
-        done = self.run_tool("notice_payload.py", "--ticket", "t1", "--db", str(self.db))
+        done = self.run_tool("notice_payload.py", "--ticket", self.tid("t1"), "--db", str(self.db))
         self.assertEqual(0, done.returncode, done.stdout + done.stderr)
         self.assertIn("immutable=1", done.stdout, "输出要写明这次走的是不留旁文件那条路")
         self.assertEqual([], self.side_files(), "没有 -wal 时不许在真库旁边留旁文件")
@@ -430,22 +458,23 @@ class NoticeToolsTest(unittest.TestCase):
         for _ in range(300):  # 把 WAL 撑到几十页，保证不是「0 字节 -wal」那条路
             writer.execute(
                 "INSERT INTO events(ticket_id,operation,detail,created_at)"
-                " VALUES ('t1','pad',?, '2026-11-18T00:00:00+00:00')", ("x" * 500,))
+                f" VALUES ('{self.tid('t1')}','pad',?, '2026-11-18T00:00:00+00:00')", ("x" * 500,))
         writer.execute("COMMIT")
         writer.execute("BEGIN")
-        writer.execute("UPDATE tickets SET state='awaiting_review' WHERE id='t1'")
+        writer.execute(f"UPDATE tickets SET state='awaiting_review' WHERE id='{self.tid('t1')}'")
         writer.execute("COMMIT")
         wal = self.db.with_name(self.db.name + "-wal")
         self.assertGreater(wal.stat().st_size, 4096, "-wal 必须非空，否则这条用例没测到重点")
 
         main_only = sqlite3.connect(self.db.as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
-            old = main_only.execute("SELECT state FROM tickets WHERE id='t1'").fetchone()[0]
+            old = main_only.execute(
+                "SELECT state FROM tickets WHERE id=?", (self.tid("t1"),)).fetchone()[0]
         finally:
             main_only.close()
         self.assertNotEqual("awaiting_review", old, "immutable=1 应该读到旧值，这是这条用例的前提")
 
-        done = self.run_tool("notice_payload.py", "--ticket", "t1", "--db", str(self.db))
+        done = self.run_tool("notice_payload.py", "--ticket", self.tid("t1"), "--db", str(self.db))
         self.assertEqual(0, done.returncode, done.stdout + done.stderr)
         self.assertIn("mode=ro", done.stdout, "有非空 -wal 时必须退回 mode=ro 并说明理由")
         self.assertIn("状态 awaiting_review", done.stdout, f"读到旧值就不算修好：{done.stdout}")
@@ -465,10 +494,10 @@ class NoticeToolsTest(unittest.TestCase):
         for _ in range(300):
             writer.execute(
                 "INSERT INTO events(ticket_id,operation,detail,created_at)"
-                " VALUES ('t1','pad',?, '2026-11-18T00:00:00+00:00')", ("x" * 500,))
+                f" VALUES ('{self.tid('t1')}','pad',?, '2026-11-18T00:00:00+00:00')", ("x" * 500,))
         writer.execute("COMMIT")
         writer.execute("BEGIN")
-        writer.execute("UPDATE tickets SET state='awaiting_review' WHERE id='t1'")
+        writer.execute(f"UPDATE tickets SET state='awaiting_review' WHERE id='{self.tid('t1')}'")
         writer.execute("COMMIT")
         landed = notice_payload._wal_bytes(self.db)
         self.assertGreater(landed, 4096, "-wal 必须非空，否则这条用例没测到重点")
@@ -476,7 +505,7 @@ class NoticeToolsTest(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(notice_payload, "_wal_bytes", side_effect=[0, landed]):
             with contextlib.redirect_stdout(out):
-                code = notice_payload.main(["--ticket", "t1", "--db", str(self.db)])
+                code = notice_payload.main(["--ticket", self.tid("t1"), "--db", str(self.db)])
 
         text = out.getvalue()
         self.assertEqual(0, code, text)
@@ -487,18 +516,18 @@ class NoticeToolsTest(unittest.TestCase):
 
     def test_session_roster_reports_a_bound_executor(self):
         self.ticket()
-        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": "t1", "expected_revision": 1,
+        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": self.tid("t1"), "expected_revision": 1,
                                           "coordinator_session_id": "coordinator-1"})
-        self.ok("bind_session", {"project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+        self.ok("bind_session", {"project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
                                  "session_id": "executor-1", "project_root": str(self.project)})
         done = self.run_tool("session_roster.py", "--session", "executor-1", "--db", str(self.db))
         self.assertEqual(0, done.returncode, done.stdout + done.stderr)
-        self.assertIn("t1", done.stdout)
+        self.assertIn(self.tid("t1"), done.stdout)
         self.assertIn("running", done.stdout)
         self.assertNotIn("NOT_BOUND", done.stdout)
 
     def test_session_roster_reports_not_bound_for_a_session_with_no_ticket(self):
-        ghost = "<session-id>"
+        ghost = "2a29c0f5-5f61-4c2c-8c9e-000000000000"
         done = self.run_tool("session_roster.py", "--session", ghost, "--db", str(self.db))
         self.assertEqual(1, done.returncode, done.stdout + done.stderr)
         self.assertIn("NOT_BOUND", done.stdout)
@@ -506,19 +535,20 @@ class NoticeToolsTest(unittest.TestCase):
 
     def test_session_roster_reports_not_bound_after_the_attempt_is_terminal(self):
         self.ticket()
-        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": "t1", "expected_revision": 1,
+        claim = self.ok("claim_ticket", {"project_id": "p1", "ticket_id": self.tid("t1"), "expected_revision": 1,
                                           "coordinator_session_id": "coordinator-1"})
-        self.ok("bind_session", {"project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+        self.ok("bind_session", {"project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
                                  "session_id": "executor-1", "project_root": str(self.project)})
         (self.project / "t1-result.md").write_text("1. 检查步骤", encoding="utf-8")
         submission = self.ok("submit_result", {
-            "project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+            "project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
             "session_id": "executor-1", "artifacts": ["t1-result.md"], "summary": "清单已完成",
             "evidence": ["人工检查条目"], "risks": [],
             "head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "base_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
-            "project_id": "p1", "ticket_id": "t1", "attempt_id": claim["attempt_id"],
+            "project_id": "p1", "ticket_id": self.tid("t1"), "attempt_id": claim["attempt_id"],
             "submission_id": submission["submission_id"], "reviewer_session_id": "reviewer-1",
             "verdict": "accept", "checks": [{"id": "C1", "passed": True, "evidence": "已核对"}],
             "reason": "逐项检查后作出结论",

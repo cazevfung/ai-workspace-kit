@@ -1,6 +1,6 @@
 """schema 6：决策通道——工单会「在等一句话」，而这句话有人答、有记录、能被查。
 
-依据 `docs/decisions.md` 与 `docs/protocol.md`「blocked：工单在等一句话」两节。这里判的都是「库里说得清」：
+依据 `PRD/PRD-005-决策通道.md` v0.3 的 4.1–4.7。这里判的都是「库里说得清」：
 
 1. `blocked` 两处都写（`tickets.state` 与 `attempts.state`），权威在工单级；`revision` 不变。
 2. `blocked` 期间 `submit_result` 必须被拒（`INVALID_STATE`）——成果只能在答案回来后交。
@@ -33,6 +33,8 @@ class DecisionChannelTest(unittest.TestCase):
         self.db = self.root / "center.sqlite3"
         self.center = Center(self.db)
         self.counter = 0
+        # 库发号之后，测试里仍用 t1 / t2 指代工单；resolve() 发请求前换成库发的号。
+        self.ids = {}
         self.ok("init")
         self.ok("register_project", {"project_id": "p1", "name": "项目一", "root": str(self.project)})
 
@@ -40,7 +42,16 @@ class DecisionChannelTest(unittest.TestCase):
 
     def call(self, op, payload=None, request_id=None):
         self.counter += 1
-        return self.center.execute(op, payload or {}, request_id or f"req-{self.counter}")
+        return self.center.execute(op, self.resolve(payload or {}), request_id or f"req-{self.counter}")
+
+    def resolve(self, payload):
+        """把 payload 里的短名换成库发的工单号（create_ticket 不再收自报号）。"""
+        alias = payload.get("ticket_id")
+        real = self.ids.get(alias) if isinstance(alias, str) else None
+        return {**payload, "ticket_id": real} if real else payload
+
+    def tid(self, alias="t1"):
+        return self.ids[alias]
 
     def ok(self, op, payload=None, request_id=None):
         result = self.call(op, payload, request_id)
@@ -56,18 +67,21 @@ class DecisionChannelTest(unittest.TestCase):
     def scope(self, **extra):
         return {"project_id": "p1", "ticket_id": "t1", **extra}
 
-    def ticket(self, ticket_id="t1"):
-        return self.ok("create_ticket", {
-            "ticket_id": ticket_id, "project_id": "p1", "title": "整理检查清单",
+    def ticket(self, alias="t1"):
+        created = self.ok("create_ticket", {
+            "project_id": "p1", "title": "整理检查清单",
             "deliverable": "一份逐项可勾选的检查清单",
-            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}],
+            "prd_path": "PRD.md", "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
         })
+        self.ids[alias] = created["id"]
+        return created
 
     def running(self, session="executor-1", ticket_id="t1", coordinator="coordinator-1", revision=1,
                 allow_parallel=False):
         scope = self.scope(ticket_id=ticket_id, expected_revision=revision, coordinator_session_id=coordinator)
         if allow_parallel:
             scope["allow_parallel"] = True
+            scope["parallel_reason"] = "验的是会话槽位与提问，不是项目串行"
         claim = self.ok("claim_ticket", scope)
         self.ok("bind_session", self.scope(ticket_id=ticket_id, attempt_id=claim["attempt_id"],
                                            session_id=session, project_root=str(self.project)))
@@ -92,10 +106,11 @@ class DecisionChannelTest(unittest.TestCase):
 
     def result_payload(self, attempt, session="executor-1"):
         (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
-        # head_sha 是提交的必填项（schema 9）：这里给一个合法值，验的不是它。
+        # head_sha / base_sha 都是提交的必填项（schema 9 / 10）：这里给合法值，验的不是它们。
         return self.scope(attempt_id=attempt, session_id=session, artifacts=["result.md"],
                           summary="清单已完成", evidence=["人工检查条目"], risks=[],
-                          head_sha="0123456789abcdef0123456789abcdef01234567")
+                          head_sha="0123456789abcdef0123456789abcdef01234567",
+                          base_sha="89abcdef0123456789abcdef0123456789abcdef")
 
     def sql(self, *statements):
         """直接改库，只用于造出不一致行来测兜底码；正常路径靠 API 走不到这些状态。"""
@@ -232,7 +247,7 @@ class DecisionChannelTest(unittest.TestCase):
         attempt, question = self.blocked()
         self.ok("recover_ticket", self.scope(attempt_id=attempt, expected_revision=1, reason="收回"))
         self.sql(f"UPDATE questions SET state='open' WHERE id='{question}'",
-                 "UPDATE tickets SET state='blocked' WHERE id='t1'")
+                 f"UPDATE tickets SET state='blocked' WHERE id='{self.tid('t1')}'")
         result = self.error("STALE_ATTEMPT", "answer_ticket", self.answer_payload(question))
         self.assertIn("no longer current", result["error"]["message"])
         # 造出来的不一致行不会因为一次被拒的调用就被改写。
@@ -242,7 +257,7 @@ class DecisionChannelTest(unittest.TestCase):
         # 兜底路径：工单被改回 running，而那条问题仍是 open。索引与状态同步写让它在正常路径上写不进去。
         self.ticket()
         attempt, question = self.blocked()
-        self.sql("UPDATE tickets SET state='running' WHERE id='t1'",
+        self.sql(f"UPDATE tickets SET state='running' WHERE id='{self.tid('t1')}'",
                  f"UPDATE attempts SET state='running' WHERE id='{attempt}'")
         self.error("ALREADY_ASKED", "ask_ticket", self.ask_payload(attempt))
         self.assertEqual(1, len(self.ok("get_ticket", self.scope())["questions"]))
@@ -257,7 +272,8 @@ class DecisionChannelTest(unittest.TestCase):
         # 这里验的是会话槽位，不是项目串行；显式越过串行（AW-061）。
         claim = self.ok("claim_ticket", self.scope(ticket_id="t2", expected_revision=1,
                                                   coordinator_session_id="coordinator-2",
-                                                  allow_parallel=True))
+                                                  allow_parallel=True,
+                                                  parallel_reason="验的是会话槽位，不是项目串行"))
         # 等答案的会话不能再去领第二张单：不然答案回来时同一 session 会有两条 running 尝试。
         self.error("CONFLICT", "bind_session", self.scope(
             ticket_id="t2", attempt_id=claim["attempt_id"], session_id="executor-1",
@@ -275,7 +291,8 @@ class DecisionChannelTest(unittest.TestCase):
         # 同上：验的是会话槽位，不是项目串行（AW-061）。
         claim = self.ok("claim_ticket", self.scope(ticket_id="t2", expected_revision=1,
                                                   coordinator_session_id="coordinator-2",
-                                                  allow_parallel=True))
+                                                  allow_parallel=True,
+                                                  parallel_reason="验的是会话槽位，不是项目串行"))
         self.error("CONFLICT", "bind_session", self.scope(
             ticket_id="t2", attempt_id=claim["attempt_id"], session_id="executor-1",
             project_root=str(self.project)))
@@ -383,8 +400,8 @@ class DecisionChannelTest(unittest.TestCase):
         # 兜底路径：open 问题配着 running 工单（正常写不进这个组合）。
         conn = sqlite3.connect(self.db)
         try:
-            conn.execute("INSERT INTO questions VALUES ('q-1','t1',?,'问','[]','open','2026-01-01T00:00:00+00:00')",
-                         (attempt,))
+            conn.execute("INSERT INTO questions VALUES ('q-1',?,?,'问','[]','open','2026-01-01T00:00:00+00:00')",
+                         (self.tid("t1"), attempt))
             conn.commit()
         finally:
             conn.close()
@@ -397,7 +414,7 @@ class DecisionChannelTest(unittest.TestCase):
     def test_schema_six_has_question_tables_and_a_blocked_wide_index(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(9, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(13, conn.execute("PRAGMA user_version").fetchone()[0])
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertLessEqual({"questions", "answers"}, tables)
             indexes = {row[0]: row[1] for row in conn.execute(

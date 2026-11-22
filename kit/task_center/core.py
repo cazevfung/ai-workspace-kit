@@ -1,7 +1,10 @@
 """Local trusted-user task commands. No host identity or session dispatch is implied."""
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,20 +19,22 @@ FIELDS = {
     "register_project": {"project_id", "name", "root"},
     "unregister_project": {"project_id"},
     "list_projects": set(),
-    "create_ticket": {"project_id", "ticket_id", "title", "deliverable", "prd_path", "criteria", "root"},
+    "create_ticket": {"project_id", "ticket_id", "title", "deliverable", "prd_path", "criteria", "root",
+                      "state", "blocked_by", "related", "rides_with"},
     "get_ticket": {"project_id", "ticket_id"},
-    "list_tickets": {"project_id", "limit", "offset"},
+    "list_tickets": {"project_id", "limit", "offset", "planned", "--planned"},
     "events": {"project_id", "ticket_id", "limit", "offset"},
     "claim_ticket": {"project_id", "ticket_id", "expected_revision", "coordinator_session_id",
-                     "coordinator_workdir", "allow_parallel"},
+                     "coordinator_workdir", "allow_parallel", "parallel_reason", "parallel_scope"},
     "bind_session": {"project_id", "ticket_id", "attempt_id", "session_id", "project_root"},
     "submit_result": {"project_id", "ticket_id", "attempt_id", "session_id", "summary", "artifacts", "evidence", "risks",
-                      "head_sha"},
+                      "head_sha", "base_sha"},
     "recover_ticket": {"project_id", "ticket_id", "attempt_id", "expected_revision", "reason"},
-    "revise_ticket": {"project_id", "ticket_id", "expected_revision", "reason", "prd_path", "criteria", "deliverable", "reopen"},
+    "revise_ticket": {"project_id", "ticket_id", "expected_revision", "reason", "prd_path", "criteria", "deliverable", "reopen",
+                      "restart", "blocked_by", "related", "rides_with"},
     "cancel_ticket": {"project_id", "ticket_id", "expected_revision", "reason"},
     "merge_ticket": {"project_id", "ticket_id", "commit", "target_branch", "tests", "reviewed_sha"},
-    "list_unmerged": {"project_id"},
+    "list_unmerged": {"project_id", "since_days"},
     "ask_ticket": {"project_id", "ticket_id", "attempt_id", "session_id", "question", "options"},
     "answer_ticket": {"project_id", "ticket_id", "question_id", "answer", "answered_by",
                       "answered_by_session_id", "prd_sha256"},
@@ -38,7 +43,7 @@ FIELDS = {
 }
 READS = {"get_ticket", "list_tickets", "list_projects", "list_unmerged", "events"}
 
-# 回信失败不改工单状态，也不自动重派：它在回执上带这一个标记，等人来看（见 docs/decisions.md「回执一条」）。
+# 回信失败不改工单状态，也不自动重派：它在回执上带这一个标记，等人来看（PRD-009 R5 / AC07）。
 NOTIFY_FAILED = "NOTIFY_FAILED"
 # 宿主把「发给某个会话」当成新建任务时用的标记：那次回执没有到达任何人，命令要非零退出。
 # 只报错不停会话：自动停掉误建的新会话要调宿主能力，超出本单范围。
@@ -48,6 +53,26 @@ NOTIFY_CREATED_TASK = "NOTIFY_CREATED_TASK"
 # 意味着「验收完、合并前不能开下一张」（AW-061）。done/cancelled 与还没被领的
 # ready/rework 都不算在途——rework 是可领取状态，它自己复工时同样要排队。
 ACTIVE_TICKET_STATES = ("dispatching", "running", "awaiting_review", "blocked")
+# 尝试级的「在飞」：submitted 对应 awaiting_review，同样算「还在这一代里工作」。
+IN_FLIGHT_ATTEMPT_STATES = ("blocked", "dispatching", "running", "submitted")
+
+# 状态名。`planned` 是「还没开工、在库里排着」（PRD-014 R1）；它不占 active_session、
+# 不产生尝试，所以 ACTIVE_TICKET_STATES 里没有它，`DISPATCH_BUSY` 也不因它而报。
+PLANNED_STATE = "planned"
+# create_ticket 只发这两种状态；其余状态只能由状态机走出来，不能建单时直接声称。
+CREATABLE_STATES = (PLANNED_STATE, "ready")
+# claim 收这三种：`planned` 与 `ready` 是「还没开工」，`rework` 是「改完再来」。
+CLAIMABLE_STATES = (PLANNED_STATE, "ready", "rework")
+# 依赖边的三种 kind（PRD-014 R3）：只有 blocked_by 拦 claim。
+LINK_KINDS = ("blocked_by", "related", "rides_with")
+
+# `list_tickets` 的输出表头（PRD-013 R7）。写死成一份列单而不是从行里推：
+# 表头要能回答「这里该有哪几列」，哪怕这一次一张单也没有。
+LIST_COLUMNS = ("id", "project_id", "title", "state", "revision", "criteria_v", "behind", "created_at")
+# planned 视图多出的两列（PRD-014 R6.2）：只在这一个视图里出现，其余视图的表头与以前逐字一致。
+PLANNED_COLUMNS = ("claimable", "blocked_by")
+# `behind` 的基准分支：R7 写死了 `master`，不按仓库的主分支名字猜。
+BEHIND_TARGET = "master"
 
 
 def text(data, key, max_length=4000):
@@ -79,6 +104,48 @@ def integer(data, key, default=None, minimum=0, maximum=100):
     return value
 
 
+# 条件形状闸门的两种合法写法（PRD-013 R1）：引号内的命令动词在这张名单里，
+# 或者文本自称「判断类」并写出反例。名单收的是本仓库和本机真会跑的那几个，
+# 不是所有命令——收得越宽，闸门越像在空转。
+COMMAND_VERBS = ("python", "git", "grep", "ls", "find", "wc", "node", "npm", "bash")
+JUDGEMENT_CLASS = "判断类"
+COUNTEREXAMPLE = "反例"
+BACKTICKED = re.compile(r"`([^`]+)`")
+# 命令位置：反引号里可能是 `cd X && git status` 这种复合命令，按 shell 分隔符切开看每一段。
+COMMAND_BREAK = re.compile(r"&&|\|\||[;|\n]")
+WORD = re.compile(r"[A-Za-z]+")
+
+
+def quoted_command(value):
+    """文本里第一处「引号包裹、动词在名单内」的命令；没有就返回 None。"""
+    for fragment in BACKTICKED.finditer(value):
+        for part in COMMAND_BREAK.split(fragment.group(1)):
+            tokens = part.split()
+            if not tokens:
+                continue
+            verb = WORD.match(tokens[0])
+            if verb and verb.group(0).lower() in COMMAND_VERBS:
+                return fragment.group(0)
+    return None
+
+
+def judgeable(cid, value):
+    """R1：条件只收两种写法，都不满足就点名拒掉，一行不写。
+
+    它不判「这条条件合理吗」——那件事机器判不了（PRD-013 §2）。这里只判
+    「可执行」或「你已经明说这是判断类并给了反例」，也就是把写在 skill 里的口径
+    变成一次当场失败。
+    """
+    if quoted_command(value):
+        return
+    if value.strip().startswith(JUDGEMENT_CLASS) and COUNTEREXAMPLE in value:
+        return
+    raise Problem("CRITERIA_NOT_JUDGEABLE",
+                  f"Criterion {cid} is not judgeable: quote a command whose verb is one of "
+                  f"{'/'.join(COMMAND_VERBS)} (for example `python tools/run_tests.py`) with its expected output, "
+                  f"or start the text with {JUDGEMENT_CLASS} and include {COUNTEREXAMPLE}; nothing was written")
+
+
 def criteria(data):
     value = data.get("criteria")
     require(isinstance(value, list) and 1 <= len(value) <= 100, "INVALID_INPUT", "Provide 1 to 100 criteria")
@@ -89,6 +156,11 @@ def criteria(data):
         text(item, "text")
         require(cid not in ids, "INVALID_INPUT", "Criterion ids must be unique")
         ids.add(cid)
+    # 形状单独走第二遍：结构错误（缺字段、空文本、id 重复）先报完，才不会把
+    # 「字段写错了」报成「条件写不成样子」——那个错误码只说一件事。
+    # 只判这次传进来的值：库里已有的行不重判（PRD-013 R1、D1）。
+    for item in value:
+        judgeable(item["id"], item["text"])
     return value
 
 
@@ -115,6 +187,105 @@ def options(data):
     return value
 
 
+def ticket_prefix(project_id):
+    """工单号的前缀：取项目登记的短名（`ai-workspace` → `AW`，`p1` → `P1`）。
+
+    多段时取每段首字母拼起来，单段时用整段：`ai-workspace` 因此得到 AW 而不是 A，
+    而 `p1` / `p2` 各自留下自己的字母，不会一起退化成 P。全非拉丁的 project_id
+    没有字母可拼，退回首两个字——号仍然可读，只是没缩写。
+    """
+    parts = [part for part in re.split(r"[^0-9A-Za-z]+", project_id) if part]
+    if len(parts) > 1:
+        return "".join(part[0] for part in parts).upper()
+    if parts:
+        return parts[0].upper()
+    return project_id[:2].upper()
+
+
+def link_payload(data, maximum=50):
+    """从 payload 取三种依赖边（PRD-014 R3）：只收本操作里出现过的 kind。
+
+    没出现的 kind 一律不动（revise 只改调用方说的那一类），出现了就按给的那份覆盖。
+    """
+    links = {}
+    for kind in LINK_KINDS:
+        if kind not in data:
+            continue
+        value = data[kind]
+        require(isinstance(value, list) and len(value) <= maximum, "INVALID_INPUT",
+                f"{kind} must be an array of at most {maximum} ticket ids")
+        for item in value:
+            text({kind: item}, kind, 200)
+        links[kind] = list(value)
+    return links
+
+
+def pending_blockers(conn, ticket_id):
+    """未完成的前置单：只有 done 算满足，cancelled 也算未满足（PRD-014 R3.4）。"""
+    return conn.execute(
+        "SELECT t.id, t.state FROM ticket_links l JOIN tickets t ON t.id=l.to_ticket"
+        " WHERE l.from_ticket=? AND l.kind='blocked_by' AND t.state<>'done' ORDER BY t.id",
+        (ticket_id,)).fetchall()
+
+
+def dependency_depths(conn, ticket_ids):
+    """每张单的 blocked_by 层数：无前置为 0，其余为 1 + 前置里最深的那个。
+
+    层级按边算，不按前置单的状态算：前置已经 done 之后，「B 在 A 之前」这条顺序
+    依旧成立，池子不会因为一张单完成就重新洗牌。环在写入那一刻就被拒（DEPENDENCY_CYCLE），
+    这里仍然防一手——遇到环就停在当前层，不把一次 list 查询挂死。
+    """
+    graph = {}
+    for row in conn.execute("SELECT from_ticket,to_ticket FROM ticket_links WHERE kind='blocked_by'"):
+        graph.setdefault(row[0], []).append(row[1])
+    memo, visiting = {}, set()
+
+    def depth(ticket_id):
+        if ticket_id in memo:
+            return memo[ticket_id]
+        if ticket_id in visiting:
+            return 0
+        visiting.add(ticket_id)
+        value = 0
+        for prerequisite in graph.get(ticket_id, ()):
+            value = max(value, depth(prerequisite) + 1)
+        visiting.discard(ticket_id)
+        memo[ticket_id] = value
+        return value
+
+    return {ticket_id: depth(ticket_id) for ticket_id in ticket_ids}
+
+
+def dependency_cycle(conn):
+    """blocked_by 图上的一个环（按行走顺序，首尾同一个单），没有环返回 None。"""
+    graph = {}
+    for row in conn.execute("SELECT from_ticket,to_ticket FROM ticket_links"
+                            " WHERE kind='blocked_by' ORDER BY from_ticket,to_ticket"):
+        graph.setdefault(row[0], []).append(row[1])
+    state, stack = {}, []
+
+    def walk(node):
+        state[node] = 1
+        stack.append(node)
+        for following in graph.get(node, ()):
+            if state.get(following) == 1:
+                return stack[stack.index(following):] + [following]
+            if state.get(following) is None:
+                found = walk(following)
+                if found is not None:
+                    return found
+        stack.pop()
+        state[node] = 2
+        return None
+
+    for node in list(graph):
+        if state.get(node) is None:
+            found = walk(node)
+            if found is not None:
+                return found
+    return None
+
+
 def digest_text(data, key):
     # 需求摘要的格式先校一次：拿到长度不对的值去比对，会报成「需求变了」而不是「字段写错了」。
     value = text(data, key, 64)
@@ -138,6 +309,85 @@ def sha_text(data, key, max_length=40):
     require(len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value),
             "INVALID_INPUT", f"{key} must be 40 hexadecimal characters")
     return value.lower()
+
+
+def behind_count(root, head_sha, cache=None):
+    """目标分支上有、这份提交里没有的提交数；算不出来时是 `?`，不是 0（PRD-013 R7）。
+
+    为什么不能写 0：`head_sha` 为 NULL 的历史提交、分支已被删、目录不是仓库这三种
+    情况都算不了，而 0 与「基于最新 master」在输出里长得一模一样——那个 0 会变成一句假话。
+    所以只有 `git rev-list --count` 真的给出一个数字时才写数字。
+    """
+    if not head_sha:
+        return "?"
+    key = (str(root), head_sha)
+    if cache is not None and key in cache:
+        return cache[key]
+    value = "?"
+    try:
+        process = subprocess.run(
+            ["git", "-C", str(root), "rev-list", "--count", f"{head_sha}..{BEHIND_TARGET}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        raw = (process.stdout or "").strip()
+        if process.returncode == 0 and raw.isdigit():
+            value = int(raw)
+    except (OSError, subprocess.SubprocessError):
+        # git 不在、超时、目录不可达：都是「算不出来」，统一留 ?。
+        value = "?"
+    if cache is not None:
+        cache[key] = value
+    return value
+
+
+# 冲突预演的目标分支：与 `behind` 同一口径，同样写死 `master`，不按仓库主分支名字猜（PRD-015 R2）。
+CONFLICT_TARGET = BEHIND_TARGET
+
+
+def conflict_preview(root, head_sha):
+    """提交时对未来的目标分支跑一次 `git merge-tree`，只报「会撞哪些文件」（PRD-015 R2）。
+
+    预演问的是「这份成果将来合进**现在的**目标分支会撞什么」，所以目标取 `rev-parse master`
+    的当前 tip，不是 `base_sha`——用分叉点问等于没问。
+
+    三种取值必须分得开：`conflicts` 空数组＝跑过且干净；非空且 `exit_code` 为 1＝跑过且会撞；
+    整个返回 `None`＝算不出来（目录不是仓库、head 不在本地、git 不可用），**不是**「没撞」。
+    把它写成空值等于说「预演过了、没冲突」，那是一句假话。
+
+    这里只读不写：不 rebase、不改分支、不因为会撞就让提交失败——提交那一刻撞不撞不等于最终
+    撞不撞，做成闸门只会教人先 rebase 一次再提交，回执里就再也看不到真相。
+    """
+    try:
+        target = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", CONFLICT_TARGET],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+        target_sha = (target.stdout or "").strip()
+        if target.returncode != 0 or not target_sha:
+            return None
+        # 输出读法（git 2.53 实测）：第一行是这次合并的树对象；其后到第一个空行为止的每一行
+        # 是一个冲突文件路径；空行之后的 `Auto-merging …` / `CONFLICT (content): …` 是给人读的说明，
+        # 不进字段。无冲突时那一段为空，退出码 1 表示有冲突、0 表示干净。
+        process = subprocess.run(
+            ["git", "-C", str(root), "merge-tree", "--write-tree", "--name-only", head_sha, CONFLICT_TARGET],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if process.returncode not in (0, 1):
+            return None
+        lines = (process.stdout or "").splitlines()
+        # 第一行必须是树对象 id：认不出来的就不算一次预演。实测 git 2.53 在「head 不是本地对象」时
+        # 把 `merge-tree: <sha> - not something we can merge` 写在 stdout 上、退出码也是 1——
+        # 照退出码读会得到「跑过、无冲突」的空数组，正好是这一列最不能说的假话。
+        if not lines or not re.fullmatch("[0-9a-f]{40}", lines[0].strip()):
+            return None
+        paths = []
+        for line in lines[1:]:
+            if not line.strip():
+                break
+            paths.append(line.strip())
+        return {"target_branch": CONFLICT_TARGET, "target_sha": target_sha,
+                "command": f"git merge-tree --write-tree --name-only {head_sha} {CONFLICT_TARGET}",
+                "exit_code": process.returncode, "conflicts": sorted(set(paths))}
+    except (OSError, subprocess.SubprocessError):
+        # git 不在、超时、目录不可达：都是「算不出来」，统一返回 None（落库为 NULL）。
+        return None
 
 
 def latest_head_sha(conn, ticket_id):
@@ -195,12 +445,20 @@ class Center:
                     response = {"ok": False, "error": rejected, "result": result}
                 if write:
                     conn.execute("INSERT INTO requests VALUES (?,?,?)", (request_id, digest, packed(response)))
+                    # 建单的号在这一刻才存在：payload 里没有 ticket_id（自报号已被拒），
+                    # 事件只能挂在回执刚发出去的那个号上，否则「这张单什么时候建的」
+                    # 在 events 里查不到——ticket_id 为 NULL 的行无法按单查询。
+                    event_ticket = payload.get("ticket_id")
+                    if event_ticket is None and operation == "create_ticket" and isinstance(result, dict):
+                        event_ticket = result.get("id")
                     conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES (?,?,?,?)",
-                                 (payload.get("ticket_id"), operation, packed({"request_id": request_id, "result": result}), now()))
+                                 (event_ticket, operation, packed({"request_id": request_id, "result": result}), now()))
                 return response
         except Problem as exc:
+            self._record_rejection(operation, payload, request_id, exc.code)
             return {"ok": False, "error": {"code": exc.code, "message": str(exc)}}
         except sqlite3.IntegrityError:
+            self._record_rejection(operation, payload, request_id, "CONFLICT")
             return {"ok": False, "error": {"code": "CONFLICT", "message": "Conflicting project, ticket, session or result"}}
         except sqlite3.Error as exc:
             return {"ok": False, "error": {"code": "STORAGE_ERROR", "message": str(exc)}}
@@ -209,6 +467,38 @@ class Center:
                                            "message": "Text cannot be encoded as UTF-8; write the JSON input as UTF-8 (ASCII-escaped JSON is safest)"}}
         except (ValueError, TypeError, OSError, RecursionError):
             return {"ok": False, "error": {"code": "INVALID_INPUT", "message": "Invalid input or inaccessible local path"}}
+
+    def _record_rejection(self, operation, payload, request_id, code):
+        """R3：被拒的写操作留一行事件，别的什么都不写。
+
+        为什么单独开一次事务：被拒的那一刻原来那张事务已经回滚了（`connection` 在异常时
+        rollback），工单、尝试、requests 都不能落，但「这次被闸门拦下了」这件事必须留下。
+        这是**只读的事实**，不改任何状态，也不产生幂等记录——用同一编号重试仍会重新判定。
+
+        `detail` 只放错误码与请求编号：payload 里可能有口令、token、摘要一类内容，
+        拒绝行是要长住库里的，不能把整份输入抄进去。`request_id` 缺失或与既有记录
+        冲突（`REQUEST_CONFLICT` 说明这个编号已经属于另一次调用）时写 null。
+        """
+        if not isinstance(operation, str) or operation in READS:
+            return
+        try:
+            with connection(self.path, write=True) as conn:
+                ticket_id = payload.get("ticket_id") if isinstance(payload, dict) else None
+                # events.ticket_id 有外键：拒绝可能发生在工单本身就不存在的时候（例如
+                # create_ticket 被条件闸门拦下），那种行写的是 NULL——「没有这张单」也是事实。
+                if not isinstance(ticket_id, str) or conn.execute(
+                        "SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone() is None:
+                    ticket_id = None
+                kept = None
+                if (code != "REQUEST_CONFLICT" and isinstance(request_id, str)
+                        and bool(request_id.strip()) and len(request_id) <= 200):
+                    kept = request_id
+                conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES (?,?,?,?)",
+                             (ticket_id, operation, packed({"rejected": code, "request_id": kept}), now()))
+        except Exception:
+            # 留痕本身失败不能让原错误变成另一个错误：拒收的原因已经要返回给调用方了，
+            # 而库没初始化、schema 不对这几种现场本来就没地方写事件。
+            pass
 
     def _project(self, conn, pid):
         row = conn.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
@@ -239,7 +529,7 @@ class Center:
         if taken is not None:
             raise Problem("CONFLICT", f"project_id {pid} is already registered at {taken['root']}; "
                                       "root is identity, so one id cannot point at a second directory")
-        conn.execute("INSERT INTO projects VALUES (?,?,?)", (pid, name, root))
+        conn.execute("INSERT INTO projects(id,name,root) VALUES (?,?,?)", (pid, name, root))
         return {"project_id": pid, "name": name, "root": root, "reused": False}
 
     def _list_projects(self, conn, data):
@@ -282,19 +572,76 @@ class Center:
                           f"Root {root} is already registered as project {owner['id']}; "
                           "root is identity and project_id is a label, so use that project_id or unregister it first")
         name = Path(root).name or pid
-        conn.execute("INSERT INTO projects VALUES (?,?,?)", (pid, name, root))
+        conn.execute("INSERT INTO projects(id,name,root) VALUES (?,?,?)", (pid, name, root))
         return root
 
     def _create_ticket(self, conn, data):
-        tid, pid = text(data, "ticket_id", 200), text(data, "project_id", 200)
+        # 号由库里发（PRD-014 R5）：回执里的 ticket_id 才是真号，自报一律拒。
+        require("ticket_id" not in data, "INVALID_INPUT",
+                "号由库里发：不接受调用方指定 ticket_id，以回执里的 ticket_id 为准")
+        pid = text(data, "project_id", 200)
         root = self._ticket_root(conn, pid, data.get("root"))
         title, checks = text(data, "title", 500), criteria(data)
         # 交付物主题不是可选备注：只约束验收条件、不约束成果主题时，成果会合规地跑偏。
         deliverable = text(data, "deliverable", 500)
+        # 只校 PRD 路径存在，不算摘要也不存它（PRD-014 R2.1）：依据在 claim 那一刻才定格。
+        # fingerprint() 顺带把「文件不在项目里」「超过 32 MiB」这几件事当场判掉。
         prd = fingerprint(root, text(data, "prd_path"))
-        conn.execute("INSERT INTO tickets VALUES (?,?,?,?,?,?,?,1,'ready',NULL,?)",
-                     (tid, pid, title, deliverable, prd["path"], prd["sha256"], packed(checks), now()))
-        return ticket_dict(self._ticket(conn, data))
+        state = text(data, "state", 20) if "state" in data else "ready"
+        require(state in CREATABLE_STATES, "INVALID_INPUT",
+                "state must be planned or ready; 其余状态只能由状态机走出来，不能建单时写死")
+        links = link_payload(data)
+        tid = self._next_ticket_id(conn, pid)
+        self._check_link_targets(conn, tid, links)
+        # 列名写全，不用位置插入：schema 每加一列，位置插入就会静默错位。
+        conn.execute("INSERT INTO tickets(id,project_id,title,deliverable,prd_path,prd_sha256,criteria,"
+                     "revision,criteria_version,state,current_attempt,created_at)"
+                     " VALUES (?,?,?,?,?,NULL,?,1,1,?,NULL,?)",
+                     (tid, pid, title, deliverable, prd["path"], packed(checks), state, now()))
+        self._write_links(conn, tid, links)
+        return ticket_dict(self._ticket(conn, {"project_id": pid, "ticket_id": tid}))
+
+    def _next_ticket_id(self, conn, project_id):
+        """发号：号在写 `tickets.id` 那一刻发出，它同时是主键（PRD-014 R5.1）。
+
+        每个项目一条独立序列（`projects.next_number`），在同一个事务里取号并加一。
+        号是全库主键，所以还要跳过已经被占的候选值——两个项目算出同一个前缀时，
+        后者往后顺延，而不是撞上一个别人的单（那会让两个项目共用一个号）。
+        """
+        prefix = ticket_prefix(project_id)
+        row = conn.execute("SELECT next_number FROM projects WHERE id=?", (project_id,)).fetchone()
+        number = row["next_number"] if row is not None else 1
+        while conn.execute("SELECT 1 FROM tickets WHERE id=?",
+                           (f"{prefix}-{number:03d}",)).fetchone() is not None:
+            number += 1
+        conn.execute("UPDATE projects SET next_number=? WHERE id=?", (number + 1, project_id))
+        return f"{prefix}-{number:03d}"
+
+    def _check_link_targets(self, conn, from_ticket, links):
+        for kind, targets in links.items():
+            for target in targets:
+                require(target != from_ticket, "INVALID_INPUT",
+                        f"A ticket cannot be linked to itself ({kind})")
+                require(conn.execute("SELECT 1 FROM tickets WHERE id=?", (target,)).fetchone() is not None,
+                        "NOT_FOUND", f"{kind} names {target}, which is not a ticket in this center")
+
+    def _write_links(self, conn, from_ticket, links):
+        """按 kind 覆盖式写入：出现过的 kind 先清后写，没出现的 kind 不动。
+
+        环检测放在写完边之后、同一条事务里：成环就抛 DEPENDENCY_CYCLE，整个事务回滚，
+        连刚建的那张单、刚改的判据一起不落库（PRD-014 R3.3）。比对「只查新加的那条边」
+        更彻底：一次调用里写进去的多条边之间的环也跑不掉。
+        """
+        for kind, targets in links.items():
+            conn.execute("DELETE FROM ticket_links WHERE from_ticket=? AND kind=?", (from_ticket, kind))
+            for target in dict.fromkeys(targets):
+                conn.execute("INSERT INTO ticket_links(from_ticket,kind,to_ticket,created_at) VALUES (?,?,?,?)",
+                             (from_ticket, kind, target, now()))
+        if "blocked_by" in links:
+            cycle = dependency_cycle(conn)
+            require(cycle is None, "DEPENDENCY_CYCLE",
+                    "依赖成环，一行未写：" + " -> ".join(cycle or [])
+                    + "；环上的单都无法开工，所以要么改成单向，要么拆开")
 
     def _get_ticket(self, conn, data):
         result = ticket_dict(self._ticket(conn, data))
@@ -304,13 +651,17 @@ class Center:
         for item in result["submissions"]:
             for key in ("artifacts", "evidence", "risks"):
                 item[key] = json.loads(item[key])
+            # 预演原样回给验收会话：NULL 仍然是 None（「没跑过／算不出来」），
+            # 不是 `{"conflicts": []}`（「跑过且干净」）——两者在验收眼里是两件事（PRD-015 R2）。
+            item["conflict_preview"] = (None if item["conflict_preview"] is None
+                                        else json.loads(item["conflict_preview"]))
         reviews = conn.execute("SELECT r.* FROM reviews r JOIN submissions s ON s.id=r.submission_id JOIN attempts a ON a.id=s.attempt_id WHERE a.ticket_id=? ORDER BY r.rowid", (result["id"],))
         result["reviews"] = [dict(row) for row in reviews]
         for item in result["reviews"]:
             item["checks"] = json.loads(item["checks"])
         result["merges"] = [dict(row) for row in conn.execute(
             "SELECT * FROM merges WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
-        # 问答随尝试挂在工单下面：验收会话靠它判断「成果是不是按最终结论做的」（判据见 docs/decisions.md）。
+        # 问答随尝试挂在工单下面：验收会话靠它判断「成果是不是按最终结论做的」（PRD-005 3）。
         result["questions"] = [dict(row) for row in conn.execute(
             "SELECT * FROM questions WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
         for item in result["questions"]:
@@ -318,9 +669,23 @@ class Center:
         result["answers"] = [dict(row) for row in conn.execute(
             "SELECT a.* FROM answers a JOIN questions q ON q.id=a.question_id WHERE q.ticket_id=? ORDER BY a.rowid",
             (result["id"],))]
-        # 回信记录随工单挂上来：发了没、失败原因、发给谁，验收会话读 get_ticket 就能判闭环（见 docs/decisions.md「回执一条」）。
+        # 回信记录随工单挂上来：发了没、失败原因、发给谁，验收会话读 get_ticket 就能判闭环（PRD-009 AC06）。
         result["notices"] = [dict(row) for row in conn.execute(
             "SELECT * FROM notices WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
+        # 依赖边两个方向都答得出（PRD-014 R3.2）：出边说「它卡在谁身上」，入边说「谁在等它」。
+        # 每边带对方的当前状态：只看单号看不出上游已经 done 还是还在 planned。
+        result["links"] = {
+            "out": [{"kind": row["kind"], "ticket_id": row["to_ticket"], "state": row["state"]}
+                    for row in conn.execute(
+                        "SELECT l.kind,l.to_ticket,t.state FROM ticket_links l"
+                        " LEFT JOIN tickets t ON t.id=l.to_ticket"
+                        " WHERE l.from_ticket=? ORDER BY l.kind,l.to_ticket", (result["id"],))],
+            "in": [{"kind": row["kind"], "ticket_id": row["from_ticket"], "state": row["state"]}
+                   for row in conn.execute(
+                       "SELECT l.kind,l.from_ticket,t.state FROM ticket_links l"
+                       " LEFT JOIN tickets t ON t.id=l.from_ticket"
+                       " WHERE l.to_ticket=? ORDER BY l.kind,l.from_ticket", (result["id"],))],
+        }
         return result
 
     def _list_tickets(self, conn, data):
@@ -328,14 +693,67 @@ class Center:
         pid = data.get("project_id")
         if pid is not None:
             text(data, "project_id", 200)
+        # CLI 的 `--planned` 与 payload 里的 `planned` 同一件事：两种写法收同一个布尔。
+        planned = data.get("planned", data.get("--planned", False))
+        require(type(planned) is bool, "INVALID_INPUT", "planned must be a boolean")
+        if planned:
+            return self._planned_view(conn, pid, limit, offset)
         rows = conn.execute("SELECT * FROM tickets WHERE (? IS NULL OR project_id=?) ORDER BY created_at,id LIMIT ? OFFSET ?",
                             (pid, pid, limit, offset))
-        return {"items": [ticket_dict(row) for row in rows], "limit": limit, "offset": offset}
+        roots, counts = {}, {}
+        items = []
+        for row in rows:
+            item = ticket_dict(row)
+            item["criteria_v"] = item["criteria_version"]
+            root = roots.get(item["project_id"])
+            if root is None:
+                owner = conn.execute("SELECT root FROM projects WHERE id=?", (item["project_id"],)).fetchone()
+                root = roots[item["project_id"]] = owner["root"] if owner is not None else ""
+            item["behind"] = behind_count(root, latest_head_sha(conn, item["id"]), counts)
+            items.append(item)
+        return {"columns": list(LIST_COLUMNS), "items": items, "limit": limit, "offset": offset}
 
-    def _unchanged_prd(self, conn, ticket):
+    def _planned_view(self, conn, pid, limit, offset):
+        """池子视图（PRD-014 R6）：按依赖层数升序，每张带 claimable 与 blocked_by。
+
+        两列只在这个视图出现（其余视图的表头与以前逐字一致）。`claimable` 的定义写死为
+        「状态可领 且 blocked_by 全部 done」，它**不代表「现在就能领」**：同项目已有在途单时
+        `claim_ticket` 仍报 `DISPATCH_BUSY`，那是另一件事，不往这一列里混着答（AC-R6-3）。
+        """
+        rows = conn.execute("SELECT * FROM tickets WHERE state=? AND (? IS NULL OR project_id=?)"
+                            " ORDER BY created_at,id", (PLANNED_STATE, pid, pid)).fetchall()
+        depths = dependency_depths(conn, [row["id"] for row in rows])
+        ordered = sorted(rows, key=lambda row: (depths.get(row["id"], 0), row["created_at"], row["id"]))
+        roots, counts, items = {}, {}, []
+        for row in ordered:
+            item = ticket_dict(row)
+            item["criteria_v"] = item["criteria_version"]
+            root = roots.get(item["project_id"])
+            if root is None:
+                owner = conn.execute("SELECT root FROM projects WHERE id=?", (item["project_id"],)).fetchone()
+                root = roots[item["project_id"]] = owner["root"] if owner is not None else ""
+            item["behind"] = behind_count(root, latest_head_sha(conn, item["id"]), counts)
+            pending = pending_blockers(conn, item["id"])
+            item["blocked_by"] = [blocker["id"] for blocker in pending]
+            item["claimable"] = item["state"] in CLAIMABLE_STATES and not pending
+            items.append(item)
+        return {"columns": list(LIST_COLUMNS) + list(PLANNED_COLUMNS),
+                "items": items[offset:offset + limit], "limit": limit, "offset": offset}
+
+    def _unchanged_prd(self, conn, ticket, attempt=None):
+        """这次动作依据的那一版 PRD 有没有变。
+
+        比较对象是**尝试上记下的那一份**（PRD-014 R2.3）：依据在 claim 那一刻定格，
+        之后 PRD 再变就是 `STALE_PRD`，哪怕工单行上的值因为别的动作变了。
+        没有尝试可依时才退回工单行上的那一份（旧调用方、尚未派发的现场）。
+        """
+        if attempt is None and ticket["current_attempt"]:
+            attempt = conn.execute("SELECT * FROM attempts WHERE id=?", (ticket["current_attempt"],)).fetchone()
+        basis = attempt if attempt is not None else ticket
         project = self._project(conn, ticket["project_id"])
-        prd = fingerprint(project["root"], ticket["prd_path"])
-        require(prd["sha256"] == ticket["prd_sha256"], "STALE_PRD", "PRD changed; explicitly revise the ticket before proceeding")
+        prd = fingerprint(project["root"], basis["prd_path"])
+        require(prd["sha256"] == basis["prd_sha256"], "STALE_PRD",
+                "PRD changed; explicitly revise the ticket before proceeding")
         return project
 
     def _expected_revision(self, ticket, data):
@@ -362,11 +780,40 @@ class Center:
     def _claim_ticket(self, conn, data):
         ticket = self._ticket(conn, data)
         self._expected_revision(ticket, data)
-        require(ticket["state"] in ("ready", "rework"), "INVALID_STATE", "Ticket is not ready to be claimed")
+        require(ticket["state"] in CLAIMABLE_STATES, "INVALID_STATE",
+                "Ticket is not ready to be claimed (planned, ready and rework can be claimed)")
+        # 依赖先判：它回答的是「这张单现在能不能开工」，比「项目忙不忙」更靠近事实，
+        # 也更容易照着下一步做（PRD-014 R3.1）。未完成就点名，一行不写。
+        pending = pending_blockers(conn, ticket["id"])
+        if pending:
+            listed = ", ".join(f"{row['id']} ({row['state']})" for row in pending)
+            raise Problem("BLOCKED_BY_DEPENDENCY",
+                          f"{ticket['id']} is blocked by {listed}; only done satisfies blocked_by "
+                          "(a cancelled prerequisite is not done), so the ticket is left in its current state")
         # 串行是默认值，不是礼貌建议：同项目还有在途工单就拒绝，并点名是哪一张、停在哪一步。
         # 越过要显式传 allow_parallel=true，越过时留一条事件，事后看得出这是故意的。
         allow_parallel = data.get("allow_parallel", False)
         require(type(allow_parallel) is bool, "INVALID_INPUT", "allow_parallel must be a boolean")
+        # 并行是声明，不是隐形开关：越过的同时必须写清为什么，可选写清占哪些路径/资源。
+        # 校验在任何写入之前，所以缺理由时工单停在原状态，一个尝试都不产生。
+        if not allow_parallel:
+            require("parallel_reason" not in data and "parallel_scope" not in data, "INVALID_INPUT",
+                    "parallel_reason and parallel_scope only make sense together with allow_parallel=true")
+        reason, scope = None, None
+        if allow_parallel:
+            given = data.get("parallel_reason")
+            require(isinstance(given, str) and bool(given.strip()) and len(given) <= 200,
+                    "PARALLEL_REASON_REQUIRED",
+                    "allow_parallel=true requires parallel_reason: 1 to 200 characters saying why these tickets "
+                    "can run at the same time; the ticket is left in its original state")
+            reason = given
+            if "parallel_scope" in data:
+                scope = data["parallel_scope"]
+                require(isinstance(scope, list) and 1 <= len(scope) <= 20, "INVALID_INPUT",
+                        "parallel_scope must contain 1 to 20 strings")
+                for entry in scope:
+                    require(isinstance(entry, str) and bool(entry.strip()) and len(entry) <= 500,
+                            "INVALID_INPUT", "Each parallel_scope entry must be a nonempty string of at most 500 characters")
         busy = self._busy_tickets(conn, ticket)
         if busy and not allow_parallel:
             listed = ", ".join(f"{row['id']} ({row['state']})" for row in busy)
@@ -374,25 +821,64 @@ class Center:
                           f"Project {ticket['project_id']} already has a ticket in flight: {listed}; "
                           "finish it (merge or cancel) before claiming another, or pass allow_parallel=true")
         parallel_with = [{"ticket_id": row["id"], "state": row["state"]} for row in busy]
-        self._unchanged_prd(conn, ticket)
+        # 指纹在这一刻定格（PRD-014 R2.2）：取指纹的是 claim 自己，不交给定时任务或执行会话。
+        # 排队期间 PRD 升版因此不再让单过期；claim 之后再变才是 STALE_PRD。
+        project = self._project(conn, ticket["project_id"])
+        prd = fingerprint(project["root"], ticket["prd_path"])
         # 派发者与执行者必须是两个会话：claim 时写下谁派的，bind 时拒绝同一个会话。
         coordinator = text(data, "coordinator_session_id", 500)
-        # 协调者自己的工作目录是可选的自报值：不传就空，不阻止派发（见 docs/decisions.md「送达判据」）。
+        # 车次归属（PRD-014 R4.2）：带着车次的单在这里做一次运行期校验。它不用唯一键表达，
+        # 因为唯一键说不出「同一会话可以持多张、别的会话不能进同一车次」这条规则。
+        # 校验在任何写入之前，被拒时一个尝试、一条工单改动都不留（只留一行拒收事件）。
+        # 「本会话」在 claim 阶段能拿到的只有 coordinator_session_id：执行的会话要到 bind 才有，
+        # 所以车次认领的就是 claim 的这条会话，owner 之后不随 bind / recover 改变。
+        batch_id = ticket["batch_id"]
+        batch_owner = None
+        if batch_id is not None:
+            batch = conn.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
+            # 外键已经要求车次存在；这条只防「库里出现指向不存在车次的单」这种脏行。
+            require(batch is not None, "INVALID_STATE",
+                    f"Ticket {ticket['id']} names batch {batch_id}, which does not exist; fix the row before claiming")
+            require(not batch["closed_at"], "INVALID_STATE",
+                    f"Batch {batch_id} was closed at {batch['closed_at']}; a closed trip accepts no new ticket")
+            batch_owner = batch["owner_session_id"]
+            if batch_owner:
+                require(batch_owner == coordinator, "BATCH_OWNED_BY_OTHER",
+                        f"Batch {batch_id} is owned by session {batch_owner}; another session cannot claim its "
+                        "tickets. Tickets of one trip are claimed by the session that owns it, so hand this "
+                        "ticket back to that session or build a new trip.")
+        # 协调者自己的工作目录是可选的自报值：不传就空，不阻止派发（PRD-009 R5）。
         workdir = text(data, "coordinator_workdir", 1000) if "coordinator_workdir" in data else None
+        if batch_id is not None and not batch_owner:
+            # 车次第一次被领：写入持有会话。这一句之前的每一条 require 都已经过了，
+            # 所以被拒的调用不会顺手把车次认走。
+            conn.execute("UPDATE batches SET owner_session_id=? WHERE id=?", (coordinator, batch_id))
         aid = str(uuid4())
-        conn.execute("INSERT INTO attempts(id,ticket_id,revision,prd_path,prd_sha256,state,session_id,"
-                     "coordinator_session_id,coordinator_workdir,created_at) VALUES (?,?,?,?,?,'dispatching',NULL,?,?,?)",
-                     (aid, ticket["id"], ticket["revision"], ticket["prd_path"], ticket["prd_sha256"],
-                      coordinator, workdir, now()))
-        conn.execute("UPDATE tickets SET state='dispatching',current_attempt=? WHERE id=?", (aid, ticket["id"]))
-        if parallel_with:
+        conn.execute("INSERT INTO attempts(id,ticket_id,revision,criteria_version,prd_path,prd_sha256,state,session_id,"
+                     "coordinator_session_id,coordinator_workdir,created_at,batch_key)"
+                     " VALUES (?,?,?,?,?,?,'dispatching',NULL,?,?,?,?)",
+                     (aid, ticket["id"], ticket["revision"], ticket["criteria_version"], prd["path"],
+                      prd["sha256"], coordinator, workdir, now(), batch_id))
+        # 工单行也回写这一版指纹：「这一次派发依据的是哪一版」。
+        conn.execute("UPDATE tickets SET state='dispatching',current_attempt=?,prd_path=?,prd_sha256=? WHERE id=?",
+                     (aid, prd["path"], prd["sha256"], ticket["id"]))
+        if allow_parallel:
+            # 事由与范围与 parallel_with 并列写进同一条事件：后来的人要判「这次并行合不合理」
+            # 只能靠这一行，事由散落在消息或会话里就查不回来了（PRD-013 R2）。
+            detail = {"allow_parallel_override": True, "parallel_with": parallel_with,
+                      "parallel_reason": reason}
+            if scope is not None:
+                detail["parallel_scope"] = scope
             conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES (?,?,?,?)",
-                         (ticket["id"], "claim_ticket",
-                          packed({"allow_parallel_override": True, "parallel_with": parallel_with}), now()))
+                         (ticket["id"], "claim_ticket", packed(detail), now()))
         return {"ticket_id": ticket["id"], "project_id": ticket["project_id"], "attempt_id": aid,
                 "revision": ticket["revision"], "state": "dispatching",
+                "prd_path": prd["path"], "prd_sha256": prd["sha256"],
+                "batch_id": batch_id,
+                "batch_owner_session_id": (batch_owner or coordinator) if batch_id is not None else None,
                 "coordinator_session_id": coordinator, "coordinator_workdir": workdir,
-                "allow_parallel": allow_parallel, "parallel_with": parallel_with}
+                "allow_parallel": allow_parallel, "parallel_with": parallel_with,
+                "parallel_reason": reason, "parallel_scope": scope}
 
     def _bind_session(self, conn, data):
         ticket, attempt = self._active(conn, data)
@@ -401,7 +887,7 @@ class Center:
         session = text(data, "session_id", 500)
         require(session != attempt["coordinator_session_id"], "SELF_DISPATCH",
                 "The coordinator that claimed this ticket cannot execute it; open a separate session")
-        project = self._unchanged_prd(conn, ticket)
+        project = self._unchanged_prd(conn, ticket, attempt)
         require(project_root(data.get("project_root")) == project["root"], "PROJECT_MISMATCH", "Session project directory does not match the registered project")
         conn.execute("UPDATE attempts SET session_id=?,state='running' WHERE id=?", (session, attempt["id"]))
         conn.execute("UPDATE tickets SET state='running' WHERE id=?", (ticket["id"],))
@@ -412,23 +898,36 @@ class Center:
     def _submit_result(self, conn, data):
         ticket, attempt = self._active(conn, data, check_session=True)
         require(ticket["state"] == "running", "INVALID_STATE", "Ticket is not accepting execution results")
-        project = self._unchanged_prd(conn, ticket)
+        project = self._unchanged_prd(conn, ticket, attempt)
+        # 两棵树都必填：`head_sha` 说「交的是哪一棵」，`base_sha` 说「它从哪分出来的」。
+        # 先校它们再碰文件：缺字段时不至于因为另一个原因报出 FILE_NOT_FOUND。
+        head_sha = sha_text(data, "head_sha")
+        base_sha = sha_text(data, "base_sha")
         paths = string_list(data, "artifacts", minimum=1, maximum=20)
         artifacts = [fingerprint(project["root"], path) for path in paths]
         require(len({str(Path(a["path"])).casefold() for a in artifacts}) == len(artifacts),
                 "INVALID_INPUT", "Duplicate artifact paths")
         summary = text(data, "summary")
         evidence, risks = string_list(data, "evidence", minimum=1), string_list(data, "risks")
-        # 被验收的那棵树要能事后核对：记下提交时的 head sha，合并时拿它比分支 tip。
-        head_sha = sha_text(data, "head_sha")
+        # 这次尝试是按哪一版判据派发的：低于工单当前的版本，就说明它在开工后被改过，
+        # 验收得按新条件重看一遍。这一句不回写任何行（PRD-013 R6）。
+        criteria_changed = attempt["criteria_version"] < ticket["criteria_version"]
+        # 冲突预演在提交写入之前算：它是一份现场事实，不是闸门——算不出来就存 NULL，
+        # 会撞也照收（PRD-015 R2）。
+        preview = conflict_preview(project["root"], head_sha)
         sid = str(uuid4())
-        conn.execute("INSERT INTO submissions(id,attempt_id,summary,artifacts,evidence,risks,created_at,head_sha)"
-                     " VALUES (?,?,?,?,?,?,?,?)",
-                     (sid, attempt["id"], summary, packed(artifacts), packed(evidence), packed(risks), now(), head_sha))
+        conn.execute("INSERT INTO submissions(id,attempt_id,summary,artifacts,evidence,risks,created_at,head_sha,"
+                     "base_sha,conflict_preview) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (sid, attempt["id"], summary, packed(artifacts), packed(evidence), packed(risks), now(),
+                      head_sha, base_sha, None if preview is None else packed(preview)))
         conn.execute("UPDATE attempts SET state='submitted' WHERE id=?", (attempt["id"],))
         conn.execute("UPDATE tickets SET state='awaiting_review' WHERE id=?", (ticket["id"],))
         return {"submission_id": sid, "attempt_id": attempt["id"], "state": "awaiting_review",
-                "artifacts": artifacts, "head_sha": head_sha}
+                "artifacts": artifacts, "head_sha": head_sha, "base_sha": base_sha,
+                "conflict_preview": preview,
+                "criteria_changed": criteria_changed,
+                "criteria_version": {"attempt": attempt["criteria_version"],
+                                     "ticket": ticket["criteria_version"]}}
 
     def _ask_ticket(self, conn, data):
         # 提问也要走 _active：它同时挡住旧尝试（STALE_ATTEMPT）与换了标识的会话（SESSION_MISMATCH）。
@@ -444,7 +943,7 @@ class Center:
         qid = "q-" + str(uuid4())
         conn.execute("INSERT INTO questions VALUES (?,?,?,?,?,'open',?)",
                      (qid, ticket["id"], attempt["id"], question, packed(choices), asked_at))
-        # 两处都写，权威在工单级（见 docs/protocol.md「blocked：工单在等一句话」）；revision 不变：等一句话不是新代次。
+        # 两处都写，权威在工单级（PRD-005 4.4）；revision 不变：等一句话不是新代次。
         conn.execute("UPDATE attempts SET state='blocked' WHERE id=?", (attempt["id"],))
         conn.execute("UPDATE tickets SET state='blocked' WHERE id=?", (ticket["id"],))
         return {"question_id": qid, "ticket_id": ticket["id"], "attempt_id": attempt["id"],
@@ -474,7 +973,7 @@ class Center:
         require(attempt is not None and attempt["id"] == ticket["current_attempt"]
                 and attempt["revision"] == ticket["revision"],
                 "STALE_ATTEMPT", "Question belongs to an attempt that is no longer current")
-        require(prd_sha256 == ticket["prd_sha256"], "STALE_PRD",
+        require(prd_sha256 == attempt["prd_sha256"], "STALE_PRD",
                 "PRD changed while the question was waiting; revise the ticket or ask again")
         # 兜底：一条 open 问题配着非 blocked 的工单。正常路径上两者总是成对变化，
         # 所以这条不会被正常路径碰到；它防的是库里出现过一次不一致行之后，答案把别的状态挟持回 running。
@@ -495,7 +994,7 @@ class Center:
                 "answered_by": answered_by, "answered_at": created_at, "revision": ticket["revision"]}
 
     def _record_notice(self, conn, data):
-        # 回信是整条派发链的收口：发没发出去、失败了为什么，都得在库里查得到（见 docs/decisions.md「回执一条」）。
+        # 回信是整条派发链的收口：发没发出去、失败了为什么，都得在库里查得到（PRD-009 R5）。
         # 不在这里发任何消息，也不推动工单状态机：本操作只落库。
         ticket = self._ticket(conn, data)
         aid = text(data, "attempt_id", 200)
@@ -551,10 +1050,10 @@ class Center:
     def _invalidate(self, conn, ticket, state):
         if ticket["current_attempt"]:
             # 只终止未完成的尝试；accepted/rejected/superseded 是审计真相，不得被覆盖。
-            # blocked 必须在这张名单里，否则被作废的尝试会留着「还在等答案」的样子（见 docs/protocol.md 的状态同步口径）。
+            # blocked 必须在这张名单里，否则被作废的尝试会留着「还在等答案」的样子（PRD-005 4.4 第 3 条）。
             conn.execute("UPDATE attempts SET state='superseded' WHERE id=? AND state IN ('blocked','dispatching','running','submitted')",
                          (ticket["current_attempt"],))
-            # 问题随之作废：作废之后晚到的答案只能报 QUESTION_MISMATCH。
+            # 问题随之作废：作废之后晚到的答案只能报 QUESTION_MISMATCH（PRD-005 4.7）。
             # 放在这里而不是 _recover_ticket 里，是因为 revise / cancel 同样会把尝试作废。
             conn.execute("UPDATE questions SET state='voided' WHERE attempt_id=? AND state='open'",
                          (ticket["current_attempt"],))
@@ -579,13 +1078,31 @@ class Center:
                 "discarded_submission_id": discarded["id"] if discarded else None,
                 "voided_question_ids": voided}
 
+    def _in_flight(self, conn, ticket):
+        """当前尝试还在飞就返回它，否则 None。用来看「改判据要不要叫醒谁」。"""
+        if not ticket["current_attempt"]:
+            return None
+        attempt = conn.execute("SELECT * FROM attempts WHERE id=?", (ticket["current_attempt"],)).fetchone()
+        if attempt is None or attempt["state"] not in IN_FLIGHT_ATTEMPT_STATES:
+            return None
+        return attempt
+
     def _revise_ticket(self, conn, data):
+        """改需求摘要与验收条件；默认**不作废**在飞的尝试（PRD-013 R6）。
+
+        一个数管一件事：`criteria_version` 只随判据变，`revision` 只随换会话或重开变。
+        以前这里无条件调 `_invalidate`，于是「判据变了」与「这一代作废了」被压成一个动作，
+        执行会话拿着过期标准继续干，而验收只看得到 revision 跳了。要作废就显式写
+        `restart: true`——那是三个作废入口之一，不再是谁都没注意到的副作用。
+        """
         ticket = self._ticket(conn, data)
         self._expected_revision(ticket, data)
         require(ticket["state"] != "cancelled", "INVALID_STATE", "Cancelled tickets cannot be silently reopened")
         reopen = data.get("reopen", False)
+        restart = data.get("restart", False)
         require(type(reopen) is bool, "INVALID_INPUT", "reopen must be a boolean")
-        require(ticket["state"] != "done" or reopen, "INVALID_STATE",
+        require(type(restart) is bool, "INVALID_INPUT", "restart must be a boolean")
+        require(ticket["state"] != "done" or (reopen or restart), "INVALID_STATE",
                 "Revising a delivered ticket reopens it; pass reopen: true to confirm")
         reason, checks = text(data, "reason"), criteria(data)
         deliverable = ticket["deliverable"]
@@ -594,12 +1111,43 @@ class Center:
         previous_state = ticket["state"]
         project = self._project(conn, ticket["project_id"])
         prd = fingerprint(project["root"], text(data, "prd_path"))
-        self._invalidate(conn, ticket, "ready")
-        conn.execute("UPDATE tickets SET prd_path=?,prd_sha256=?,criteria=?,deliverable=? WHERE id=?",
-                     (prd["path"], prd["sha256"], packed(checks), deliverable, ticket["id"]))
-        return {"ticket_id": ticket["id"], "state": "ready", "previous_state": previous_state,
-                "revision": ticket["revision"] + 1, "reason": reason, "prd_path": prd["path"],
-                "prd_sha256": prd["sha256"], "criteria": checks, "deliverable": deliverable}
+        links = link_payload(data)
+        # planned 单排队期间不取指纹（PRD-014 R2.4）：改了路径也留 NULL，claim 时才定格。
+        frozen_sha256 = None if ticket["state"] == PLANNED_STATE else prd["sha256"]
+        # 判据真的变了才 +1：只改交付物描述、或原封不动重交一份，都不是新一版判据。
+        changed = checks != json.loads(ticket["criteria"])
+        version_from = ticket["criteria_version"]
+        version_to = version_from + 1 if changed else version_from
+        # 重开已完成的单也是换代次（revision 只随换会话或重开变）；restart 同理。
+        restarting = restart or (reopen and ticket["state"] == "done")
+        must_wake = None
+        if restarting:
+            self._invalidate(conn, ticket, "ready")
+        else:
+            in_flight = self._in_flight(conn, ticket)
+            if in_flight is not None and changed:
+                # 不作废不等于什么都不说：回执点明要叫谁、为什么叫。消息发不发归协调会话。
+                must_wake = {"session_id": in_flight["session_id"], "attempt_id": in_flight["id"],
+                             "criteria_version": {"from": version_from, "to": version_to}}
+        conn.execute("UPDATE tickets SET prd_path=?,prd_sha256=?,criteria=?,deliverable=?,criteria_version=?"
+                     " WHERE id=?",
+                     (prd["path"], frozen_sha256, packed(checks), deliverable, version_to, ticket["id"]))
+        if links:
+            # 与 create 同一道写边口：先清后写、写完查环，成环整个事务回滚（PRD-014 R3.3）。
+            self._check_link_targets(conn, ticket["id"], links)
+            self._write_links(conn, ticket["id"], links)
+        if must_wake is not None:
+            conn.execute("INSERT INTO events(ticket_id,operation,detail,created_at) VALUES (?,?,?,?)",
+                         (ticket["id"], "criteria_revised_in_flight",
+                          packed({**must_wake, "reason": reason}), now()))
+        return {"ticket_id": ticket["id"],
+                "state": "ready" if restarting else ticket["state"],
+                "previous_state": previous_state,
+                "revision": ticket["revision"] + (1 if restarting else 0),
+                "criteria_version": {"from": version_from, "to": version_to},
+                "must_wake": must_wake,
+                "reason": reason, "prd_path": prd["path"],
+                "prd_sha256": frozen_sha256, "criteria": checks, "deliverable": deliverable}
 
     def _cancel_ticket(self, conn, data):
         ticket = self._ticket(conn, data)
@@ -612,7 +1160,7 @@ class Center:
     def _review_result(self, conn, data):
         ticket, attempt = self._active(conn, data)
         require(ticket["state"] == "awaiting_review", "INVALID_STATE", "Ticket is not awaiting review")
-        project = self._unchanged_prd(conn, ticket)
+        project = self._unchanged_prd(conn, ticket, attempt)
         submission = conn.execute("SELECT * FROM submissions WHERE id=? AND attempt_id=?",
                                   (text(data, "submission_id", 200), attempt["id"])).fetchone()
         require(submission is not None, "SUBMISSION_MISMATCH", "Submission is not from this execution attempt")
@@ -705,14 +1253,23 @@ class Center:
     def _list_unmerged(self, conn, data):
         # 只读清单：已验收（done）但没有合并记录。历史工单直接在 master 上做、没有 merges 行，
         # 会照样出现在这里——这是事实，清单让人看见并判断，而不是替人隐去或补记录。
+        #
+        # `since_days` 只是收窄窗口，不改语义：给 1 就只列最近一天的，不给就是全量。
+        # 它存在的原因是这张单的历史行越积越多（17 张在 master 上做的老单永远合不了），
+        # 合并时人要看的是「最近验收完的那几张」。不传时 SQL 与以前逐字一致。
         pid = None
         if "project_id" in data:
             pid = text(data, "project_id", 200)
+        since = None
+        if "since_days" in data:
+            days = integer(data, "since_days", 1, 1, 365)
+            since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         rows = conn.execute(
             "SELECT t.id,t.project_id,t.title,t.state,t.revision,t.created_at FROM tickets t"
             " LEFT JOIN merges m ON m.ticket_id=t.id"
             " WHERE t.state='done' AND m.id IS NULL AND (? IS NULL OR t.project_id=?)"
-            " ORDER BY t.created_at,t.id", (pid, pid))
+            " AND (? IS NULL OR t.created_at>=?)"
+            " ORDER BY t.created_at,t.id", (pid, pid, since, since))
         items = [{**dict(row), "has_merge": False} for row in rows]
         return {"items": items, "count": len(items)}
 

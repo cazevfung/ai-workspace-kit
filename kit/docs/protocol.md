@@ -55,6 +55,24 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 
 下表中的字段除明确标注外均为必填。未知字段拒绝，避免拼错后静默忽略。
 
+> **本表停在 schema 9 的命令面。** 2026-11-22 把引擎同步到 schema 13 时没有重写这份文档（补齐要把 PRD-005 /
+> PRD-013 / PRD-014 / PRD-015 的正文一起带进来，那些正文还没进套件，见 `README.md` 的「已知差异」）。这期间
+> **以代码为准**：`task_center/core.py` 的 `ALLOWED` 是字段闭集，`get_ticket` 实际回的字段就是回执形状。
+> 下面六处照本表写会被当场拒或读写到别的意思：
+>
+> 1. `create_ticket` **不再收 `ticket_id`**：号由库里发（`projects.next_number`，形如 `AW-097`），回执里的 `id` 才是真号；
+>    新增可选 `state`（只收 `planned` / `ready`）与三条依赖边 `blocked_by` / `related` / `rides_with`。
+> 2. `claim_ticket` 也收 `planned`；`allow_parallel=true` 必须同时给 `parallel_reason`（1–200 字），可选 `parallel_scope`；
+>    带车次的单还要过车次归属（`BATCH_OWNED_BY_OTHER`），未完成的前置单报 `BLOCKED_BY_DEPENDENCY`。
+> 3. `submit_result` 增 `base_sha`（必填，与 `head_sha` 同格式）；回执另带 `conflict_preview` 与 `criteria_changed`。
+>    冲突预演算不出来时 `conflict_preview` 是 `null`（没跑过），不是 `{"conflicts": []}`（跑过且干净）。
+> 4. `revise_ticket` 默认**不作废**在飞的尝试，只把 `criteria_version` +1 并回 `must_wake`；要作废得显式传
+>    `restart: true`。只改交付物或原样重交都**不**加版本号。`revision` 只在换会话或重开时 +1。
+> 5. `list_tickets` 回 `columns` 与 `behind`；`list_tickets --planned`（命令行糖）或 payload 里的 `planned: true`
+>    进池子视图，多 `claimable` / `blocked_by` 两列。`list_unmerged` 多一个可选 `since_days`。
+> 6. `init` / `migrate` / `backup` 说的 schema 号是 **13** 不是 9；`migrate` 的已知升级链是 3 → … → 12 → 13。
+>    本表 `migrate` 那一行只列到 9。
+
 | 操作 | 输入字段 | 结果与边界 |
 | --- | --- | --- |
 | init | 空对象 | 显式建库并写入当前 schema 版本（9）；已有同版本数据库不重复建表，旧版本和其他库拒绝 |

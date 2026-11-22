@@ -160,17 +160,20 @@ def step_add_project(ctx: Context) -> str:
 
 
 def step_create_ticket(ctx: Context) -> str:
+    # 号由库里发（schema 11 起）：调用方不报 `ticket_id`，以回执里的为真号。
+    # 验收条件也得写成闸门认的形状：反引号里的命令，或自称「判断类」并给出反例。
     result = ctx.call("create_ticket", {
         "project_id": ctx.project_id,
-        "ticket_id": ctx.ticket_id,
         "title": "verify_onboard 自检工单",
         "deliverable": "主题：九步自检里的一张真实工单。不覆盖：不验证真实宿主会话。",
         "prd_path": "PRD/PRD-001-demo.md",
-        "criteria": [{"id": "C1", "text": "九步全部跑过并留下记录"}],
+        "criteria": [{"id": "C1",
+                      "text": "含 `python verify/verify_onboard.py`，本脚本九步全部跑完并留下记录"}],
         "root": str(ctx.repo),
     })
     if result["state"] != "ready":
         raise VerifyError(f"新工单 state={result['state']}，不是 ready")
+    ctx.ticket_id = result["id"]
     return f"{ctx.ticket_id} ready，revision={result['revision']}"
 
 
@@ -219,6 +222,9 @@ def step_submit(ctx: Context) -> str:
         "evidence": ["verify/verify_onboard.py 在临时 HOME 里跑完九步，本步产出 result.md"],
         "risks": [],
         "head_sha": ctx.head_sha,
+        # schema 10 起两棵树都必填：head 说「交的是哪一棵」，base 说「从哪分出来的」。
+        # 这份自检历史只有一个提交，所以 base 与 head 相同——如实记这一次的实际情形。
+        "base_sha": ctx.head_sha,
     })
     ctx.submission_id = result["submission_id"]
     if result["state"] != "awaiting_review":
@@ -305,13 +311,19 @@ CLOSING = """# 收尾包 R-001
 def step_close(ctx: Context) -> str:
     round_file = ctx.ws / "tasks" / "round.md"
     text = round_file.read_text(encoding="utf-8")
+    # 轮次号从 round.md 读，不写死一个：套件的轮次会往前走到 R-002、R-003，
+    # 写死 R-001 的话收尾包会落在闸门找不到的位置（本脚本自己踩过一次）。
+    found = re.search(r"^轮次[：:]\s*(R-\d{3})\s*$", text, flags=re.M)
+    if found is None:
+        raise VerifyError(f"{round_file} 里读不到「轮次：R-00N」这一行，收尾包不知道该落哪个号")
+    round_no = found.group(1)
     text = re.sub(r"^状态[：:].*$", "状态：已收尾", text, count=1, flags=re.M)
     round_file.write_text(text, encoding="utf-8")
-    (ctx.ws / "tasks" / "closing-R-001.md").write_text(CLOSING, encoding="utf-8")
+    (ctx.ws / "tasks" / f"closing-{round_no}.md").write_text(CLOSING, encoding="utf-8")
     result = run([sys.executable, "tools/close_gate.py"], cwd=ctx.ws, env=ctx.env, timeout=120)
     if result.returncode != 0:
         raise VerifyError(f"close_gate.py 退出 {result.returncode}：{(result.stdout + result.stderr)[-1200:]}")
-    return "收尾包与状态位通过 close_gate"
+    return f"收尾包 {round_no} 与状态位通过 close_gate"
 
 
 RUNNERS = {

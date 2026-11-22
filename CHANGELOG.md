@@ -1,5 +1,25 @@
 # 更新记录
 
+## 未发布（AWK-101：引擎同步到 schema 13）
+
+把 `kit/task_center` 与 `kit/tools` 同步到工作区（`D:/AI工作区`）当前状态。本单只同步引擎，不改业务判断规则：两边不一致时一律改套件去就工作区的判据，一处也没有反过来改工作区。
+
+- `kit/task_center/db.py`：`SCHEMA_VERSION` 9 → 13，补迁移 9（`criteria_version` / `base_sha`）、10（发号盘 `projects.next_number`、`ticket_links`、`prd_sha256` 改可空——这一级要重建 `tickets` 表）、11（`batches` 车次表 + `active_session` 索引收窄到 `batch_key IS NULL`）、12（`submissions.conflict_preview`）；冻结形状改成 `V3_*` 起点逐级长出来，并补 `column_notnull()`：只看列集合分不出 10 与 11，而 11 要放宽的正是 `tickets.prd_sha256` 的 NOT NULL。
+- `kit/task_center/core.py`：补状态机与命令面——`planned` 池子与 `--planned` 视图（`claimable` / `blocked_by`）、库内发号（`create_ticket` 不再收自报 `ticket_id`）、`blocked_by` / `related` / `rides_with` 依赖边与成环拒收、车次归属、提交时的 `git merge-tree` 冲突预演（算不出来落 NULL，不冒充「跑过且干净」）、`criteria_version` 与「改判据不再默认作废在飞尝试」、拒收留一行事件、`list_tickets` 的表头与 `behind`、`list_unmerged` 的 `since_days`。
+- `kit/task_center/__main__.py`：加 `--planned` 这条 CLI 糖（只对 `list_tickets` 生效）；保留套件自己的 `INPUT_UNREADABLE`；新增直接跑文件的入口——`python kit/task_center/__main__.py --db <库> migrate` 以前会因为相对导入当场 ImportError，现在把套件根放上 `sys.path` 再按顶层包名导入同一份 core。
+- `kit/tools/work_gate.py`：同步到工作区版——在途集合只有一份定义（`CLOSING_BLOCKING_STATES` / `WAITING_STATES`，`planned` 不算在途）、`--list` 六列带 `started_at` / `last_event_at`、`--list --json`、`--stalled-minutes` 阈值判红、项目现场一次读全（`project_snapshot` / `describe_in_flight`）。用法行保留 `{{WORKSPACE}}`。
+- `kit/tools/close_gate.py`：在途集合从 `work_gate` 导入，不再自己写一份四个状态的元组（AW-094 就是两份定义给出两个答案）。
+- `kit/tools/ref_gate.py`：一处也没核到时多打一行 `EMPTY`（仍退 0，但看得出这次闸门空转了）。
+- `kit/tools/run_tests.py`：自检跳过 `skills/`（技能随身的脚本用例有自己的交付线）。
+- `kit/docs/closing.md`：补「在途集合只有一份定义」一节——`tools/test_close_gate.py` 直接断言代码与文档是同一个六状态集合。
+- `README.md` / `README.en.md`：新增「接项目这一步：clone 之后先跑 `add_project.py`」一节，写明缺 `.agents/ticket-config.json` 时 `auto_merge` 第 2 步会拒，并逐条列出与工作区的已知差异（PRD 正文与技能文本未同步、`auto_merge` 不做自动迁移、保留占位符、`doc_gate` 多认两处源码路径、夹具已脱敏）。
+- 随引擎同步一起修掉的三处「照旧写法会被新引擎拒」的地方：`kit/examples/demo.py` 与 `kit/examples/dual_project_drill.py` 不再自报 `ticket_id`、验收条件改成闸门认的形状、`submit_result` 补 `base_sha`；`verify/verify_onboard.py` 同样三处，并改成从 `tasks/round.md` 读轮次号（以前写死 R-001，套件轮到 R-002 之后收尾那一步必然红）。九步自检本次实跑 9/9 通过。
+- `kit/README.md` 的第一张工单示例不再传 `ticket_id`；`kit/onboard.py` 与 `plugin/draft/main.js` 的派发说明把可领状态从「ready / rework」改成「planned / ready / rework」。
+- `kit/docs/protocol.md`：操作表上方加一条醒目的「本表停在 schema 9」横幅，逐条列出六处照旧表写会被拒或读错的地方（发号、`planned`、`base_sha`、`revise_ticket` 的 `restart`、`list_tickets` 的列与池子视图、schema 号 13）。正文没有重写——补齐协议要把 PRD 正文一起带进来。
+- 用例：`tests/` 与 `tools/test_*.py` 两处都同步到工作区版（新增 `test_batch` / `test_planned_queue` / `test_judgeable` / `test_conflict_preview` / `test_revise_semantics`，并补齐迁移 9–13 的用例）。用例数 504 → 590（`tests/` 252 + `tools/` 338）。
+- 已知没同步的：`kit/docs/protocol.md` 仍是同步前的命令面（`planned` / 车次 / 依赖边 / 冲突预演几节都还没有），补齐它要把 PRD-005/013/014/015 正文一起带进来，不属于本单；当下以 `task_center/core.py` 的 `ALLOWED` 与 `get_ticket` 实际回的字段为准。
+- 迁移演练只在临时目录做：拿本单开工前那份 schema 9 引擎建一份旧库，再用本单的代码 `migrate` 到 13，原有工单与指纹逐字保留、`next_number` 按已有最大号初始化；`D:/AI工作区/.data/task-center.sqlite3`（schema 13、195 张工单、7 个项目）除本单自己的那一条 `bind_session` 事件外一行未写，也没有跑过 `migrate`。
+
 ## 0.4.0（2026-11-21）
 
 2026-11-21 发布。把 KIT-005「装上就能开工」与 KIT-006「契约补实、插件可装」两轮成果合成一个版本；本单只做版本号、变更记录与插件包对齐，闸门判定与核心逻辑一行未改。
