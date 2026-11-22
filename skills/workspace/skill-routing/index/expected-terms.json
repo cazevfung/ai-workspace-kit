@@ -76,6 +76,18 @@
       "approved": "计划已经定了，就在当前会话里照它一个任务一个任务地做。用户说「按计划做」「逐任务执行」「做到一半接不上」时使用；计划本身要重写，回去用 writing-plans。"
     },
     {
+      "name": "ui-design",
+      "node": "N14",
+      "path": "~/.agents/skills/ui-design/SKILL.md",
+      "required_terms": [
+        "界面",
+        "配色",
+        "动效",
+        "图标"
+      ],
+      "approved": "做任何界面之前、或验收别人的界面时用它：要定配色、间距、圆角、字阶与深浅两套主题，要选图标（只从 Lucide 取）、要加动画与交互（animate-ui 的 primitive 与 Motion），或者要判断一个现成界面哪里不像样、哪里太挤、点了没反应。用户说「做个页面」「调一下 UI」「这套设计规范」「动效太土」「图标不统一」时使用。只定界面怎么做，不定产品该不该做。"
+    },
+    {
       "name": "systematic-debugging",
       "node": "N15",
       "path": "~/.agents/skills/systematic-debugging/SKILL.md",

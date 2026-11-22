@@ -91,7 +91,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -121,16 +123,20 @@ STEP_RECORD = "第 7 步 · 写合并记录"
 STEP_FIND = "第 2 步 · 找合并提交（--record-only）"
 STEP_RECORD_TESTS = "第 5 步 · 全量测试（--record-only）"
 STEP_CLEANUP = "第 7 步 · 清理工作树与分支"
+STEP_SCHEMA = "第 7 步 · 写记录前的 schema 闸门"
 
 
 class Fail(Exception):
     """一步没通过。带上是哪一步、为什么、以及能照做的补救。"""
 
-    def __init__(self, step: str, reason: str, fix: str = ""):
+    def __init__(self, step: str, reason: str, fix: str = "", code: str = ""):
         super().__init__(f"{step}：{reason}")
         self.step = step
         self.reason = reason
         self.fix = fix
+        # 少数失败带一个可被引用的状态名（schema 闸门那五个）：人在工单里引用它，
+        # 也凭名字去查是哪一种不一致。其余步骤没有这个名字，留空。
+        self.code = code
 
 
 def git_env(extra=None) -> dict:
@@ -337,7 +343,7 @@ def open_center_for_project(repo, db_path=None, step=STEP_TICKET):
             f"{Path(repo).resolve()} 不属于任何已注册项目。",
             "先 register_project 把这个仓库登记成一个项目，再建工单。",
         )
-    return center, found["project_id"]
+    return center, found["project_id"], db
 
 
 def center_ticket_reader(center, project_id):
@@ -883,12 +889,21 @@ def run_merge(
     config = load_project_config(repo)
     target = target or config["target_branch"]
 
+    schema_gate = None
+    reload_recorder = None
     if ticket_reader is None or merge_recorder is None:
-        center, project_id = open_center_for_project(repo, db_path, STEP_TICKET)
+        center, project_id, center_db = open_center_for_project(repo, db_path, STEP_TICKET)
         if ticket_reader is None:
             ticket_reader = center_ticket_reader(center, project_id)
         if merge_recorder is None:
             merge_recorder = center_merge_recorder(center)
+            # 写记录前的 schema 闸门只在本工具自己打开中心库时建立：调用方传进来的
+            # recorder 是桩（用例），对着真库跑闸门就是拿别人的库做实验。
+            code_root = center_package_root(repo)
+            if code_root is not None:
+                schema_gate = SchemaGate(repo=code_root, db_path=center_db,
+                                         python=python, env=env)
+                reload_recorder = center_reloader(code_root, center_db, emit)
 
     # 第 0 步：互斥锁。必须在第 1 步之前拿——否则拿不到锁时撞上的是「这单状态不对」
     # 之类与真实原因无关的报错，而真正要说的那句话是「谁占着」。
@@ -908,6 +923,8 @@ def run_merge(
                 env=env,
                 python=python,
                 config=config,
+                schema_gate=schema_gate,
+                reload_recorder=reload_recorder,
             )
         return _merge_steps(
             repo,
@@ -921,6 +938,8 @@ def run_merge(
             env=env,
             python=python,
             config=config,
+            schema_gate=schema_gate,
+            reload_recorder=reload_recorder,
         )
     finally:
         release_merge_lock(lock, emit)
@@ -1308,6 +1327,8 @@ def _record_only_steps(
     env,
     python,
     config,
+    schema_gate=None,
+    reload_recorder=None,
 ):
     """`--record-only`：已合并且无记录的现场，跑测试 → 写记录 → 清理。锁由 run_merge 管。"""
     ticket = _step_ticket(ticket_id, ticket_reader, emit)
@@ -1352,8 +1373,11 @@ def _record_only_steps(
         "tests": summary,
         "reviewed_sha": reviewed_sha,
     }
-    receipt = merge_recorder(payload)
-    emit(f"合并记录：{json.dumps(receipt, ensure_ascii=False)}")
+    record_merge_window(
+        payload=payload, merge_recorder=merge_recorder,
+        schema_gate=schema_gate, reload_recorder=reload_recorder,
+        emit=emit, ticket_id=ticket_id,
+    )
 
     cleanup_after_record(repo, ticket_id, branch, emit, env=env)
     emit(f"完成：{ticket_id} 的合并记录已补上（{commit[:12]} → {target}）。")
@@ -1373,6 +1397,8 @@ def _merge_steps(
     env,
     python,
     config,
+    schema_gate=None,
+    reload_recorder=None,
 ):
     """第 1~7 步。锁由 run_merge 取与释放，所以这里不用管锁。"""
     # 第 1 步：工单本身必须有资格合并
@@ -1516,11 +1542,307 @@ def _merge_steps(
         "tests": summary,
         "reviewed_sha": reviewed_sha,
     }
-    receipt = merge_recorder(payload)
-    emit(f"合并记录：{json.dumps(receipt, ensure_ascii=False)}")
+    record_merge_window(
+        payload=payload, merge_recorder=merge_recorder,
+        schema_gate=schema_gate, reload_recorder=reload_recorder,
+        emit=emit, ticket_id=ticket_id,
+    )
     clear_journal(repo, ticket_id, emit)
     emit(f"完成：{ticket_id} 已合入 {target}（{commit[:12]}）。")
     return 0
+
+
+# --- 第 7 步的 schema 闸门 ---------------------------------------------------
+#
+# 为什么要有这一段：`auto_merge` 的顺序是「合并 → 跑测试 → 写记录」，而写记录用的是
+# **合并后的代码**。碰到动 schema 的工单，那一刻代码已经是新一代、库还在上一代，
+# `merge_ticket` 直接 `SCHEMA_MISMATCH`；2026-11-21 的三次迁移（10→11→12）因此全是
+# 手工做的。
+#
+# 为什么套件里还要多一条路径：引擎代码在套件里住 `kit/task_center/`，而闸门以前只按
+# 仓库根找 `task_center/db.py`，于是它在这个仓库上一路打印「没有 db.py，跳过」——
+# 2026-11-22 合 AWK-101 时 schema 从 9 推到 13，闸门一次都没生效。现在两个位置都认：
+# 装好的工作区是前者，套件仓库是后者。
+#
+# 顺序不能换：先对齐库（必要时快照 + 用合并后的代码 migrate），再换掉进程里那份模块。
+
+SCHEMA_AHEAD = "SCHEMA_AHEAD"                          # 代码领先库，正在迁移（不是失败）
+SCHEMA_MIGRATE_FAILED = "SCHEMA_MIGRATE_FAILED"        # 迁移没把库升上去
+SCHEMA_SNAPSHOT_FAILED = "SCHEMA_SNAPSHOT_FAILED"      # 快照写不进去，于是不动库
+SCHEMA_DB_AHEAD = "SCHEMA_DB_AHEAD"                    # 库比合并进来的代码还新
+SCHEMA_RELOAD_MISMATCH = "SCHEMA_RELOAD_MISMATCH"      # 重新载入的模块与磁盘代码不一致
+
+# 引擎代码的两个公民位置：装好的工作区在仓库根，套件仓库在 `kit/` 下。两处都认，
+# 否则 schema 闸门在其中一个仓库上会静默跳过（AWK-101 的现场）。
+SCHEMA_CANDIDATES = (
+    "task_center/db.py",
+    "kit/task_center/db.py",
+)
+SCHEMA_LINE = re.compile(r"^\s*SCHEMA_VERSION\s*=\s*(\d+)\s*$", re.MULTILINE)
+
+
+def schema_file_in(code_root):
+    """这个树里真正放着引擎代码的那份 `db.py`；一个都没有则 `None`。"""
+    root = Path(code_root)
+    for relative in SCHEMA_CANDIDATES:
+        path = root / relative
+        if path.is_file():
+            return path
+    return None
+
+
+def parse_schema_version(text):
+    """从源码里读 `SCHEMA_VERSION`；读不到返回 None。
+
+    读源码而不 `import`：刚合完时进程里那份模块还是旧的，问它等于问合并前的自己。
+    """
+    found = SCHEMA_LINE.search(text or "")
+    return int(found.group(1)) if found else None
+
+
+def schema_version_on_disk(code_root):
+    """合并后磁盘上的代码要求哪一代 schema；树里没有引擎代码时为 None。"""
+    path = schema_file_in(code_root)
+    if path is None:
+        return None
+    return parse_schema_version(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def schema_version_in_database(db_path):
+    """库里现在是哪一代。直读 `PRAGMA user_version`，不经过 task_center（它只认最新一代）。"""
+    db = Path(db_path)
+    conn = sqlite3.connect(f"{db.as_uri()}?mode=rw", uri=True, timeout=10)
+    try:
+        return int(conn.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def snapshot_database(db_path, *, from_version, to_version):
+    """迁移前的文件层快照：库文件旁边一份同名校本，不覆盖任何已有文件。"""
+    db = Path(db_path)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    base = db.with_name(f"{db.name}.pre-migrate-{from_version}-to-{to_version}-{stamp}")
+    target = base
+    index = 1
+    while os.path.lexists(target):
+        target = base.with_name(f"{base.name}-{index}")
+        index += 1
+    try:
+        shutil.copy2(db, target)
+        # `-wal` 里可能还有没 checkpoint 的行：不带上快照就少一段；`-shm` 只是索引。
+        for suffix in ("-wal", "-shm"):
+            side = db.with_name(db.name + suffix)
+            if side.is_file():
+                shutil.copy2(side, target.with_name(target.name + suffix))
+    except OSError as exc:
+        raise Fail(
+            STEP_SCHEMA,
+            f"迁移前的文件层快照写不进去（{target}）：{exc}。",
+            "先确认库文件所在目录可写、盘上还有空间。没有快照就不动库："
+            "此刻合并已经发生、记录还没写，补好发现的问题后用 --record-only 收口。",
+            code=SCHEMA_SNAPSHOT_FAILED,
+        )
+    return target
+
+
+def migrate_database_with_fresh_code(code_root, db_path, python, env=None, timeout=600):
+    """用**合并后的代码**在短命子进程里迁移库；返回 (是否成功, 输出末行)。
+
+    子进程从 `code_root` 起算，导入的就是磁盘上的新代码；本进程里那份是启动时载入的。
+    """
+    try:
+        proc = subprocess.run(
+            [python, "-m", "task_center", "--db", str(Path(db_path).absolute()), "migrate"],
+            cwd=str(Path(code_root).resolve()),
+            # migrate 不吃输入，但 CLI 默认从标准输入读 JSON：不显式断开的话，父进程若没有
+            # 可读的 stdin（管道 / 重定向），读会失败并被报成 INVALID_INPUT，看起来像迁移写错了。
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=git_env(env),
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise Fail(
+            STEP_SCHEMA,
+            f"跑不了 migrate：找不到解释器 {python}（{exc}）。",
+            "用当前解释器跑一次 `python -m task_center --db <库> migrate` 确认能起来；"
+            "本工具用的是 --python 指定的（默认当前解释器）。",
+        )
+    except subprocess.TimeoutExpired:
+        raise Fail(
+            STEP_SCHEMA,
+            f"migrate 超过 {timeout} 秒没有返回，已中止等待。",
+            "先手动跑 `python -m task_center --db <库> migrate` 看卡在哪；不要在超时后继续写记录。",
+        )
+    detail = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    return proc.returncode == 0, detail
+
+
+def center_package_root(repo):
+    """树里真的带 `task_center` 包时返回**它所在的那个目录**；否则 None。
+
+    要 `__init__.py` 而不只是 `db.py`：重新载入模块需要它是个可导入的包，
+    光有一个文件时只可能是在考工具（用例里的桩），那时不载。
+    """
+    root = Path(repo)
+    for candidate in (root, root / "kit"):
+        if (candidate / "task_center" / "__init__.py").is_file():
+            return candidate
+    return None
+
+
+def reload_task_center(code_root):
+    """丢掉进程里那份 `task_center`，按磁盘代码重新导入。返回 (SCHEMA_VERSION, Center)。"""
+    for name in [n for n in list(sys.modules) if n == "task_center" or n.startswith("task_center.")]:
+        del sys.modules[name]
+    root = str(Path(code_root).resolve())
+    while root in sys.path:
+        sys.path.remove(root)
+    sys.path.insert(0, root)
+    import importlib
+
+    package = importlib.import_module("task_center")
+    db_module = importlib.import_module("task_center.db")
+    return int(db_module.SCHEMA_VERSION), package.Center
+
+
+class SchemaGate:
+    """第 7 步入场：让「合并后的代码」与「中心库」落在同一代 schema 上。
+
+    只在**要写合并记录**时用：预演与 dry-run 不碰库（它们本来就不写记录）。
+    所有探针/动作都可以替换，用例因此能只测「该不该跑、先跑还是后跑」。
+    """
+
+    def __init__(
+        self,
+        *,
+        repo,
+        db_path,
+        python=None,
+        env=None,
+        expected_version=None,
+        migrator=None,
+        snapshotter=None,
+        version_probe=None,
+        db_probe=None,
+    ):
+        self.repo = Path(repo)
+        self.db_path = Path(db_path)
+        self.python = python or sys.executable
+        self.env = env
+        self.expected_version = expected_version
+        self._migrator = migrator or migrate_database_with_fresh_code
+        self._snapshotter = snapshotter or snapshot_database
+        self._version_probe = version_probe or schema_version_on_disk
+        self._db_probe = db_probe or schema_version_in_database
+
+    def expected(self):
+        if self.expected_version is not None:
+            return self.expected_version
+        return self._version_probe(self.repo)
+
+    def database(self):
+        return self._db_probe(self.db_path)
+
+    def prepare(self, *, ticket_id="", out=None, allow_migrate=True, quiet=False) -> dict:
+        """对齐 schema；返回 {"from", "to", "snapshot", "migrated", "skipped"}。"""
+        emit = out or print
+        expected = self.expected()
+        actual = self.database()
+        state = {"from": actual, "to": expected, "snapshot": None,
+                 "migrated": False, "skipped": False}
+        if expected is None:
+            if not quiet:
+                emit("schema 闸门：这棵树里没有 task_center/db.py"
+                     "（也没 kit/task_center/db.py），这次合并改不到 schema，跳过。")
+            state["skipped"] = True
+            return state
+        if actual == expected:
+            if not quiet:
+                emit(f"schema 闸门：代码与库都在 schema {expected}，无需迁移。")
+            return state
+        if actual > expected:
+            raise Fail(
+                STEP_SCHEMA,
+                f"库在 schema {actual}，比这次合并进来的代码（{expected}）还新。",
+                "库不会为了合并往下降级，所以不写记录。先核对合的是不是该合的分支："
+                "`git log --oneline` 看这次合并带进了什么，看引擎代码自报的版本；"
+                "若库确实已被升过，把分支 rebase 到当前目标分支再来。"
+                "不要手工改 PRAGMA user_version。",
+                code=SCHEMA_DB_AHEAD,
+            )
+        emit(f"schema 闸门：{SCHEMA_AHEAD}——代码要求 schema {expected}，库在 {actual}。")
+        if not allow_migrate:
+            raise Fail(
+                STEP_SCHEMA,
+                f"库在 schema {actual}、代码要求 {expected}，而这条路径不迁移库。",
+                "先把库迁到当前代码的版本再预演：`python -m task_center --db <库> migrate`"
+                "（或用一次真实合并完成迁移；迁移前会先做文件层快照）。",
+                code=SCHEMA_AHEAD,
+            )
+        snapshot = self._snapshotter(self.db_path, from_version=actual, to_version=expected)
+        state["snapshot"] = snapshot
+        emit(f"迁移前快照：{snapshot}")
+        ok, detail = self._migrator(
+            code_root=self.repo, db_path=self.db_path, python=self.python, env=self.env
+        )
+        after = self.database()
+        if not ok or after != expected:
+            raise Fail(
+                STEP_SCHEMA,
+                f"migrate 没有把库从 {actual} 升到 {expected}（现在 {after}）：{detail or '(无输出)'}。"
+                f"库文件快照：{snapshot}。",
+                "合并本身已经发生，代码不回滚：先按上面 migrate 的输出修迁移，"
+                "修好后用 --record-only 收口（同一条 schema 闸门会再跑一遍）。"
+                "要把库退回去就用上面的快照覆盖库文件，不要手工改 user_version。"
+                "此刻 merges 里一行都没写。",
+                code=SCHEMA_MIGRATE_FAILED,
+            )
+        state["migrated"] = True
+        emit(f"schema 闸门：库已从 {actual} 迁移到 {after}；快照保留在 {snapshot}")
+        return state
+
+
+def center_reloader(code_root, db_path, emit):
+    """返回一个「按磁盘重新载入 task_center 并造一个新 recorder」的函数。"""
+
+    def rebuild(expected_version=None):
+        version, Center = reload_task_center(code_root)
+        if expected_version is not None and version != expected_version:
+            raise Fail(
+                STEP_SCHEMA,
+                f"重新载入的 task_center 是 schema {version}，合并后的代码要求 {expected_version}。",
+                "确认 TASK_CENTER_CODE 与仓库里的 task_center 是同一份代码（sys.path 上可能有一份抢先）；"
+                "两边统一之后再重跑。此刻合并已经发生、记录还没写，修好后用 --record-only 收口。",
+                code=SCHEMA_RELOAD_MISMATCH,
+            )
+        emit(f"task_center 已按磁盘重新载入：schema {version}")
+        return center_merge_recorder(Center(str(db_path)))
+
+    return rebuild
+
+
+def record_merge_window(
+    *,
+    payload,
+    merge_recorder,
+    schema_gate=None,
+    reload_recorder=None,
+    emit=print,
+    ticket_id="",
+):
+    """第 7 步：先过 schema 闸门（必要时快照 + migrate + 重载模块），再写合并记录。"""
+    if schema_gate is not None:
+        state = schema_gate.prepare(ticket_id=ticket_id, out=emit)
+        if reload_recorder is not None:
+            merge_recorder = reload_recorder(state.get("to"))
+    receipt = merge_recorder(payload)
+    emit(f"合并记录：{json.dumps(receipt, ensure_ascii=False)}")
+    return receipt
 
 
 def main(argv, out=None):
@@ -1570,7 +1892,8 @@ def main(argv, out=None):
             db_path=args.db,
         )
     except Fail as exc:
-        emit(f"合并中止 · {exc.step}")
+        tag = f" [{exc.code}]" if getattr(exc, "code", "") else ""
+        emit(f"合并中止 · {exc.step}{tag}")
         emit(f"原因：{exc.reason}")
         if exc.fix:
             emit(f"怎么补：{exc.fix}")

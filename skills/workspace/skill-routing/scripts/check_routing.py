@@ -8,7 +8,7 @@
   3. undispositioned-skill   装了的 skill 既没接入节点，也没写明不接
   4. unknown-node            角色表（或处置表、缺口表）引用了不存在的节点编号
 
-顺带查三件结构性的事：节点是否齐 N01–N29、三张角色表是否覆盖全部节点、缺口清单是否覆盖所有无 skill 归口的节点。
+顺带查三件结构性的事：节点是否齐 N01–N30、三张角色表是否覆盖全部节点、缺口清单是否覆盖所有无 skill 归口的节点。
 
 用法：
 
@@ -26,7 +26,7 @@ import re
 import sys
 from pathlib import Path
 
-NODE_COUNT = 29
+NODE_COUNT = 30
 NODE_ID = re.compile(r"^N\d{2}$")
 OWNER = re.compile(r"^(skill|action):(.+)$")
 EXPECTED = ["N%02d" % i for i in range(1, NODE_COUNT + 1)]
@@ -193,7 +193,7 @@ def check_nodes(nodes: dict[str, dict], path: Path, problems: list[Problem]) -> 
     extra = sorted(set(nodes) - set(EXPECTED))
     if missing:
         problems.append(Problem("orphan-node", path, 0,
-                                "总表缺这些节点编号：%s（应从 N01 连续到 N29）" % " ".join(missing)))
+                                "总表缺这些节点编号：%s（应从 N01 连续到 N30）" % " ".join(missing)))
     if extra:
         problems.append(Problem("orphan-node", path, 0,
                                 "总表出现不该有的编号：%s" % " ".join(extra)))

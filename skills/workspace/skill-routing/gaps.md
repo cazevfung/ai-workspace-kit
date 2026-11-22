@@ -12,7 +12,7 @@
 | N12 | 会话标识取证与 `list_sessions` 反查 | 规则：自己的 `session_id` 只从宿主取（`get_current_session_id` 或创建回执）；两个 id 都要在 `list_sessions` 里查到才允许绑定或提交；查不到就当标识不可信 | 规则已经写死在 `AGENTS.md` 硬规则五与 `docs/protocol.md`，两处都是权威口径。再写一份 skill 会出现第三份，三份一旦不同步，最危险的是看起来最详细的那份 |
 | N23 | 进度记录与收口 | `python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 events --input -`（`project_id`、`ticket_id` 必填） | 中心库是唯一进度来源。把它包装成 skill 会暗示「按 skill 记一遍也行」，恰好是 AGENTS.md 明令禁止的「各会话各自维护一份进度」 |
 | N24 | 写记忆（user / feedback / project / reference） | 规则：走 `cindy_memory` 的 `memory_write`；一条 description 写不出来就不写 | 记忆系统的写入规则由宿主常驻提示直接给出，逐类别与反例都在里面。skill 只会复制一份，且复制品会比原件先过期 |
-| N29 | 把一条消息送进一个正在跑的会话：投还是插、发完怎么确认打中了 | 先 `list_session_queue` 看目标在不在跑；要改目标当前这一轮的产出就 `steer_session`，否则 `send_to_session` 并带 `target_session_id`；发完读回执 `wake_kind`，`created` 就是发错了目标 | 它是一次「看队列再选哪一档」的当场判断，判断依据已经定版在 `docs/decisions.md` 的「消息通道三档」（三档能力边界、四条判据）。为了两列好看另开一个只有三句话的 skill，只会多出一份与那份口径各自过期的副本 |
+| N29 | 把一条消息送进一个正在跑的会话：投还是插、发完怎么确认打中了 | 先 `list_session_queue` 看目标在不在跑；要改目标当前这一轮的产出就 `steer_session`，否则 `send_to_session` 并带 `target_session_id`；发完读回执 `wake_kind`，`created` 就是发错了目标 | 它是一次「看队列再选哪一档」的当场判断，判断依据已经定版在 `PRD/PRD-005-决策通道.md` §8（三档能力边界、四条判据、队列滞留信号）。为了两列好看另开一个只有三句话的 skill，只会多出一份与 §8 各自过期的副本 |
 
 ## 半接的三个节点（有 skill，但 skill 不覆盖全部判断）
 
@@ -24,10 +24,10 @@
 | N17 | `skill:ticket-dispatch` | `evidence` 的具体写法（贴什么、贴多少）协议里只说「自检说明」 | 每条验收条件一次运行 + 真实输出；跑不了的写明跑不了的原因 |
 | N18 | `skill:ticket-dispatch` | 逐项判定时的判据粒度 | 判不出来的条件按不通过处理，不许整体感觉没问题 |
 
-## 与需求文档附录 A 的口径核对
+## 与 PRD 附录 A 的口径核对
 
-首版数错的数字已经改正过：15 个已接、3 个半接（N05/N17/N18）、4 个节点上装了没接（N15/N22/N26/N27，共 6 个 skill）、6 个没有任何 skill（N02/N03/N06/N12/N23/N24）。
+`PRD-004` 0.2 已把首版数错的数字改正：15 个已接、3 个半接（N05/N17/N18）、4 个节点上装了没接（N15/N22/N26/N27，共 6 个 skill）、6 个没有任何 skill（N02/N03/N06/N12/N23/N24）。
 
 本目录就是按这个口径建的：6 个无 skill 的节点逐一列在上面三列里；那 6 个装了没接的 skill 已全部接进 N15/N22/N26/N27（见 `installed-skills.md`）。本轮没有出现新的口径偏差。
 
-**N29 的归口为何写成 action 而不是 skill（2026-11-17 定，对节点表生效）。** N29「把一条消息送进一个正在跑的会话」确实是一次判断，但它比其他动作节点多一步「看状态再选集」：先 `list_session_queue`，在跑且要改本轮就 `steer_session`，否则 `send_to_session`，发完看回执 `wake_kind`。这三步都能当场答「做到了没有」，判据也已定版在 `docs/decisions.md` 的「消息通道三档」与「送达判据」，因此归口写 `action:`，不新建 skill——另开一个只包三句话的 skill 会多出一份各自过期的副本。加它之后缺口节点由 6 个变为 7 个，节点表已同步这个数。
+**N29 的归口为何写成 action 而不是 skill（2026-11-17 定，对 `PRD-004` 0.3 生效）。** N29「把一条消息送进一个正在跑的会话」确实是一次判断，但它比其他动作节点多一步「看状态再选集」：先 `list_session_queue`，在跑且要改本轮就 `steer_session`，否则 `send_to_session`，发完看回执 `wake_kind`。这三步都能当场答「做到了没有」，判据也已定版在 `PRD/PRD-005-决策通道.md` §8.2 与 §8.3（三档边界、四条判据、队列滞留信号），因此归口写 `action:`，不新建 skill——另开一个只包三句话的 skill 会多出一份与 §8 各自过期的副本。加它之后缺口节点由 6 个变为 7 个，`PRD-004` 0.3 已同步这个数。

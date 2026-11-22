@@ -41,6 +41,7 @@ AW-018 的验收条件不是「能合并」，而是「不该合并的时候 mas
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1279,6 +1280,173 @@ class MergeJournalTest(RepoFixture):
         code, out = self.run_merge()
         self.assertEqual(1, code, out)
         self.assertFalse(auto_merge.journal_path(self.repo, self.TICKET).exists())
+
+
+class SchemaGateTest(unittest.TestCase):
+    """第 7 步的 schema 闸门：认两个位置、对齐顺序、四种失败各有名字。
+
+    这一组不起 git 仓库：闸门问的是「代码要哪一代 / 库在哪一代」，
+    用例只替换这几个探针与两个动作，不替 `task_center` 自己的迁移链背书。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.db = self.root / "center.sqlite3"
+        self.db.write_bytes(b"")  # 探针是桩，库只需要是个真实文件
+
+    def engine(self, where, version):
+        """在 `where` 下造一份带 SCHEMA_VERSION 的引擎代码，位置由调用方给。"""
+        directory = self.root / where
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "__init__.py").write_text("", encoding="utf-8")
+        (directory / "db.py").write_text(
+            f'"""桩"""\nSCHEMA_VERSION = {version}\n', encoding="utf-8"
+        )
+
+    # --- 认哪两份 db.py ---------------------------------------------------
+
+    def test_finds_engine_at_repository_root(self):
+        self.engine("task_center", 13)
+        self.assertEqual(auto_merge.schema_version_on_disk(self.root), 13)
+
+    def test_finds_engine_under_kit(self):
+        """套件仓库的引擎住在 `kit/task_center/`；只认仓库根时闸门会静默跳过。"""
+        self.engine("kit/task_center", 13)
+        self.assertEqual(auto_merge.schema_version_on_disk(self.root), 13)
+        found = auto_merge.schema_file_in(self.root)
+        self.assertTrue(str(found).replace("\\", "/").endswith("kit/task_center/db.py"))
+
+    def test_no_engine_returns_none(self):
+        self.assertIsNone(auto_merge.schema_version_on_disk(self.root))
+        self.assertIsNone(auto_merge.schema_file_in(self.root))
+
+    def test_parse_rejects_missing_version(self):
+        self.assertIsNone(auto_merge.parse_schema_version("# 没有这一行\n"))
+
+    def test_package_root_prefers_repository_root_then_kit(self):
+        self.engine("task_center", 13)
+        self.engine("kit/task_center", 13)
+        self.assertEqual(auto_merge.center_package_root(self.root), self.root)
+        (self.root / "task_center" / "__init__.py").unlink()
+        self.assertEqual(auto_merge.center_package_root(self.root), self.root / "kit")
+        shutil.rmtree(self.root / "kit")
+        self.assertIsNone(auto_merge.center_package_root(self.root))
+
+    # --- 四种结果 ---------------------------------------------------------
+
+    def gate(self, expected, actual):
+        calls = []
+
+        def snapshotter(path, *, from_version, to_version):
+            calls.append(("snapshot", from_version, to_version))
+            return Path(str(path) + ".snapshot")
+
+        def migrator(*, code_root, db_path, python, env=None):
+            calls.append(("migrate", code_root))
+            return True, "已迁移"
+
+        gate = auto_merge.SchemaGate(
+            repo=self.root,
+            db_path=self.db,
+            expected_version=expected,
+            version_probe=lambda repo: expected,
+            db_probe=lambda path: actual if not calls else expected,
+            snapshotter=snapshotter,
+            migrator=migrator,
+        )
+        return gate, calls
+
+    def test_skips_when_no_engine_in_tree(self):
+        gate, calls = self.gate(None, 9)
+        state = gate.prepare(out=lambda line: None, quiet=True)
+        self.assertTrue(state["skipped"])
+        self.assertEqual(calls, [])
+
+    def test_does_nothing_when_already_aligned(self):
+        gate, calls = self.gate(13, 13)
+        state = gate.prepare(out=lambda line: None)
+        self.assertFalse(state["migrated"])
+        self.assertEqual(calls, [])
+
+    def test_snapshots_before_migrating_when_code_is_ahead(self):
+        gate, calls = self.gate(13, 9)
+        lines = []
+        state = gate.prepare(ticket_id="AWK-102", out=lines.append)
+        self.assertEqual(calls, [("snapshot", 9, 13), ("migrate", self.root)])
+        self.assertTrue(state["migrated"])
+        self.assertEqual(state["from"], 9)
+        self.assertEqual(state["to"], 13)
+        self.assertTrue(any("迁移前快照" in line for line in lines))
+
+    def test_dry_run_does_not_migrate(self):
+        gate, calls = self.gate(13, 9)
+        with self.assertRaises(auto_merge.Fail) as caught:
+            gate.prepare(out=lambda line: None, allow_migrate=False)
+        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_AHEAD)
+        self.assertEqual(calls, [])
+
+    def test_database_ahead_is_refused(self):
+        gate, calls = self.gate(9, 13)
+        with self.assertRaises(auto_merge.Fail) as caught:
+            gate.prepare(out=lambda line: None)
+        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_DB_AHEAD)
+        self.assertEqual(calls, [])
+
+    def test_failed_migration_keeps_snapshot_path_in_message(self):
+        def migrator(**_kwargs):
+            return False, "boom"
+
+        gate = auto_merge.SchemaGate(
+            repo=self.root, db_path=self.db, expected_version=13,
+            version_probe=lambda repo: 13, db_probe=lambda path: 9,
+            snapshotter=lambda path, *, from_version, to_version: Path(str(path) + ".snap"),
+            migrator=migrator,
+        )
+        with self.assertRaises(auto_merge.Fail) as caught:
+            gate.prepare(out=lambda line: None)
+        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_MIGRATE_FAILED)
+        self.assertIn("snap", caught.exception.reason)
+
+    # --- 写记录的窗口 -----------------------------------------------------
+
+    def test_record_window_runs_gate_before_writing(self):
+        order = []
+
+        class Gate:
+            def prepare(self, *, ticket_id="", out=None):
+                order.append("gate")
+                return {"to": 13}
+
+        def reloader(version):
+            order.append(("reload", version))
+
+            def recorder(payload):
+                order.append("record")
+                return {"merge_id": "m-1"}
+
+            return recorder
+
+        receipt = auto_merge.record_merge_window(
+            payload={"ticket_id": "AWK-102"},
+            merge_recorder=lambda payload: order.append("record"),
+            schema_gate=Gate(),
+            reload_recorder=reloader,
+            emit=lambda line: None,
+            ticket_id="AWK-102",
+        )
+        self.assertEqual(order, ["gate", ("reload", 13), "record"])
+        self.assertEqual(receipt, {"merge_id": "m-1"})
+
+    def test_record_window_without_gate_writes_directly(self):
+        seen = []
+        auto_merge.record_merge_window(
+            payload={"ticket_id": "AWK-102"},
+            merge_recorder=lambda payload: seen.append(payload) or {"merge_id": "m-2"},
+            emit=lambda line: None,
+        )
+        self.assertEqual([item["ticket_id"] for item in seen], ["AWK-102"])
 
 
 if __name__ == "__main__":

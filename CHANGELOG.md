@@ -1,5 +1,18 @@
 # 更新记录
 
+## 未发布（AWK-102：文档与工具剩余增量）
+
+把工作区剩下的文档与工具搬进套件，并修掉两处「该报警却没报」的盲点。判据一律以工作区为准，搬过来时把本机路径换成 `{{WORKSPACE}}`，没有反过来改工作区。
+
+- `kit/PRD/` 新增 `PRD-010`~`PRD-015` 六份正文（`PRD-010-项目进度面板`、`PRD-011-UI设计技能`、`PRD-012-共用资源的身份与占用`、`PRD-013-工单机制的执行面`、`PRD-014-计划队列与依赖`、`PRD-015-多主任务派单`），路径与示例改写成套件视角，`grep -rl "D:/AI工作区" kit/PRD/` 为空。`PRD-015` 里两条复算命令原来钉在工作区的历史轮次表与收尾包行号上，改成「原工作区的第 N 行」——套件不带那些历史文件，照原样写就是两个断链，`ref_gate` 会当场拒。
+- `skills/workspace/` 的 `pdsa-workflow`、`prd-authoring`、`skill-routing`、`ticket-dispatch` 四个技能对齐到工作区现有文本（内容不改写），并补上 `skill-routing` 里 `nodes.md` 的 N30 指向、却在套件里一直缺着的 `shared-resource-identity`。`installed-skills.md` 给套件自带的 `bootstrap-workspace` 写了一行「明确不接（安装面）」并同步来源计数——不然它自己就成了一个「装了没接」的漏项。
+- `kit/tools/idle_watch.py`（谁在等一句话）与 `kit/tools/project_doctor.py`（安装面体检）连同各自用例搬进来。`idle_watch` 的两处本机硬编码（默认扫 `D:/AI工作区` 与 `D:/cindy-harmony-app`）换成 `{{WORKSPACE}}` 占位，装好之后才是真实目录；占位没被替换时（在套件仓库里直接跑）打一行提示说明「这次一个会话都扫不到」，不让 0 条被误读成没有悬空。
+- `kit/tools/wait_audit.py` 搬进来并新增第五类 `awaiting_receipt`：工单 `awaiting_review`、最新提交已过 15 分钟、`notices` 里没有任何一条 `sent`（写 `failed` 的不算走过回执）就报。起因是 2026-11-22 的实测——AWK-101 的执行会话提交完没发回执，当时只有「等在验收超过 4 小时」一条，工具一声没响，靠人追问才发现。这一条与「4 小时没人验收」是两条链，各数各的；已有 review 行、或已有 `sent` 回执的不报，跳过原因写进 `--json` 的 `ignored`。末行合计、`--json` 的 `summary`、退出码都跟着变成五类。另修一处：`--db` 给相对路径时报的是一屏 traceback（`as_uri()` 只收绝对路径），现在先归一成绝对路径，缺库仍报 `DB_NOT_FOUND` 并退出 2。
+- `wait_audit` 的判据口径写死一句：**只有 `sent` 算送达，`failed` 一样要报**——`failed` 只说明曾经想发没发成，拿它放行等于把「想发过」当成「发到了」，AWK-101 的沉默就是这么来的。`kit/tasks/plan-007-文档与工具剩余增量.md` 的「未决」里原来写着「写 `failed` 的算作走过回执不报」，那句话是错的，随本单改成正确口径（阈值仍是 15 分钟，恢复条件不变）。
+- `kit/tools/auto_merge.py` 补上「写记录前的 schema 闸门」：代码要求更高就先做文件层快照、用**合并后的代码**在短命子进程里 `migrate`、再把进程里那份 `task_center` 按磁盘重载，失败停在第 7 步并报 `SCHEMA_MIGRATE_FAILED` / `SCHEMA_DB_AHEAD` / `SCHEMA_SNAPSHOT_FAILED` / `SCHEMA_RELOAD_MISMATCH`。闸门认两个位置：`task_center/db.py` 与 `kit/task_center/db.py`——2026-11-22 合 AWK-101 时 schema 从 9 推到 13，它只按仓库根找，于是打印「仓库里没有 `task_center/db.py`，跳过」，在这个仓库上从来没生效过。闸门只在本工具自己打开中心库时建立：调用方传进来的记录函数是桩（用例），不该拿真库做实验。
+- 用例：`tools/test_idle_watch.py`（34）、`tools/test_project_doctor.py`（6）、`tools/test_wait_audit.py`（30，含新的 `AwaitingReceiptTest` 与退出码用例）、`tools/test_auto_merge.py` 的 `SchemaGateTest`（13）。两处合计 590 → 673 项（`tests/` 252 + `tools/` 421）。新增行为都先写过会失败的用例：`wait_audit` 的十条一次跑红，schema 闸门的十三条在改前的 `auto_merge.py` 上全部报错。
+- 技能的比对口径（判据 v2）：把工作区那份里的 `/d/AI工作区` 与 `D:/AI工作区` 同样替换成 `{{WORKSPACE}}` 之后，四个 `SKILL.md` 的 `sha256` 与套件逐条相同（`/d/AI工作区` 那种形态也一起替换，所以四份都是 SAME）。未替换时 `ticket-dispatch/SKILL.md` 只差第 23 行那一处路径，其余三份本来就逐字节相同。`skills/workspace/skill-routing/scripts/check_routing.py` 在本机退出 1，报的三条都是本机 `~/.agents/skills` 里后装、本单未处置的 skill（`cangjie-skill` / `impeccable` / `reverse-engineer-anything`）——同一个脚本在 `D:/AI工作区` 上退出码与报错完全相同。分得清的判据是「输出里不出现 `missing-skill` / `unknown-skill` / `missing-owner` / `unknown-node` / N0x 缺号」：实测 0 条。
+
 ## 未发布（AWK-101：引擎同步到 schema 13）
 
 把 `kit/task_center` 与 `kit/tools` 同步到工作区（`D:/AI工作区`）当前状态。本单只同步引擎，不改业务判断规则：两边不一致时一律改套件去就工作区的判据，一处也没有反过来改工作区。
