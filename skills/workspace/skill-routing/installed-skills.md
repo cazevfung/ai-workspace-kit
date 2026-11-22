@@ -7,11 +7,11 @@
 
 | 来源 | 路径 | 数量 |
 | --- | --- | --- |
-| 本仓库 | `.agents/skills/` | 4 |
-| 本机通用 | `~/.agents/skills/` | 33 |
+| 本仓库 | `.agents/skills/` | 7 |
+| 本机通用 | `~/.agents/skills/` | 35 |
 | Cindy 托管 | 会话提示里列出的 `cindy-managed-skills`（路径随会话变化，名字固化为清单） | 5 |
 
-合计 42 个已装 skill。处置表另有 1 行是入口自身（`skill-routing`），因为脚本把入口也当成已装 skill，不处置会报 `undispositioned-skill`——所以处置表一共 43 行。托管清单的 5 个名字写在 `scripts/installed-manifest.txt`，脚本会把它们和磁盘上扫到的名字合并，所以运行目录消失后校验仍然有效。
+合计 47 个已装 skill。处置表另有 1 行是入口自身（`skill-routing`），因为脚本把入口也当成已装 skill，不处置会报 `undispositioned-skill`——所以处置表一共 48 行。托管清单的 5 个名字写在 `scripts/installed-manifest.txt`，脚本会把它们和磁盘上扫到的名字合并，所以运行目录消失后校验仍然有效。
 
 ## 处置表
 
@@ -21,6 +21,8 @@
 | plan-gate | 本仓库 | 接入 | N08 N10 | 规划闸门：该读的先读、该调的 skill 真调、计划过 `doc_gate` |
 | pdsa-workflow | 本仓库 | 接入 | N21 | 偏差归类与暂停/返工的判断依据 |
 | ticket-dispatch | 本仓库 | 接入 | N11 N13 N17 N18 | 领取、绑定、提交、验收的调用顺序与报错码 |
+| bootstrap-workspace | 本仓库 | 明确不接 | 安装面：套件装完之后的开工回执与「宿主里项目真的打开了吗」的反查 | 只在安装与开机那一步用，不参与工单归属、派发与验收的判断 |
+| shared-resource-identity | 本仓库 | 接入 | N30 | 共用可变资源的身份与占用：四类资源的身份读法、采集前后各一次、变了的作废判定、占用登记与归还清单 |
 | project-routing | 本机通用 | 接入 | N01 | 项目归属与「该不该问人」 |
 | handoff-to-workspace | 本机通用 | 接入 | N01 | 用户点名「找 AI 工作区」「交给工作区」时的直接入口：只管「要不要交给工作区」，`project-routing` 管「这次属于哪个项目」 |
 | planning-and-task-breakdown | 本机通用 | 接入 | N08 | 任务依赖与顺序 |
@@ -28,6 +30,7 @@
 | brainstorming | 本机通用 | 接入 | N09 | 目标不清、多方案难选时先问再落笔 |
 | test-driven-development | 本机通用 | 接入 | N14 | 先红后绿的实现顺序 |
 | executing-plans | 本机通用 | 接入 | N14 | 按计划实施时的执行步序 |
+| ui-design | 本机通用 | 接入 | N14 | UI 的视觉、动效、图标与交付前自检的唯一出处 |
 | systematic-debugging | 本机通用 | 接入 | N15 | 红的、行为不对时的排查顺序（原先装了没接） |
 | verification-before-completion | 本机通用 | 接入 | N16 | 说「做完了」之前的取证要求 |
 | code-review-and-quality | 本机通用 | 接入 | N19 | 多轴审查的维度划分 |
@@ -57,10 +60,10 @@
 | reverse-everything | 本机通用 | 明确不接 | 第三方工程面：无源码软件/游戏的逆向与解包 | 与本工作区工单流程无关 |
 | taptap-suite | 本机通用 | 明确不接 | TapTap 业务平台面：开发者后台资料、包体、审核、社区管理 | 平台业务，不是本工作区节点 |
 | xdoa-skill | 本机通用 | 明确不接 | 公司事务面：OA、VPN、账号、会议室、审批流 | 公司行政事务 |
-| cindy-plugin-creator | Cindy 托管 | 明确不接 | 工具环境面：Cindy 插件（ghost）的开发与发布 | 插件不是 skill，本工作区 29 节点无对应 |
+| cindy-plugin-creator | Cindy 托管 | 明确不接 | 工具环境面：Cindy 插件（ghost）的开发与发布 | 插件不是 skill，本工作区 30 节点无对应 |
 | cindy-theme-creator | Cindy 托管 | 明确不接 | 工具环境面：Cindy 主题包与外观 | 纯外观配置 |
 | pr | Cindy 托管 | 明确不接 | 代码托管面：GitHub PR 从分支到合并的流程 | 本工作区不做 push 与 PR，合并走 N22 |
-| skill-routing | 本仓库 | 接入 | N01 N02 N03 N04 N05 N06 N07 N08 N09 N10 N11 N12 N13 N14 N15 N16 N17 N18 N19 N20 N21 N22 N23 N24 N25 N26 N27 N28 N29 | 入口本身：所有节点的归口都要先经它查出来；它不替代任何节点的 skill |
+| skill-routing | 本仓库 | 接入 | N01 N02 N03 N04 N05 N06 N07 N08 N09 N10 N11 N12 N13 N14 N15 N16 N17 N18 N19 N20 N21 N22 N23 N24 N25 N26 N27 N28 N29 N30 | 入口本身：所有节点的归口都要先经它查出来；它不替代任何节点的 skill |
 
 ## 维护规则
 

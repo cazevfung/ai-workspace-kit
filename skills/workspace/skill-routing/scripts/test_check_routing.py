@@ -57,7 +57,7 @@ class CheckerCase(unittest.TestCase):
     def test_real_tree_passes(self) -> None:
         code, payload, output = self.run_check()
         self.assertEqual(code, 0, output)
-        self.assertEqual(payload["node_count"], 29, output)
+        self.assertEqual(payload["node_count"], 30, output)
         self.assertEqual(payload["problems"], [], output)
 
     # —— 第一类：skill 名不存在 ——————————————————————————————

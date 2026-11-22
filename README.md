@@ -127,6 +127,9 @@ graph LR
 | `ref_gate.py` | 引用指向不存在的文件、行号或标题 | 文档之间互相引用时 |
 | `run_tests.py` | 改完之后测试不全绿 | 提交前、合并前 |
 | `auto_merge.py` | 手工合并、跳过测试直接合并、有冲突时强行合并 | 合并时 |
+| `wait_audit.py` | 谁在等谁而没人知道：等在验收超 4 小时、**提交后 15 分钟还没有 `sent` 回执**、`done` 没回执、`done` 没合并、`running` 的单执行会话 10 分钟没活动 | 派完活之后的一次只读巡检 |
+| `idle_watch.py` | 主任务里「我在等你一句话」而你不知道：末条是问句或提问卡、之后没人说话 | 想知道哪条会话悬着的时候 |
+| `project_doctor.py` | 项目登记了、钩子却没装：`core.hooksPath` 不指向本仓库 `.githooks`、`.worktrees/` 没被忽略、根上没有 `AGENTS.md` | 接一个新项目之后 |
 
 `auto_merge.py` 还有一条容易忽略的规矩：合并提交是「没有工单也能提交」的唯一例外，因为合并发生在验收之后，那一刻工单已经是 `done`。其它提交一字不放。
 
@@ -233,14 +236,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的第 2 步就是「项目配置」——缺 `.agents/ticket-config.json`、缺 `test_cmd` 或 `target_branch`，它就停在那一步并指向 `add_project.py`，不会回落到任何默认测试命令。不配等于没有测试，而「没跑测试」绝不能长得像「跑过了」。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 590 项。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 672 项。
 
 #### 与工作区（`D:/AI工作区`）的已知差异
 
-引擎已经同步到工作区当前的状态（中心库 schema 13）：迁移 9–13、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version` 都跟工作区一致，`python kit/tools/auto_merge.py --list --db <共享库>` 读同一个库不再报 `SCHEMA_MISMATCH`。下面六条是**刻意留着的不一致**：
+引擎已经同步到工作区当前的状态（中心库 schema 13）：迁移 9–13、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version` 都跟工作区一致，`python kit/tools/auto_merge.py --list --db <共享库>` 读同一个库不再报 `SCHEMA_MISMATCH`。下面六条是**刻意留着的不一致**（其中前两条随 R-002 收敛了：PRD 正文与 `auto_merge` 的 schema 闸门现在都在套件里）：
 
-1. **PRD 正文没有同步。** 包里只有 `kit/PRD/PRD-001-工作区使用与工单体系.md`；`PRD-005` / `PRD-009` / `PRD-013` / `PRD-014` / `PRD-015` 的正文与技能文本仍在工作区。引擎注释里出现的这些编号指的就是那几份文档，套件里没有正文，只作溯源。
-2. **`auto_merge.py` 保留套件这一版。** 它读项目配置、缺配置就拒；工作区那份多一道「写记录前把共享库 `migrate` 到新版本」的 schema 闸门，套件**不做**这件事——套件的合并不改任何库的 schema，库版本落后时照旧报 `SCHEMA_MISMATCH`，由人决定什么时候迁移。
+1. **PRD 正文只同步了一部分。** 包里现在有 `kit/PRD/PRD-001-工作区使用与工单体系.md` 与 `PRD-010`~`PRD-015` 六份正文（路径与示例已改成套件视角，`grep -rl "D:/AI工作区" kit/PRD/` 为空）。`PRD-002`~`PRD-009` 是这套工具自己的设计史，正文在 `design/PRD/` 下，不进 `kit/PRD/`；引擎注释里出现这些编号时指的是那一份。与工作区仍有一处差别：`PRD-015` 里两条复算命令原来指向工作区的历史轮次表与收尾包，套件不带这些文件，所以那两处写成了「原工作区的第 N 行」而不是可点的 `文件:行号`——否则 `ref_gate` 会把它们当成断链。
+2. **`auto_merge.py` 保留套件这一版，但 schema 闸门已经补齐。** 它读项目配置、缺配置就拒；写记录前那道闸门现在也在：代码要求更高就先做文件层快照、用合并后的代码 `migrate`、再把进程里那份 `task_center` 重载，失败就停在第 7 步并报 `SCHEMA_MIGRATE_FAILED`。与工作区唯一的差别是**它认两个位置**——`task_center/db.py` 与 `kit/task_center/db.py` 都算，因为套件的引擎住在 `kit/` 下，只按仓库根找会让闸门在这个仓库上永远静默跳过（AWK-101 就是这样把 schema 从 9 推到 13 而闸门没响）。
 3. **占位符没有被换成固定路径。** `work_gate.py` / `close_gate.py` / `run_tests.py` / `intake_gate.py` 里的用法写的是 `{{WORKSPACE}}`，装的时候才替换成真实路径。
 4. **`doc_gate.py` 多认两处源码树里的技能路径**（`skills/workspace`、`skills/generic`），所以在没装过的源码仓库里直接跑测试也是绿的。
 5. **夹具已脱敏**：真实会话 id 换成 `<session-id>`，个人目录换成 `X:/示例项目`。

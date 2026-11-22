@@ -1,4 +1,4 @@
-# 29 节点总表（N01–N29）
+# 30 节点总表（N01–N30）
 
 每个节点是**一次判断**，不是一个步骤。判断发生时才需要它，所以表按「你正在判断什么」组织，不按流程顺序。
 
@@ -6,7 +6,7 @@
 
 | 列 | 含义 | 机器校验 |
 | --- | --- | --- |
-| 编号 | `N01`–`N29`，连续、唯一 | 必须齐 N01..N29，不许重号空号 |
+| 编号 | `N01`–`N30`，连续、唯一 | 必须齐 N01..N30，不许重号空号 |
 | 节点 | 要判断的问题 | —— |
 | 归口 | 读哪个 skill，或执行哪条确定性动作 | 必须非空；`skill:` 前缀的名字必须能在 `.agents/skills/`、`~/.agents/skills/` 或 cindy-managed 清单里找到 `SKILL.md` |
 | 状态 | 已接 / 半接 / 无 skill | —— |
@@ -31,7 +31,7 @@
 | N11 | 领取工单并选派发载体 | `skill:ticket-dispatch` | 已接 | 没有新建项目会话能力时才降级为一次性子任务，并在 `evidence` 里写明「载体是一次性子任务，无法追问」；两者都没有就停下问人 |
 | N12 | 会话标识取证与 `list_sessions` 反查 | `action:规则：自己的 session_id 只从宿主取（get_current_session_id 或创建回执），两个 id 都要在 list_sessions 里查到才允许绑定或提交` | 无 skill | 查不到、标题或工作目录对不上，一律当标识不可信，先修来源；禁止从临时目录名或任何路径拼一个字符串顶上 |
 | N13 | 绑定前核对目录与回执 | `skill:ticket-dispatch` | 已接 | 回执里的 `project_root` 与本次实际目录不一致就不绑，先发消息问派发方 |
-| N14 | 写实现代码（先红后绿） | `skill:test-driven-development` | 已接 | 先写会失败的用例并真跑一次记下输出，再写实现；`executing-plans` 读不到时按同一顺序手工做，不许先写实现后补测试 |
+| N14 | 写实现代码（先红后绿） | `skill:test-driven-development + skill:ui-design` | 已接 | 先写会失败的用例并真跑一次记下输出，再写实现；`executing-plans` 读不到时按同一顺序手工做，不许先写实现后补测试 |
 | N15 | 调试、测试红了、行为不对 | `skill:systematic-debugging` | 已接 | 复现→读全栈与输入→缩小到最小失败单元；连复现都做不到时，先补一条能复现的用例，再谈修 |
 | N16 | 提交前自检 | `skill:verification-before-completion` | 已接 | 每条验收条件跑一次并复制真实输出；跑不了的条件在 `evidence` 里写明跑不了的原因，不许写「已验证」 |
 | N17 | `submit_result` 的 artifacts / evidence 写法与 `STALE_PRD` | `skill:ticket-dispatch` | 半接 | `artifacts` 只写相对 `{{WORKSPACE}}` 的路径；报 `STALE_PRD` 时先 `revise_ticket` 重取摘要再提交，不许改标题绕过 |
@@ -46,7 +46,8 @@
 | N26 | 文档与回复的语言质量 | `skill:shuo-ren-hua` | 已接 | 写完读出声：读起来像标签堆叠、省主语、倒装的，改回完整句子再交 |
 | N27 | 多任务并行与长任务断点续接 | `skill:subagent-driven-development` | 已接 | 并行前先确认各任务无共享文件；有共享状态就串行。长任务按 `skill:resumable-implementation-contracts` 落稳定任务 ID 与续跑点，`skill:dispatching-parallel-agents` 管分派 |
 | N28 | 开工前隔离工作区 | `skill:using-git-worktrees` | 已接 | 同一工作树已有别的活跃尝试时，先建 worktree 再动手；建不出来就停下告诉人，不许在共享工作树上并写 |
-| N29 | 我要把一条消息送进一个正在跑的会话：现在投还是插进这一轮，发完怎么确认打中了原目标 | `action:先 list_session_queue 看目标在不在跑；在跑且这条消息要改的是它当前这一轮的产出，就 steer_session 直接注入（或先 send_to_session 拿到 queued_message_id 再 steer_session_queued_message），否则 send_to_session 并带 target_session_id；发完读回执的 wake_kind：created 就是发错了目标，其余任何非空取值（queued / resumed / already-active 等）都算打中 | 无 skill | 目标不在跑、或 steer 回执是 delivery=queued（这一轮已收尾，插不进去）时，按 `docs/decisions.md` 的「消息通道三档」四条判据重新判断该走哪一档，改投递并明确告诉人这一轮的产出已经按旧指令做完；回执出现 `wake_kind=created` 时先停掉新建的那条任务，再带 `target_session_id` 重发 |
+| N29 | 我要把一条消息送进一个正在跑的会话：发之前该不该发、发什么，还是改成插进这一轮，发完怎么确认打中了原目标 | `action:发之前先 list_session_queue 看目标队列（或用 list_sessions 的 queuedCount）：queued_count 大于 0 就不再叠加，改走 update_session_queued_message 原地改写（同一事项、consuming=false、自己投递三条同时成立时就是合并成一条，覆盖式改写不拼正文）或 cancel_session_queued_message 撤掉已经过时的那条（只撤自己投递的）、或 steer_session_queued_message 提进当前轮，或等它消费完；队列空时才 send_to_session 并带 target_session_id，正文只写指向 get_ticket 当前状态的指令，不写 attempt_id / commit sha / 分支 head / revision / 行号；在跑且这条要改的是它当前这一轮的产出，就 steer_session 直接注入（或先 send_to_session 拿到 queued_message_id 再 steer_session_queued_message）；发完读回执的 wake_kind：created 就是发错了目标，其余任何非空取值（queued / resumed / already-active 等）都算打中` | 无 skill | 目标不在跑、或 steer 回执是 delivery=queued（这一轮已收尾，插不进去）时，按 `PRD/PRD-005-决策通道.md` §8.2 的四条判据重新判断该走哪一档，改投递并明确告诉人这一轮的产出已经按旧指令做完；回执是 MESSAGE_CONSUMING 说明那条正在投递、等它投完再改，回执是 QUEUED_MESSAGE_NOT_FOUND 不能当撤回成功、重查一次队列；回执出现 `wake_kind=created` 时先停掉新建的那条任务，再带 `target_session_id` 重发 |
+| N30 | 共用可变资源的身份：在真机、部署环境、共享数据库、共享目录上取证之前该先读什么，读完发现不是自己那一份怎么办，用完怎么还回去 | `skill:shared-resource-identity` | 已接 | 读不出身份就写「本次身份未取到」并把该条证据标未验证，不许用「应该是那台」补位；采集前后两次读到的不一样就是身份变过，那条作废重采、留在记录里不删；设备上是别人的包先停手，重装会毁掉别人手工做的登录态时先 `ask_ticket` 落库问人，不许直接 `uninstall` |
 
 ## 与本表配套的文件
 

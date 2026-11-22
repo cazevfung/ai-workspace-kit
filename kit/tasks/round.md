@@ -12,6 +12,8 @@
 
 5. **引擎同步**：把 `kit/task_center` 与 `kit/tools` 同步到工作区当前状态（schema 13、迁移 9–12、`planned` 与发号、依赖边、车次、冲突预演、回执与问答），让套件自带的 `auto_merge` 能读同一个共享库并完成一次真实合并。
 
+6. **文档与工具剩余增量**：`PRD-010`~`PRD-015` 正文、技能文本、`idle_watch.py` 与 `project_doctor.py` 同步进套件；同时补两处实测出来的盲点——`wait_audit` 要报「`awaiting_review` 但 15 分钟没有回执」，`auto_merge` 的 schema 闸门要认得 `kit/task_center/db.py`。
+
 ## 结束条件
 
 - `python kit/tools/auto_merge.py --list` 退出码 0，读的是同一个共享库（当前库是 schema 13）。
