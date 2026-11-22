@@ -16,7 +16,7 @@
   "tools": [
     {
       "name": "bootstrap",
-      "description": "返回「把工作区加成项目 → 开协调会话 → 反查会话」的调用计划，不执行任何宿主写操作。步骤与工作区 <workspace>/onboard.py --json 的 bootstrap 计划一致：list_projects → create_project → send_to_session → list_sessions。失败路径：list_projects 读不到清单就停下、不要猜路径；create_project 目录不存在或同名冲突时先修目录或复用 project_path，不要重复登记；send_to_session 返回 NOT_FOUND / ARCHIVED / DELETED 时先 list_sessions 查状态，不要重复新建；list_sessions 找不到 title 与 workingDir 匹配项即会话没建出来，不要报告已开工。",
+      "description": "返回「把工作区加成项目 → 开协调会话 → 反查会话 → 本地写开工回执」的调用计划，不执行任何宿主写操作。步骤与工作区 <workspace>/onboard.py --json 的 bootstrap 计划一致：list_projects → create_project → send_to_session → list_sessions → write_receipt；最后一步 write_receipt 标 local，由会话自己写 <workspace>/.data/onboard-receipt.json，不在 cindy_helper 工具清单里。失败路径：list_projects 读不到清单就停下、不要猜路径；create_project 目录不存在或同名冲突时先修目录或复用 project_path，不要重复登记；send_to_session 返回 NOT_FOUND / ARCHIVED / DELETED 时先 list_sessions 查状态，不要重复新建；list_sessions 找不到 title 与 workingDir 匹配项即会话没建出来，不要报告已开工；write_receipt 没有反查到 target_session_id 时不要拿猜的 id 凑回执，写不进去就停下说明。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -33,7 +33,9 @@
             "description": "可选的协调会话标题；不传用「AI 工作区 · 协调会话」。"
           }
         },
-        "required": ["workspace"],
+        "required": [
+          "workspace"
+        ],
         "additionalProperties": false
       }
     },
@@ -65,7 +67,13 @@
             "description": "协调会话自己的 session id，用 get_current_session_id 取；不能是执行会话的 id。"
           }
         },
-        "required": ["workspace", "project_id", "ticket_id", "expected_revision", "coordinator_session_id"],
+        "required": [
+          "workspace",
+          "project_id",
+          "ticket_id",
+          "expected_revision",
+          "coordinator_session_id"
+        ],
         "additionalProperties": false
       }
     }

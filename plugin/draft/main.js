@@ -2,6 +2,8 @@
 //
 // 只做一件事：把工作区自己的启动/派发计划原样交给当前 Agent。插件不创建项目、
 // 不开会话、不写磁盘——那些是宿主操作，要在会话里逐条调、失败要看得见。
+// bootstrap 计划最后一步 `write_receipt` 标 `local`：回执由会话自己在本地写，
+// 插件同样不写；它只是把「写什么、写在哪」一并交出去，免得两条入口给出不同计划。
 // 计划与 `<工作区>/onboard.py --json` 同源；tools/test_plugin_plan.py 会比对两边
 // 的步骤名、顺序与失败停点，改了一边忘了另一边会当场红。
 
@@ -47,6 +49,20 @@ const PLANS = {
           "order": "desc"
         },
         "check": "看返回里有没有 title 与 workingDir 都对得上的那一条；对不上就是没建出来。"
+      },
+      {
+        "order": 5,
+        "tool": "write_receipt",
+        "server": "local",
+        "kind": "local",
+        "call_via": "会话自己在本地写文件（不经宿主）",
+        "args": {
+          "path": "{{WORKSPACE}}/.data/onboard-receipt.json",
+          "target_session_id": "<第 3 步回执里的 target_session_id>",
+          "working_dir": "{{WORKSPACE}}",
+          "fields": ["project_path", "target_session_id", "working_dir", "created_at"]
+        },
+        "check": "写完读一遍：四个字段都在、路径是绝对路径、target_session_id 与第 3 步回执一字不差；核对不上不算写过。回执只是声称，证明不了宿主里项目真的开着。"
       }
     ]
   },
@@ -109,7 +125,8 @@ const FAILURES = {
     "list_projects": "读不到项目清单就停下：不要凭名字猜路径，也不要为了继续而新建一个项目。",
     "create_project": "目录不存在或不是目录 → 先建目录；同名项目已存在 → 复用它的 project_path，不要重复登记；返回 SOURCE_OUTSIDE_WORKDIR / 权限被拒 → 把工作区放到会话可写的目录再试。",
     "send_to_session": "返回 NOT_FOUND / ARCHIVED / DELETED → 不要重复新建项目；先 list_sessions 查实际状态。返回 PROJECT_NOT_FOUND → 回到 create_project 的 project_path，不要传显示名。",
-    "list_sessions": "列表里找不到 title 与 workdir 同时匹配的会话 → 会话没建出来，不要说已经开工；重发一次 send_to_session，仍失败就停下问人。"
+    "list_sessions": "列表里找不到 title 与 workdir 同时匹配的会话 → 会话没建出来，不要说已经开工；重发一次 send_to_session，仍失败就停下问人。",
+    "write_receipt": "没有反查到的 target_session_id → 不要拿猜的 id 凑一份回执；写不进去（目录只读、.data 建不出来）→ 停下说明，不要说已经开工。回执只是一份声称，它成立与否由 verify/verify_receipt.py 事后核。"
   },
   "dispatch_ticket": {
     "get_ticket": "工单不是 ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
@@ -177,7 +194,7 @@ cindy.onHostMessage(function (msg) {
         call_via: CALL_VIA,
         envelope: { server: "cindy_helper", tool: "call_tool", args: { name: "<step.tool>", args: "<step.args>" } },
         failure_paths: FAILURES.bootstrap,
-        note: "只返回计划，不执行任何宿主写操作。照 steps 逐条调 cindy_helper.call_tool；失败按 failure_paths 停下。"
+        note: "只返回计划，不执行任何宿主写操作。照 steps 逐条调 cindy_helper.call_tool；最后一步 write_receipt 是 local 步，由会话自己写 .data/onboard-receipt.json，不经宿主。失败按 failure_paths 停下。"
       }
     });
     return;

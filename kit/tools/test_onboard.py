@@ -37,11 +37,28 @@ class PlanShapeTest(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.workspace, ignore_errors=True))
         self.plans = onboard.build_plans(self.workspace, project_name="演示项目")
 
-    def test_bootstrap_has_the_three_phases(self):
+    def test_bootstrap_has_the_four_host_phases_plus_the_local_receipt(self):
         steps = self.plans["bootstrap"]["steps"]
-        self.assertEqual(["list_projects", "create_project", "send_to_session", "list_sessions"],
+        self.assertEqual(["list_projects", "create_project", "send_to_session", "list_sessions", "write_receipt"],
                          [step["tool"] for step in steps])
-        self.assertEqual([1, 2, 3, 4], [step["order"] for step in steps])
+        self.assertEqual([1, 2, 3, 4, 5], [step["order"] for step in steps])
+
+    def test_bootstrap_plan_has_local_receipt_step(self):
+        """C2 的锚：回执是第 5 步，标成 local，路径落在 <workspace>/.data 下。"""
+        steps = self.plans["bootstrap"]["steps"]
+        self.assertEqual(5, len(steps))
+        receipt = steps[4]
+        self.assertEqual("write_receipt", receipt["tool"])
+        self.assertEqual("local", receipt["kind"])
+        self.assertEqual("local", receipt["server"])
+        self.assertTrue(receipt["args"]["path"].endswith("/onboard-receipt.json"), receipt["args"]["path"])
+        self.assertEqual(list(onboard.RECEIPT_FIELDS), receipt["args"]["fields"])
+        self.assertEqual(["project_path", "target_session_id", "working_dir", "created_at"],
+                         list(onboard.RECEIPT_FIELDS))
+
+    def test_the_receipt_step_is_not_declared_as_a_host_tool(self):
+        self.assertNotIn("write_receipt", onboard.CINDY_HELPER_TOOLS)
+        self.assertNotIn("write_receipt", onboard.TASK_CENTER_TOOLS)
 
     def test_create_project_and_send_to_session_have_complete_arguments(self):
         create = self.plans["bootstrap"]["steps"][1]
@@ -70,9 +87,13 @@ class PlanShapeTest(unittest.TestCase):
             for step in plan["steps"]:
                 if step["server"] == "cindy_helper":
                     self.assertIn(step["tool"], onboard.CINDY_HELPER_TOOLS)
-                else:
-                    self.assertEqual("task_center", step["server"])
+                elif step["server"] == "task_center":
                     self.assertIn(step["tool"], onboard.TASK_CENTER_TOOLS)
+                else:
+                    # 只有 local 步可以不走宿主；它必须自己标 kind，且不能蹭宿主工具名。
+                    self.assertEqual("local", step["server"])
+                    self.assertEqual("local", step.get("kind"))
+                    self.assertNotIn(step["tool"], onboard.CINDY_HELPER_TOOLS)
 
     def test_every_step_has_a_failure_stop(self):
         for name, plan in self.plans.items():
@@ -93,6 +114,17 @@ class CliTest(unittest.TestCase):
         for step in bootstrap:
             self.assertTrue(step["args"])
         self.assertIn("dispatch_ticket", payload["plans"])
+
+    def test_json_reports_five_bootstrap_steps_and_four_host_tools(self):
+        result = run_cli("--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        steps = payload["plans"]["bootstrap"]["steps"]
+        self.assertEqual(5, len(steps))
+        self.assertEqual("local", steps[4]["kind"])
+        self.assertTrue(steps[4]["args"]["path"].endswith("/onboard-receipt.json"))
+        self.assertEqual(["list_projects", "create_project", "send_to_session", "list_sessions"],
+                         payload["cindy_helper_tools"])
 
     def test_dry_run_has_no_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:

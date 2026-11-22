@@ -280,17 +280,21 @@ ai-workspace/
 
 完整分析见 [`docs/SHARING.md`](docs/SHARING.md)。一句话：这套系统的价值有一半在文件系统上（工作树、提交钩子、本地库），插件与技能都碰不到那一半，仓库是唯一能装全的载体。
 
-### 插件：装、启动、它会报出四步计划
+### 插件：装、启动、它会报出五步计划
 
 仓库里的 `dist/ai-workspace-kit-0.4.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
 
 1. **装** —— 在 Cindy 侧边栏「插件」里导入本地包，选中这个文件，确认。**这一步必须由人点**：导入会把插件写进用户目录并启用，Agent 不代点，也不在你没看权限清单时替你确认。装上是本地开发副本，不经过市场审核。
 2. **启动** —— 在任意会话里敲 `$ai-workspace <你的工作区绝对路径>`，或者说「把这条路径加成项目、开一个协调会话」。它会调 `bootstrap`。
-3. **它报出四步计划**（只给参数，不替你执行）：
+3. **它报出五步计划**（只给参数，不替你执行）：
    - `list_projects`：先看清单里有没有这个目录。读不到就停，不要猜路径。
    - `create_project`：回执的 `project_path` 必须等于你给的那条路径。
    - `send_to_session`：不传 `target_session_id` 才是新建任务；回执要带回 `target_session_id` 与 `working_dir`。返回 `NOT_FOUND` / `ARCHIVED` / `DELETED` 就停下修会话。
    - `list_sessions`：按工作目录反查，`title` 与 `workingDir` 都对得上才算开出来了；对不上就是没建成。
+   - `write_receipt`：末步标 `local`，不是宿主工具：会话自己写 `<工作区>/.data/onboard-receipt.json`
+     （`project_path` / `target_session_id` / `working_dir` / `created_at` 四个字段），
+     再用 `python verify/verify_receipt.py --workspace <工作区>` 核形状。回执是声称，
+     不证明宿主里项目真开着。
 
 `dispatch_ticket` 是同一个形状，换成 `get_ticket → claim_ticket → send_to_session → list_sessions`，`DISPATCH_BUSY` / `SELF_DISPATCH` / `STALE_ATTEMPT` 各自的停点也写在返回值里。
 
