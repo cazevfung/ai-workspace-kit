@@ -14,8 +14,10 @@
 
 两条计划同源：
 
-- `bootstrap`：list_projects → create_project → send_to_session → list_sessions，
-  对应「装完 → 把工作区加成项目 → 开协调会话 → 发第一条指令 → 反查会话」。
+- `bootstrap`：list_projects → create_project → send_to_session → list_sessions →
+  write_receipt（`local` 步），对应「装完 → 把工作区加成项目 → 开协调会话 → 发第一条
+  指令 → 反查会话 → 本地写回执」。最后一步不是宿主工具：它由本地写文件完成，
+  写 `<workspace>/.data/onboard-receipt.json`，四个字段见 `RECEIPT_FIELDS`。
 - `dispatch_ticket`：get_ticket → claim_ticket → send_to_session → list_sessions，
   派发一张工单时用；其中 send_to_session / list_sessions 与 bootstrap 同一份参数。
 
@@ -43,6 +45,11 @@ HERE = Path(__file__).resolve().parent
 # 才发现某个名字在宿主里不存在。
 CINDY_HELPER_TOOLS = ("list_projects", "create_project", "send_to_session", "list_sessions")
 TASK_CENTER_TOOLS = ("get_ticket", "claim_ticket")
+# `local` 步：不经过宿主，由会话在本地写文件。它故意不在上面两张清单里——
+# 混进去就等于声称宿主有这个工具。
+LOCAL_STEP_KIND = "local"
+RECEIPT_RELATIVE = ".data/onboard-receipt.json"
+RECEIPT_FIELDS = ("project_path", "target_session_id", "working_dir", "created_at")
 
 FIRST_INSTRUCTION = (
     "你是这个 AI 工作区的协调会话。先读 AGENTS.md，再跑 `python tools/work_gate.py --list` "
@@ -60,6 +67,9 @@ FAILURES = {
                            "返回 PROJECT_NOT_FOUND → 回到 create_project 的 project_path，不要传显示名。",
         "list_sessions": "列表里找不到 title 与 workdir 同时匹配的会话 → 会话没建出来，不要说已经开工；"
                          "重发一次 send_to_session，仍失败就停下问人。",
+        "write_receipt": "没有反查到的 target_session_id → 不要拿猜的 id 凑一份回执；写不进去（目录只读、"
+                         ".data 建不出来）→ 停下说明，不要说已经开工。回执只是一份声称，"
+                         "它成立与否由 verify/verify_receipt.py 事后核。",
     },
     "dispatch_ticket": {
         "get_ticket": "工单不是 ready / rework → 不要重复领取；先看 state 说明它停在哪一步。",
@@ -111,6 +121,25 @@ def _list_sessions_step(order: int, workspace: str) -> dict:
     }
 
 
+def _receipt_step(order: int, workspace: str) -> dict:
+    """本地写回执：不在 cindy_helper 清单里，也不要冒充宿主工具。"""
+    return {
+        "order": order,
+        "tool": "write_receipt",
+        "server": "local",
+        "kind": LOCAL_STEP_KIND,
+        "call_via": "会话自己在本地写文件（不经宿主）",
+        "args": {
+            "path": (Path(workspace) / RECEIPT_RELATIVE).as_posix(),
+            "target_session_id": "<第 3 步回执里的 target_session_id>",
+            "working_dir": workspace,
+            "fields": list(RECEIPT_FIELDS),
+        },
+        "check": "写完读一遍：四个字段都在、路径是绝对路径、target_session_id 与第 3 步回执一字不差；"
+                 "核对不上不算写过。回执只是声称，证明不了宿主里项目真的开着。",
+    }
+
+
 def build_plans(workspace: str, *, project_name: str | None = None,
                 title: str = "AI 工作区 · 协调会话",
                 agent_kind: str | None = None, model: str | None = None,
@@ -140,6 +169,7 @@ def build_plans(workspace: str, *, project_name: str | None = None,
             },
             _send_step(3, workspace, title, FIRST_INSTRUCTION, agent_kind, model),
             _list_sessions_step(4, workspace),
+            _receipt_step(5, workspace),
         ],
     }
     dispatch = {

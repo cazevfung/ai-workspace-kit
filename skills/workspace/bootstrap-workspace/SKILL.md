@@ -18,10 +18,11 @@ python onboard.py --json            # 两条计划：bootstrap 与 dispatch_tick
 python onboard.py --dry-run         # 人读版预演，零副作用
 ```
 
-`bootstrap` 是四步：`list_projects → create_project → send_to_session → list_sessions`；
+`bootstrap` 是五步：`list_projects → create_project → send_to_session → list_sessions → write_receipt`；
 `dispatch_ticket` 是四步：`get_ticket → claim_ticket → send_to_session → list_sessions`。
-后者复用同一份 `send_to_session` 参数。计划里的工具名必须都在 `cindy_helper` 清单里，
-出现清单外的名字说明版本对不上，停下来核对，不要硬调。
+后者复用同一份 `send_to_session` 参数。前四步的工具名必须都在 `cindy_helper` 清单里，
+出现清单外的名字说明版本对不上，停下来核对，不要硬调；`write_receipt` 是 `local` 步，
+不进 `cindy_helper` 清单（见第四节）。
 
 ## 二、调用形状
 
@@ -74,6 +75,12 @@ python onboard.py --dry-run         # 人读版预演，零副作用
 看返回里有没有 `title` 与 `workingDir` 都对得上的那一条。对不上就是会话没建出来：
 不要说已经开工，重发一次 `send_to_session`；仍失败就停下问人。
 
+### 5. write_receipt（本地写回执）
+
+这一步**不是宿主工具**：没有 `cindy_helper` 里的对应工具，也不许自己给它编一个名字。
+它由会话在本地写一个文件，内容与位置见第四节。前三步的回执没有反查到
+`target_session_id` 之前不要写——拿猜的 id 写出来的回执比没有更坏，因为它看起来像证据。
+
 ## 三、派发一张工单
 
 协调会话先 `claim_ticket`（`coordinator_session_id` 用自己的，从
@@ -87,6 +94,37 @@ python onboard.py --dry-run         # 人读版预演，零副作用
 执行会话自己 `bind_session`。协调会话**不要**替它绑定，也不要拿同一个 session_id
 既 claim 又 bind——那会撞 `SELF_DISPATCH`。
 
+## 四、写回执（第 5 步）：写什么、写在哪、缺了怎么办
+
+前四步跑完、`list_sessions` 也认下了那条会话，才写回执。回执是一个 UTF-8 JSON 文件：
+
+- 位置：`<workspace>/.data/onboard-receipt.json`（工作区根下的 `.data`，不是 home）；
+- 四个字段，一个都不能少：
+
+| 字段 | 写什么 | 不合格的样子 |
+| --- | --- | --- |
+| `project_path` | `create_project` 回执里的项目路径，绝对路径 | 写成 `./ws`、`ws` 这类相对路径 |
+| `target_session_id` | `send_to_session` 回执里的会话标识，一字不差 | 空字符串、空格、自己编一个 |
+| `working_dir` | 那个会话的工作目录，绝对路径 | 只写目录名 |
+| `created_at` | 写入时刻，ISO 8601 | 空着 |
+
+写完要能自己核一遍。校验器在**套件仓库**的 `verify/` 下（`install.py` 只装 `kit/`，装出来的
+工作区里没有这一层），所以在克隆下来的套件仓库根跑：
+
+```bash
+python verify/verify_receipt.py --workspace <工作区绝对路径>
+```
+
+手上只有装好的工作区、没有仓库时，就照上表四个字段自己逐条比：缺字段、路径不是绝对路径、
+`target_session_id` 为空，三条有一条不成立就不算写过。
+
+缺文件时它打印 `receipt missing` 并非零退出；路径不是绝对路径、`target_session_id` 为空
+各报各的原因，也不零退。**没有回执、或者回执没过这条命令，就不许说「已开工」**。
+
+回执只是这一侧的声称：它证明「这个会话写下了它认领的会话标识」，不证明宿主里那个会话
+真的还在。真实反查是 `list_sessions`，脚本通过时也会自己打印
+「形状通过，未验证会话存在」。要证明项目真的开着，得另做一次反查，别拿回执当那个证据。
+
 ## 失败停点
 
 | 步骤 | 现象 | 怎么处理 |
@@ -96,10 +134,13 @@ python onboard.py --dry-run         # 人读版预演，零副作用
 | `send_to_session` | `NOT_FOUND` / `ARCHIVED` / `DELETED` | 不要重复新建项目；先 `list_sessions` 查实际状态。 |
 | `send_to_session` | 回执标题不是本单 | 回执发错了地方：停掉误建任务，再带 `target_session_id` 重发。 |
 | `list_sessions` | 找不到匹配的 `title` + `workingDir` | 会话没建出来；重发一次，仍失败就停下问人。 |
+| `write_receipt` | 没有反查到的 `target_session_id` | 不要拿猜的 id 凑回执；停下说明会话没建出来。 |
+| `write_receipt` | 文件写不进去（`.data` 建不出来 / 只读） | 停下说明，不要说已开工；回执落不了盘就没有可核的东西。 |
 | `claim_ticket` | `DISPATCH_BUSY` / `SELF_DISPATCH` / `STALE_ATTEMPT` | 先做完在途单 / 换执行会话 / 重新取当前 revision。 |
 
 ## 不要做
 
 - 不用显示名猜 `project_path`，不改 `~/.agents/center.json`，不覆盖用户已有项目。
 - 不替执行会话 `bind_session`，不在没有反查的情况下报告「已开工」。
+- 不在没有回执、或没过上面那条回执检查的情况下说「已开工」。
 - 不在计划外自己拼 `cindy_helper` 工具名；清单里没有的名字一律停下核对。

@@ -13,7 +13,7 @@
 
 | 工具 | 返回什么 | 与谁同源 |
 | --- | --- | --- |
-| `bootstrap` | `list_projects → create_project → send_to_session → list_sessions` 的完整参数 | `<工作区>/onboard.py --json` 的 `bootstrap` 计划 |
+| `bootstrap` | `list_projects → create_project → send_to_session → list_sessions → write_receipt` 的完整参数（末步 `local`，由会话自己写回执） | `<工作区>/onboard.py --json` 的 `bootstrap` 计划 |
 | `dispatch_ticket` | `get_ticket → claim_ticket → send_to_session → list_sessions` 的完整参数 | `<工作区>/onboard.py --json` 的 `dispatch_ticket` 计划 |
 
 两个工具都会回传同一步骤的失败停点（读不到项目清单、目录不存在、会话 `NOT_FOUND` /
@@ -21,19 +21,21 @@
 不会自己换一套顺序。`kit/tools/test_plugin_plan.py` 会比对 `main.js` 里的 PLANS
 与 `onboard.build_plans()`，两边不一致就红。
 
-## 装插件 → 启动 → 它报出四步计划
+## 装插件 → 启动 → 它报出五步计划
 
 1. **装。** 在 Cindy 侧边栏「插件」里导入本地包，选中 `dist/ai-workspace-kit-0.4.0.cindy`，确认权限清单。
    **这一步必须由人在客户端点确认**：导入会写进用户插件目录并启用，Agent 不代点，也不该在你没看权限
    清单时替你点。装上是本地开发副本（`namespace: local`），不经过市场审核。
 2. **启动。** 在任意会话里敲 `$ai-workspace <工作区绝对路径>`，或者直接说「把这条路径加成项目、开一个
    协调会话」。命中的是 `bootstrap`。
-3. **它报出四步计划**，只给参数、不替你执行：
+3. **它报出五步计划**，只给参数、不替你执行：
    - `list_projects`：先看清单里有没有这个目录；读不到就停，不要猜路径。
    - `create_project`：回执的 `project_path` 必须等于你给的那条路径。
    - `send_to_session`：不传 `target_session_id` 才是新建任务，回执要带回 `target_session_id` 与
      `working_dir`；返回 `NOT_FOUND` / `ARCHIVED` / `DELETED` 就停下修会话。
    - `list_sessions`：按工作目录反查，`title` 与 `workingDir` 都对得上才算开出来了。
+   - `write_receipt`：末步标 `local`，不是宿主工具：会话自己写 `<工作区>/.data/onboard-receipt.json`，
+     四个字段；写完用 `python verify/verify_receipt.py --workspace <工作区>` 核一遍。插件不写这个文件。
 
 `dispatch_ticket` 同一形状，换成 `get_ticket → claim_ticket → send_to_session → list_sessions`。
 

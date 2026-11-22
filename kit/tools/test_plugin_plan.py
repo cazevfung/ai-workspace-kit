@@ -63,6 +63,19 @@ class PluginPlanTest(unittest.TestCase):
                              [(step["order"], step["tool"], step["server"]) for step in plan["steps"]])
             self.assertEqual([set(step["args"]) for step in reference],
                              [set(step["args"]) for step in plan["steps"]])
+            # 两边都要把回执步标成 local：一边标、一边不标同样是分叉。
+            self.assertEqual([step.get("kind") for step in reference],
+                             [step.get("kind") for step in plan["steps"]])
+
+    def test_the_local_receipt_step_stays_out_of_the_host_tools(self):
+        for name, plan in self.plans.items():
+            local = [step for step in plan["steps"] if step.get("kind") == "local"]
+            self.assertEqual(1 if name == "bootstrap" else 0, len(local),
+                             f"{name} 的 local 步数不对：{[step['tool'] for step in local]}")
+            for step in local:
+                self.assertEqual("write_receipt", step["tool"])
+                self.assertEqual("local", step["server"])
+                self.assertNotIn(step["tool"], onboard.CINDY_HELPER_TOOLS)
 
     def test_failure_stops_match_each_step(self):
         self.assertEqual(set(self.reference), set(self.failures))
@@ -77,8 +90,12 @@ class PluginPlanTest(unittest.TestCase):
             for step in plan["steps"]:
                 if step["server"] == "cindy_helper":
                     self.assertIn(step["tool"], onboard.CINDY_HELPER_TOOLS)
+                elif step["server"] == "task_center":
+                    self.assertIn(step["tool"], onboard.TASK_CENTER_TOOLS)
                 else:
-                    self.assertEqual("task_center", step["server"])
+                    self.assertEqual("local", step["server"])
+                    self.assertEqual("local", step.get("kind"))
+                    self.assertNotIn(step["tool"], onboard.CINDY_HELPER_TOOLS)
 
     def test_tool_descriptions_spell_out_the_same_steps(self):
         descriptions = {tool["name"]: tool["description"] for tool in self.manifest["tools"]}
