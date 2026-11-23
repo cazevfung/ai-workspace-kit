@@ -1,5 +1,21 @@
 # 更新记录
 
+## 未发布（AWK-103：引擎同步到 schema 16）
+
+把 `kit/task_center` 从 schema 13 推到工作区（`D:/AI工作区`）当前的 16：套件自带脚本读同一个中心库不再报 `SCHEMA_MISMATCH`。只同步引擎与配套文档，不改业务判断规则，也不动工作区的库与历史数据（`D:/AI工作区` 一直是只读对象）。
+
+- `kit/task_center/db.py`：`SCHEMA_VERSION` 13 → 16，补三次迁移——14（`tickets.requester_session_id`、`notices.message_id`）、15（`tickets.owner_session_id`，存量单按它当前尝试的 `coordinator_session_id` 回填，没有当前尝试的留 NULL）、16（`merges.source` / `verified_by` / `verified_at` / `note` 四列，存量行一律留 NULL，不批量填 `auto_merge`）；新增 v13/v14/v15 三份冻结形状，`merges` 与 `notices` 的旧形状单独冻结，不再从 `REQUIRED_COLUMNS` 做减法（加一级就会误拒本该放行的旧库）。
+- **`MIGRATIONS` 的键改成「这一步装配完成后的版本号」**（`MIGRATIONS[16]` = 15 → 16 那一步），与工作区按升级前版本号登记的做法差一格，取步统一走 `migration_step()`。改的理由是「这份引擎认得哪些版本」与「当前是第几版」变成同一件事：`sorted(MIGRATIONS)` 的末项就是 `SCHEMA_VERSION`。判据本身（形状、`already_applied`、拒绝文案）逐字照抄工作区，没有放宽。
+- `kit/task_center/core.py`：配套行为一并搬进来——`create_ticket` 收可选 `requester_session_id`；`get_ticket` 回 `sessions`（请求方 / 协调 / 执行 / 验收 / 回执收件人，带 `session_url`、`device`、`session_state`、`stale`，回执收件人那条带 `message_id`）；`claim_ticket` 同一句里认领 `owner_session_id`；`record_notice` 的授权改读当前 owner 并收可选 `message_id`；新增 `take_over_ticket`（接替责任人，不动 `revision` 与 origin）、`report_notice_failure`（执行会话记自己没送到的回执，操作里没有 `status`，造不出 `sent`）、`repair_backfill_command`（只改补记行 `verified_by` 的路径写法）；`merge_ticket` 收可选 `source` / `note`，补记档当场重跑 `git merge-base --is-ancestor` 才写行。
+- `kit/task_center/hostsessions.py`、`kit/task_center/sessions_context.py`：两份新文件，与工作区逐字相同（读宿主会话库只走只读连接，读不到就当空表）。
+- `kit/docs/protocol.md`：「操作与字段」那张表补到 schema 16 的命令面（删掉「本表停在 schema 9」横幅，`init` / `migrate` / `backup` 的号改成 16，新增 `take_over_ticket` / `report_notice_failure` / `repair_backfill_command` 三行，`create_ticket` / `get_ticket` / `list_tickets` / `claim_ticket` / `revise_ticket` / `record_notice` / `merge_ticket` 各按套件实际代码改准），并补上 `criteria` 的形状闸门那段。表下面的节仍是原文，缺的是 PRD-005/013/014/015 的正文。
+- `kit/PRD/PRD-014-计划队列与依赖.md`：两处 `task_center/core.py:268` 的行号引用跟着代码位移改准（`454` / `454-460`）。`core.py` 一长，闸门就报「指向第 268 行是空行」——改引用，不改闸门。
+- `README.md` / `README.en.md`：引擎状态改成 schema 16、用例数 673 → 724、「已知差异」第 6 条改成「表补到当前命令面、表以下的节仍缺 PRD 正文」。
+- 用例：新增 `tests/test_sessions_context.py`（20）、`tests/test_owner.py`（9）、`tests/test_notice_failure.py`（7），`tests/test_migrate.py` +8（含 v14 头配新形状的拒绝、v15 四列全在时补完迁移、v15 只有部分列时拒绝且一个字节不改）、`tests/test_merge.py` +7；`tests/test_notice.py` 不再写死 schema 号。`python tools/run_tests.py` 汇总 724 项（`tests/` 303、`tools/` 421）。
+- 迁移演练只在临时目录做：用本单开工前那份引擎（`git show 08c446a:kit/task_center`）建一份 schema 13 库、开两张单（一张 `ready`、一张 `planned`），再用本单的代码 `migrate` 到 16，两张单原样还在、`list_tickets` 仍回 2 条。
+- `D:/AI工作区/.data/task-center.sqlite3` 全程只读：`python kit/tools/work_gate.py --list --db <那个库>` 退出 0、不报 `SCHEMA_MISMATCH`，跑前跑后文件 `md5` 不变，也没有做快照。
+- 已知差异：`MIGRATIONS` 的键位与工作区差一格（见上），以后逐级同步时先看 `migration_step()` 的注释，别按工作区的键号直接抄。
+
 ## 未发布（AWK-102：文档与工具剩余增量）
 
 把工作区剩下的文档与工具搬进套件，并修掉两处「该报警却没报」的盲点。判据一律以工作区为准，搬过来时把本机路径换成 `{{WORKSPACE}}`，没有反过来改工作区。

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .artifacts import fingerprint, project_root
 from .db import Problem, backup_database, connection, initialize, migrate_database, now, packed, require
+from .sessions_context import message_id, sessions_for
 
 FIELDS = {
     "init": set(),
@@ -20,7 +21,7 @@ FIELDS = {
     "unregister_project": {"project_id"},
     "list_projects": set(),
     "create_ticket": {"project_id", "ticket_id", "title", "deliverable", "prd_path", "criteria", "root",
-                      "state", "blocked_by", "related", "rides_with"},
+                      "state", "blocked_by", "related", "rides_with", "requester_session_id"},
     "get_ticket": {"project_id", "ticket_id"},
     "list_tickets": {"project_id", "limit", "offset", "planned", "--planned"},
     "events": {"project_id", "ticket_id", "limit", "offset"},
@@ -33,13 +34,22 @@ FIELDS = {
     "revise_ticket": {"project_id", "ticket_id", "expected_revision", "reason", "prd_path", "criteria", "deliverable", "reopen",
                       "restart", "blocked_by", "related", "rides_with"},
     "cancel_ticket": {"project_id", "ticket_id", "expected_revision", "reason"},
-    "merge_ticket": {"project_id", "ticket_id", "commit", "target_branch", "tests", "reviewed_sha"},
+    "merge_ticket": {"project_id", "ticket_id", "commit", "target_branch", "tests", "reviewed_sha", "source", "note"},
+    # 只改补记行的 `verified_by` 路径写法（反斜杠 → 正斜杠），命令本身不许变（AW-116）。
+    "repair_backfill_command": {"project_id", "ticket_id"},
     "list_unmerged": {"project_id", "since_days"},
     "ask_ticket": {"project_id", "ticket_id", "attempt_id", "session_id", "question", "options"},
     "answer_ticket": {"project_id", "ticket_id", "question_id", "answer", "answered_by",
                       "answered_by_session_id", "prd_sha256"},
     "record_notice": {"project_id", "ticket_id", "attempt_id", "session_id", "origin_session_id",
-                      "status", "detail", "target_session_id", "wake_kind"},
+                      "status", "detail", "target_session_id", "wake_kind", "message_id"},
+    # 责任人接替（AW-114 C3）：`tickets.owner_session_id` 是「现在谁负责收尾」，
+    # 与 `attempts.coordinator_session_id`（谁派的，不可变）分开。四个字段就是全部：
+    # 接替不是新的一代，revision 不动，重复接替报 ALREADY_OWNER。
+    "take_over_ticket": {"project_id", "ticket_id", "new_owner_session_id", "reason"},
+    # 执行会话记自己那次没送到的回执（AW-114 C2）：只收 failed，没有 status 字段。
+    "report_notice_failure": {"project_id", "ticket_id", "attempt_id", "session_id",
+                              "target_session_id", "detail", "wake_kind"},
 }
 READS = {"get_ticket", "list_tickets", "list_projects", "list_unmerged", "events"}
 
@@ -409,6 +419,19 @@ def ticket_dict(row):
     return value
 
 
+def ancestry_proof(root, sha, branch):
+    r"""能原样重跑的那条核对命令。
+
+    路径统一用正斜杠：库里登记的 Windows 路径是 `d:\...`，抄进 Git Bash 时反斜杠会被
+    当转义吃掉（`d:\cindy` 变成 `d:cindy`），命令当场跑不通，而 `verified_by` 的全部价值
+    就是「照抄一遍就能复核」。正斜杠在 bash / PowerShell / cmd 三种壳里都能用。
+    """
+    shown = str(root).replace("\\", "/")
+    if " " in shown:
+        shown = f'"{shown}"'
+    return f"git -C {shown} merge-base --is-ancestor {sha} {branch}"
+
+
 class Center:
     def __init__(self, db_path):
         self.path = Path(db_path).absolute()
@@ -591,13 +614,16 @@ class Center:
         require(state in CREATABLE_STATES, "INVALID_INPUT",
                 "state must be planned or ready; 其余状态只能由状态机走出来，不能建单时写死")
         links = link_payload(data)
+        # 请求方是发起这张单的会话（PRD-015 R5）：可选，不传就留 NULL。
+        # 关键是不拿协调会话冒充：两者大多数时候不是同一条会话，写错了就是一条假事实。
+        requester = text(data, "requester_session_id", 500) if "requester_session_id" in data else None
         tid = self._next_ticket_id(conn, pid)
         self._check_link_targets(conn, tid, links)
         # 列名写全，不用位置插入：schema 每加一列，位置插入就会静默错位。
         conn.execute("INSERT INTO tickets(id,project_id,title,deliverable,prd_path,prd_sha256,criteria,"
-                     "revision,criteria_version,state,current_attempt,created_at)"
-                     " VALUES (?,?,?,?,?,NULL,?,1,1,?,NULL,?)",
-                     (tid, pid, title, deliverable, prd["path"], packed(checks), state, now()))
+                     "revision,criteria_version,state,current_attempt,created_at,requester_session_id)"
+                     " VALUES (?,?,?,?,?,NULL,?,1,1,?,NULL,?,?)",
+                     (tid, pid, title, deliverable, prd["path"], packed(checks), state, now(), requester))
         self._write_links(conn, tid, links)
         return ticket_dict(self._ticket(conn, {"project_id": pid, "ticket_id": tid}))
 
@@ -672,6 +698,9 @@ class Center:
         # 回信记录随工单挂上来：发了没、失败原因、发给谁，验收会话读 get_ticket 就能判闭环（PRD-009 AC06）。
         result["notices"] = [dict(row) for row in conn.execute(
             "SELECT * FROM notices WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
+        # 一张单牵扯到哪些会话、哪条消息：开工即看得见，不用人把 session id 抄进派发消息（PRD-015 R5）。
+        # 只答库里真有的值：空标识不产出条目，device 取不到就是 null，归档/删除标 stale。
+        result["sessions"] = sessions_for(conn, result["id"])
         # 依赖边两个方向都答得出（PRD-014 R3.2）：出边说「它卡在谁身上」，入边说「谁在等它」。
         # 每边带对方的当前状态：只看单号看不出上游已经 done 还是还在 planned。
         result["links"] = {
@@ -860,8 +889,12 @@ class Center:
                      (aid, ticket["id"], ticket["revision"], ticket["criteria_version"], prd["path"],
                       prd["sha256"], coordinator, workdir, now(), batch_id))
         # 工单行也回写这一版指纹：「这一次派发依据的是哪一版」。
-        conn.execute("UPDATE tickets SET state='dispatching',current_attempt=?,prd_path=?,prd_sha256=? WHERE id=?",
-                     (aid, prd["path"], prd["sha256"], ticket["id"]))
+        # 同一句里认领责任人：claim 的这条会话就是这张单现在的 owner（AW-114）。
+        # 它与刚写的 `coordinator_session_id` 此刻相等，但那是两条独立的事实——owner
+        # 之后可以被 `take_over_ticket` 换掉，origin 永远是谁 claim 的那条会话。
+        conn.execute("UPDATE tickets SET state='dispatching',current_attempt=?,prd_path=?,prd_sha256=?,"
+                     "owner_session_id=? WHERE id=?",
+                     (aid, prd["path"], prd["sha256"], coordinator, ticket["id"]))
         if allow_parallel:
             # 事由与范围与 parallel_with 并列写进同一条事件：后来的人要判「这次并行合不合理」
             # 只能靠这一行，事由散落在消息或会话里就查不回来了（PRD-013 R2）。
@@ -1005,18 +1038,25 @@ class Center:
         require(status in ("sent", "failed"), "INVALID_INPUT", "status must be sent or failed")
         origin = text(data, "origin_session_id", 500)
         detail = text(data, "detail", 4000)
-        # 只由协调会话调：不是防伪（session_id 仍是自报字符串），是把「谁发的回执」
-        # 与 claim 时写下的那一条对齐，执行会话不能替协调者宣告回信结果。
-        require(text(data, "session_id", 500) == attempt["coordinator_session_id"], "NOT_COORDINATOR",
-                "Only the coordinator that dispatched this attempt may record a notice")
-        # 「发给谁」不能靠事后回想：投递目标必须就是 claim 时写下的那条协调会话。
-        # 写成执行会话自己是最容易发生的错，那条回执根本到不了人手里。
+        # 授权读**当前的负责人**（`tickets.owner_session_id`），不读「谁派的」那一条
+        # （`attempts.coordinator_session_id` 是 origin，不可变的历史事实）。以前两者是
+        # 同一个字符串，于是派发它的会话一被宿主归档，就再没有人能记回执——AW-106 就是
+        # 这样被锁死的。owner 可以被 `take_over_ticket` 换掉，origin 永远不改。
+        # 仍不是防伪：session_id 是自报字符串；这里对齐的是「谁说这声『发了』」。
+        require(text(data, "session_id", 500) == ticket["owner_session_id"], "NOT_COORDINATOR",
+                "Only the ticket's current owner may record a notice; if the owner session is gone, "
+                "take the ticket over with take_over_ticket first")
+        # 「发给谁」不能靠事后回想：投递目标必须是**现在**负责收尾的那条会话。写成执行
+        # 会话自己是最容易发生的错，那条回执根本到不了人手里；把已归档的 origin 当成
+        # 目标则是这条死锁的另一种写法。
         target = text(data, "target_session_id", 500)
-        require(target == attempt["coordinator_session_id"], "NOT_TARGET",
-                "target_session_id must be the coordinator session recorded at claim time")
+        require(target == ticket["owner_session_id"], "NOT_TARGET",
+                "target_session_id must be the ticket's current owner session")
         # 不属于白名单：宿主认得的值比本工具多，枚举外取值原样入库（见 wake_kind()）。
         # 只有 created 被特判，因为它是失败信号而不是另一种成功方式。
         wake = wake_kind(data)
+        # 消息 id 可选：协调会话从发送回执里取到就传，取不到就是不传（NULL），不拿时间或其他东西凑。
+        message = message_id(data) if "message_id" in data else None
         # created 的意思是宿主把它当成新建任务、没有投递到目标会话：那次回执没有到达任何人，
         # 所以一律记 failed，不因为调用方写了 sent 就变成一条成功记录。
         if wake == "created":
@@ -1027,12 +1067,15 @@ class Center:
                                  (ticket["id"],)).fetchone() is None,
                     "ALREADY_NOTIFIED", "This ticket already has a sent notice; read it instead of writing another")
         nid = str(uuid4())
-        conn.execute("INSERT INTO notices VALUES (?,?,?,?,?,?,?,?,?)",
-                     (nid, ticket["id"], aid, origin, status, detail, now(), target, wake))
+        # 列名写全，不用位置插入：schema 再加一列时，位置插入会静默错位。
+        conn.execute("INSERT INTO notices(id,ticket_id,attempt_id,origin_session_id,status,detail,"
+                     "created_at,target_session_id,wake_kind,message_id)"
+                     " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                     (nid, ticket["id"], aid, origin, status, detail, now(), target, wake, message))
         # failed 可以多条（真会失败多次），它只留记录、不动工单状态：NOTIFY_FAILED 不推动任何状态机。
         result = {"notice_id": nid, "ticket_id": ticket["id"], "attempt_id": aid,
                   "origin_session_id": origin, "status": status, "detail": detail,
-                  "target_session_id": target, "wake_kind": wake,
+                  "target_session_id": target, "wake_kind": wake, "message_id": message,
                   "alert": NOTIFY_FAILED if status == "failed" else None,
                   "ticket_state": ticket["state"], "revision": ticket["revision"]}
         if wake == "created":
@@ -1046,6 +1089,92 @@ class Center:
                             "target_session_id"),
             }
         return result
+
+    def _report_notice_failure(self, conn, data):
+        """执行会话记自己那次没送到的回执，记在它自己那张单上（AW-114 C2）。
+
+        为什么不能直接放开 `record_notice`：那个操作宣告的是「回执发到了」，只有协调
+        会话有资格说。这里的宣告是反的——「我发不出去，宿主回了什么」——而且只能是反的：
+        操作里根本没收 `status`，所以调用方连 `sent` 这个词都递不进来，`one_sent_notice`
+        那条部分唯一索引在结构上碰不到。把两件事压进一个操作，等于给「执行会话宣告送达」
+        留了一个只靠代码自觉拦着的位置。
+
+        现场：协调会话是宿主建的，它自己那一轮结束时可能被归档（AW-114 实测
+        `sessions.status='archived'`，`updated_at` 与 `last_turn_ended_at` 相差 22–26 ms）。
+        归档之后执行会话的 `send_to_session` 只能拿到 `ARCHIVED`，那条回执以前没有任何
+        落点，而 `merge_ticket` 又按 `NO_NOTICE` 拒合——一张已验收的单就这样卡死。
+
+        谁记的：`notices` 不新增列（本单不升 schema），记录人落在成功事件里——
+        `execute()` 会给每次成功写一行 `events`，`detail.result.reported_by_session_id`
+        就是这张尝试绑定的执行会话。回执行自己的 `origin_session_id` 同样写它：这份回执
+        的来源就是它，不是那条已经不在的协调会话。
+        """
+        # check_session：只有这张尝试绑定的执行会话能记。协调会话与路人会话都报
+        # SESSION_MISMATCH，与 submit_result / ask_ticket 同一个判据，不另造一个码。
+        ticket, attempt = self._active(conn, data, check_session=True)
+        detail = text(data, "detail")
+        # 投递目标必须仍是 claim 时写下的那条协调会话：它是「这次回执本来要发给谁」的
+        # 唯一答案。接替之后再记时，这一列指向接替会话，而真正的失败目标写进 detail。
+        target = text(data, "target_session_id", 500)
+        require(target == attempt["coordinator_session_id"], "NOT_TARGET",
+                "target_session_id must be the coordinator session recorded on this attempt")
+        # 这一次没有宿主投递回执可读（send_to_session 返回的是错误码，不是 wake_kind），
+        # 所以不给值是常态，落 `unknown`；给了就照样只校形状、原值入库。
+        wake = wake_kind(data) if "wake_kind" in data else "unknown"
+        nid = str(uuid4())
+        conn.execute("INSERT INTO notices(id,ticket_id,attempt_id,origin_session_id,status,detail,"
+                     "created_at,target_session_id,wake_kind) VALUES (?,?,?,?,?,?,?,?,?)",
+                     (nid, ticket["id"], attempt["id"], attempt["session_id"], "failed", detail,
+                      now(), target, wake))
+        return {"notice_id": nid, "ticket_id": ticket["id"], "attempt_id": attempt["id"],
+                "reported_by_session_id": attempt["session_id"],
+                "origin_session_id": attempt["session_id"], "status": "failed", "detail": detail,
+                "target_session_id": target, "wake_kind": wake, "alert": NOTIFY_FAILED,
+                "ticket_state": ticket["state"], "revision": ticket["revision"]}
+
+    def _take_over_ticket(self, conn, data):
+        """接替责任人：把 `tickets.owner_session_id` 换成一条新会话（AW-114 C3/C5/C6）。
+
+        为什么不是改 `attempts.coordinator_session_id`：那个字段说的是「谁派的」，是一次
+        历史事实，改掉就再也查不出当初是谁派的单；而「现在谁负责收尾」是会变的东西
+        （原会话被宿主归档、人换了、巡检接手）。一个字段担两种语义的代价，AW-106 已经
+        付过一次：派发它的会话被归档之后，`record_notice` 的 NOT_COORDINATOR 与
+        `merge_ticket` 的 NO_NOTICE 合起来把一张已验收的单锁死。
+
+        所以这里只动 owner：
+
+        - **origin 不动。** `attempts.coordinator_session_id` 保持 claim 时写下的值，
+          回执 `target_session_id` 与 `report_notice_failure` 的目标仍以它为准。
+        - **不改代次。** `revision`、`current_attempt`、提交与验收原样；接替不是新的一代。
+        - **留痕。** 成功事件由 `execute()` 照常写一行 `operation=take_over_ticket`，
+          `detail.result` 里新旧 owner 与理由都在。
+        - **一次自报声明，不是身份认证。** `new_owner_session_id` 仍是字符串，工具验证
+          不了宿主里那条会话是否活着。能守的两条写在下面：执行会话不能给自己接替
+          （那等于自派自做），同一条会话不能重复接替。
+        """
+        ticket = self._ticket(conn, data)
+        require(ticket["state"] != "cancelled", "INVALID_STATE",
+                "Cancelled tickets have no wrap-up work left to take over")
+        owner = text(data, "new_owner_session_id", 500)
+        reason = text(data, "reason")
+        require(owner != ticket["owner_session_id"], "ALREADY_OWNER",
+                "This session is already the ticket's owner; there is nothing to take over")
+        if ticket["current_attempt"]:
+            attempt = conn.execute("SELECT session_id FROM attempts WHERE id=?",
+                                   (ticket["current_attempt"],)).fetchone()
+            require(attempt is None or attempt["session_id"] != owner, "TAKEOVER_BY_EXECUTOR",
+                    "The executing session cannot take over ownership of its own ticket; a separate "
+                    "session has to declare it")
+        previous = ticket["owner_session_id"]
+        conn.execute("UPDATE tickets SET owner_session_id=? WHERE id=?", (owner, ticket["id"]))
+        origin = None
+        if ticket["current_attempt"]:
+            row = conn.execute("SELECT coordinator_session_id FROM attempts WHERE id=?",
+                               (ticket["current_attempt"],)).fetchone()
+            origin = row["coordinator_session_id"] if row is not None else None
+        return {"ticket_id": ticket["id"], "previous_owner_session_id": previous,
+                "owner_session_id": owner, "origin_session_id": origin, "reason": reason,
+                "state": ticket["state"], "revision": ticket["revision"]}
 
     def _invalidate(self, conn, ticket, state):
         if ticket["current_attempt"]:
@@ -1213,12 +1342,72 @@ class Center:
                              "reason, before merging")
         merge_id = str(uuid4())
         reviewed_sha = self._reviewed_sha(conn, ticket, data)
-        conn.execute("INSERT INTO merges(id,ticket_id,commit_sha,target_branch,tests,created_at,reviewed_sha)"
-                     " VALUES (?,?,?,?,?,?,?)",
-                     (merge_id, ticket["id"], commit, target_branch, tests, now(), reviewed_sha))
+        # 「这条合并记录是当时记的还是后来补的」必须一眼分得开（AW-116）。普通合并记
+        # `auto_merge`；补记档写 `backfill`，并在这里**当场跑一次** `git merge-base
+        # --is-ancestor` —— `verified_by` 记的是真跑过的命令，不是调用方抄来的一句描述。
+        source, note, verified_by, verified_at = self._merge_provenance(conn, ticket, data, reviewed_sha)
+        conn.execute("INSERT INTO merges(id,ticket_id,commit_sha,target_branch,tests,created_at,reviewed_sha,"
+                     "source,verified_by,verified_at,note) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                     (merge_id, ticket["id"], commit, target_branch, tests, now(), reviewed_sha,
+                      source, verified_by, verified_at, note))
         return {"merge_id": merge_id, "ticket_id": ticket["id"], "project_id": ticket["project_id"],
                 "commit": commit, "target_branch": target_branch, "tests": tests,
-                "reviewed_sha": reviewed_sha}
+                "reviewed_sha": reviewed_sha, "source": source, "verified_by": verified_by,
+                "verified_at": verified_at, "note": note}
+
+    def _merge_provenance(self, conn, ticket, data, reviewed_sha):
+        """合并记录的出处：谁写的、拿什么核对的、什么时候核的（AW-116）。
+
+        三档而不是两档：`auto_merge`（正常合并路径，已由第 5/6 步的重跑测试与真实 merge
+        背书）、`backfill`（事后补记，必须当场用 git 再核一次），以及存量行的 NULL
+        （那时没有这一项，补一个值就是编）。补记档不接受调用方自报 `verified_by`：
+        那会让「我核对过了」变成一句可以随便写的话。
+        """
+        source = text(data, "source", 20) if "source" in data else "auto_merge"
+        require(source in ("auto_merge", "backfill"), "INVALID_INPUT",
+                "source must be auto_merge or backfill")
+        note = text(data, "note", 1000) if "note" in data else None
+        require(note is None or source == "backfill", "INVALID_INPUT",
+                "note is only meaningful for source=backfill")
+        if source == "auto_merge":
+            return "auto_merge", None, None, now()
+        require(note is not None, "INVALID_INPUT",
+                "source=backfill requires note: say when and why this record was filled in later")
+        require(reviewed_sha != UNVERIFIED, "INVALID_INPUT",
+                f"source=backfill needs a recorded head_sha to verify; `{UNVERIFIED}` means there is none")
+        root = conn.execute("SELECT root FROM projects WHERE id=?", (ticket["project_id"],)).fetchone()[0]
+        branch = text(data, "target_branch", 200)
+        command = ancestry_proof(root, reviewed_sha, branch)
+        proc = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor",
+                               reviewed_sha, branch], capture_output=True, text=True)
+        require(proc.returncode == 0, "NOT_LANDED",
+                f"{ticket['id']} 的提交 {reviewed_sha} 不在 {branch} 里（{command} 退出 {proc.returncode}）"
+                f"：这条合并记录不能补，先查清它到底落到哪里")
+        return "backfill", note, command, now()
+
+    def _repair_backfill_command(self, conn, data):
+        r"""只改补记行 `verified_by` 的路径写法，命令本身一个字不许变（AW-116）。
+
+        为什么需要这一步：第一版把库里的 Windows 路径原样写进了命令（`d:\cindy-...`），
+        抄进 Git Bash 时反斜杠会被当转义吃掉，命令跑不通。这里只允许「同一命令、另一种
+        路径写法」这一种差异：把存量值与新写的规范值都按正斜杠归一后比对，不相等就拒
+        并让人先读那一行——不做模糊替换，也不趁这次机会改别的字段。
+        """
+        ticket = self._ticket(conn, data)
+        row = conn.execute("SELECT * FROM merges WHERE ticket_id=?", (ticket["id"],)).fetchone()
+        require(row is not None, "NOT_FOUND", "This ticket has no merge record to repair")
+        require(row["source"] == "backfill", "INVALID_STATE",
+                "Only a backfill record carries a command written by this tool")
+        root = conn.execute("SELECT root FROM projects WHERE id=?", (ticket["project_id"],)).fetchone()[0]
+        canonical = ancestry_proof(root, row["reviewed_sha"], row["target_branch"])
+        stored = row["verified_by"] or ""
+        require(stored.replace("\\", "/") == canonical, "COMMAND_MISMATCH",
+                "The stored verified_by is not this command with a different path spelling; "
+                "read the row before rewriting it")
+        if stored == canonical:
+            return {"ticket_id": ticket["id"], "changed": False, "verified_by": canonical}
+        conn.execute("UPDATE merges SET verified_by=? WHERE id=?", (canonical, row["id"]))
+        return {"ticket_id": ticket["id"], "changed": True, "before": stored, "verified_by": canonical}
 
     def _reviewed_sha(self, conn, ticket, data):
         """合并时写下「被验收的那棵树」，并对得上才算数。

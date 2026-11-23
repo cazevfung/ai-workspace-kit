@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from task_center import Center
+from task_center.db import SCHEMA_VERSION
 
 
 class DecisionChannelTest(unittest.TestCase):
@@ -414,7 +415,8 @@ class DecisionChannelTest(unittest.TestCase):
     def test_schema_six_has_question_tables_and_a_blocked_wide_index(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(13, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(SCHEMA_VERSION, conn.execute("PRAGMA user_version").fetchone()[0])
+
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertLessEqual({"questions", "answers"}, tables)
             indexes = {row[0]: row[1] for row in conn.execute(

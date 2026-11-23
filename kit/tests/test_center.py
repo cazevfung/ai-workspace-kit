@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from task_center import Center
+from task_center.db import SCHEMA_VERSION
 
 # 本文件里每一次提交用的 head sha。真值由 git 给（`git rev-parse HEAD`），
 # 这里只要是一个合法的 40 位十六进制串：用例验的是「记下来、读得回、比得上」，
@@ -462,7 +463,7 @@ class CenterTest(unittest.TestCase):
     def test_init_reports_current_schema_version(self):
         fresh = self.root / "fresh.sqlite3"
         result = Center(fresh).execute("init", {})
-        self.assertEqual(13, result["result"]["schema_version"])
+        self.assertEqual(SCHEMA_VERSION, result["result"]["schema_version"])
 
     def test_current_shape_with_old_version_header_is_rejected(self):
         # v2 shape but user_version=1: only the version gate can reject this.

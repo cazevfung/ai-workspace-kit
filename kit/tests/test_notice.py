@@ -30,6 +30,7 @@ from pathlib import Path
 from unittest import mock
 
 from task_center import Center
+from task_center.db import SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -143,13 +144,15 @@ class NoticeTest(unittest.TestCase):
 
     # --- C3：表结构 --------------------------------------------------------
 
-    def test_schema_eight_has_notices_with_target_and_wake_kind(self):
+    def test_schema_has_notices_with_target_and_wake_kind(self):
         conn = sqlite3.connect(self.db)
         try:
-            self.assertEqual(13, conn.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(SCHEMA_VERSION, conn.execute("PRAGMA user_version").fetchone()[0])
+            # 14 在这一列之后加了 message_id；前九列的顺序不能被后来的列打乱。
+
             self.assertEqual(
                 ["id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail",
-                 "created_at", "target_session_id", "wake_kind"],
+                 "created_at", "target_session_id", "wake_kind", "message_id"],
                 [row[1] for row in conn.execute("PRAGMA table_info(notices)")])
             self.assertIn("coordinator_workdir",
                           [row[1] for row in conn.execute("PRAGMA table_info(attempts)")])

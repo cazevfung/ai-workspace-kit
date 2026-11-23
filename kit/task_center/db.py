@@ -40,7 +40,8 @@ CREATE TABLE tickets(
  prd_path TEXT NOT NULL, prd_sha256 TEXT, criteria TEXT NOT NULL,
  revision INTEGER NOT NULL, criteria_version INTEGER NOT NULL DEFAULT 1,
  state TEXT NOT NULL, current_attempt TEXT, created_at TEXT NOT NULL,
- batch_id TEXT REFERENCES batches(id));
+ batch_id TEXT REFERENCES batches(id),
+ owner_session_id TEXT, requester_session_id TEXT);
 CREATE TABLE attempts(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), revision INTEGER NOT NULL,
  criteria_version INTEGER NOT NULL DEFAULT 1,
@@ -63,7 +64,8 @@ CREATE TABLE events(
 CREATE TABLE merges(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL UNIQUE REFERENCES tickets(id),
  commit_sha TEXT NOT NULL, target_branch TEXT NOT NULL, tests TEXT NOT NULL, created_at TEXT NOT NULL,
- reviewed_sha TEXT);
+ reviewed_sha TEXT,
+ source TEXT, verified_by TEXT, verified_at TEXT, note TEXT);
 CREATE TABLE questions(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
  attempt_id TEXT NOT NULL REFERENCES attempts(id),
@@ -73,7 +75,7 @@ CREATE TABLE notices(
  id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id),
  attempt_id TEXT NOT NULL REFERENCES attempts(id), origin_session_id TEXT NOT NULL,
  status TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL,
- target_session_id TEXT NOT NULL DEFAULT '', wake_kind TEXT NOT NULL DEFAULT '');
+ target_session_id TEXT NOT NULL DEFAULT '', wake_kind TEXT NOT NULL DEFAULT '', message_id TEXT);
 CREATE UNIQUE INDEX one_sent_notice ON notices(ticket_id) WHERE status='sent';
 CREATE INDEX notices_ticket ON notices(ticket_id, created_at);
 CREATE TABLE answers(
@@ -144,8 +146,34 @@ REQUIRED_TABLES = {"projects", "batches", "tickets", "attempts", "submissions", 
 # preview could not be computed (not a repository, head_sha not local, git unavailable). The two are kept apart
 # on purpose: writing an empty array for an uncomputed preview would claim every historical submission had
 # been previewed and come out clean.
-# Only the 3 -> 4 -> 5 -> … -> 12 -> 13 upgrades have known paths; everything else is rejected loudly.
-SCHEMA_VERSION = 13
+#
+# Version 14 gives "who asked for this ticket" and "which message carried the receipt" a place in the
+# database (PRD-015 R5): tickets.requester_session_id records the session that opened the ticket, and
+# notices.message_id records the id of the receipt message so a reader can pull that conversation with
+# `get_chat_history`. Both are nullable on purpose: rows written before this version have no such value,
+# and the coordinator session is NOT a substitute for the requester — filling one in with the other
+# would turn "nobody recorded it" into a fact nobody checked. Message ids are ids only: no body, no
+# deeplink (a `cindy://...?message=` link was never verified to open anything).
+#
+# Version 15 splits two things one column was carrying (AW-114): `attempts.coordinator_session_id` says who
+# dispatched this attempt (origin — an immutable historical fact) while `tickets.owner_session_id` says who is
+# responsible for closing it out now (owner — mutable, transferable with `take_over_ticket`). Authorization for
+# `record_notice` / `merge_ticket` reads the owner, so an archived dispatcher no longer locks an accepted ticket
+# out of the merge (AW-106). The migration backfills the owner from the ticket's current attempt — "who was
+# responsible then", not a claim that the same session is still alive. Tickets with no current attempt keep NULL:
+# inventing an owner for them would name a session nobody ever dispatched to.
+#
+# Version 16 answers "was this merge record written then, or filled in later?" (AW-116):
+# merges.source says who wrote it (`auto_merge` = the normal merge path, `backfill` = a later
+# repair of a ticket merged before records were kept), merges.verified_by holds the exact command
+# that was re-run to prove the tree is in the target branch, merges.verified_at says when that
+# check ran, and merges.note carries the repair's reason. All four are nullable on purpose: rows
+# written before this version keep NULL, which means "that field did not exist then" — backfilling
+# them with `auto_merge` would turn a fact nobody recorded into one. The ticket originally called
+# this step 14 -> 15, but 15 had already been taken by AW-114, so it lands as 15 -> 16.
+#
+# Only the 3 -> 4 -> 5 -> … -> 14 -> 15 -> 16 upgrades have known paths; everything else is rejected loudly.
+SCHEMA_VERSION = 16
 
 # 冻结形状的起点：v3 的 tickets / attempts 列。后面每一级的冻结形状都从这两个集合长出来，
 # 而不是从 REQUIRED_COLUMNS 做减法——后者会把「以后新增的列」自动算进旧版本应该有的形状里，
@@ -154,20 +182,34 @@ V3_TICKET_COLUMNS = {"id", "project_id", "title", "deliverable", "prd_path", "pr
                      "revision", "state", "current_attempt", "created_at"}
 V3_ATTEMPT_COLUMNS = {"id", "ticket_id", "revision", "prd_path", "prd_sha256", "state", "session_id",
                       "created_at"}
+# notices 在 13 之前的列（从 v7 起就这么多）；14 加的 `message_id` 不在里面。
+# 冻结形状从这里减，不从 REQUIRED_COLUMNS 减：后者会把这以后新增的列自动算进 v7 应有
+# 的形状里，于是升到 14 的时候，本该放行的 v7 旧库会被当成缺列拒掉——这一下当场踩过。
+NOTICES_BEFORE_MESSAGE_ID = {"id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail",
+                            "created_at", "target_session_id", "wake_kind"}
+
+# 16 之前的 merges 形状（v9 起七列）。这一组单独冻结：直接从 REQUIRED_COLUMNS["merges"]
+# 做减法的老写法会把以后新增的四列自动算进 v5/v8 应有的形状里，升级链一加级就误拒旧库。
+MERGES_BEFORE_SOURCE = {"id", "ticket_id", "commit_sha", "target_branch", "tests", "created_at",
+                        "reviewed_sha"}
+# v5 的 merges 还没有 reviewed_sha（9 才加）。
+MERGES_BEFORE_REVIEWED_SHA = MERGES_BEFORE_SOURCE - {"reviewed_sha"}
+# 16 加的四列（顺序即后补的顺序）。
+MERGE_BACKFILL_COLUMNS = ("source", "verified_by", "verified_at", "note")
 
 REQUIRED_COLUMNS = {
     "projects": {"id", "name", "root", "next_number"},
     "batches": {"id", "project_id", "resource_key", "owner_session_id", "planned_at", "closed_at"},
-    "tickets": V3_TICKET_COLUMNS | {"criteria_version", "batch_id"},
+    "tickets": V3_TICKET_COLUMNS | {"criteria_version", "batch_id", "owner_session_id",
+                                    "requester_session_id"},
     "attempts": V3_ATTEMPT_COLUMNS | {"coordinator_session_id", "coordinator_workdir", "criteria_version",
                                    "batch_key"},
     "submissions": {"id", "attempt_id", "summary", "artifacts", "evidence", "risks", "created_at", "head_sha",
                     "base_sha", "conflict_preview"},
-    "merges": {"id", "ticket_id", "commit_sha", "target_branch", "tests", "created_at", "reviewed_sha"},
+    "merges": MERGES_BEFORE_SOURCE | {"source", "verified_by", "verified_at", "note"},
     "questions": {"id", "ticket_id", "attempt_id", "question", "options", "state", "asked_at"},
     "answers": {"id", "question_id", "answer", "answered_by", "answered_by_session_id", "created_at"},
-    "notices": {"id", "ticket_id", "attempt_id", "origin_session_id", "status", "detail", "created_at",
-                "target_session_id", "wake_kind"},
+    "notices": NOTICES_BEFORE_MESSAGE_ID | {"message_id"},
     "ticket_links": {"from_ticket", "kind", "to_ticket", "created_at"},
 }
 
@@ -186,7 +228,7 @@ V4_REQUIRED_COLUMNS = {
 
 # v5 有 merges（但还没有 reviewed_sha），还没有 questions/answers，active_session 谓词不含 blocked。
 V5_REQUIRED_TABLES = V3_REQUIRED_TABLES | {"merges"}
-V5_REQUIRED_COLUMNS = {**V4_REQUIRED_COLUMNS, "merges": REQUIRED_COLUMNS["merges"] - {"reviewed_sha"}}
+V5_REQUIRED_COLUMNS = {**V4_REQUIRED_COLUMNS, "merges": MERGES_BEFORE_REVIEWED_SHA}
 
 # v6 有 questions/answers、还没有 notices 与 coordinator_workdir。
 V6_REQUIRED_TABLES = V5_REQUIRED_TABLES | {"questions", "answers"}
@@ -197,7 +239,7 @@ V6_REQUIRED_COLUMNS = {**V5_REQUIRED_COLUMNS, "questions": REQUIRED_COLUMNS["que
 V7_REQUIRED_TABLES = V6_REQUIRED_TABLES | {"notices"}
 V7_REQUIRED_COLUMNS = {**V6_REQUIRED_COLUMNS,
                        "attempts": V3_ATTEMPT_COLUMNS | {"coordinator_session_id", "coordinator_workdir"},
-                       "notices": REQUIRED_COLUMNS["notices"] - {"target_session_id", "wake_kind"}}
+                       "notices": NOTICES_BEFORE_MESSAGE_ID - {"target_session_id", "wake_kind"}}
 
 # v8 有 notices 的两列，还没有 submissions.head_sha 与 merges.reviewed_sha。
 V8_REQUIRED_TABLES = V7_REQUIRED_TABLES
@@ -237,6 +279,34 @@ V12_REQUIRED_COLUMNS = {**V11_REQUIRED_COLUMNS,
                         "attempts": V12_ATTEMPT_COLUMNS,
                         "batches": REQUIRED_COLUMNS["batches"]}
 
+# v13 有 `submissions.conflict_preview`，还没有 `tickets.requester_session_id` / `notices.message_id`
+# 与 `tickets.owner_session_id`——14 加 requester 与 message_id（AW-106 先落地），15 加 owner（AW-114）。
+# submissions 从这里减，不从 REQUIRED_COLUMNS 直接拿：后者会把以后新增的列自动算进 13 应有的
+# 形状里，升级链一加级就拦下本该放行的旧库。
+SUBMISSIONS_WITH_PREVIEW = SUBMISSIONS_BEFORE_PREVIEW | {"conflict_preview"}
+V13_REQUIRED_TABLES = V12_REQUIRED_TABLES
+V13_REQUIRED_COLUMNS = {**V12_REQUIRED_COLUMNS,
+                        "tickets": V12_TICKET_COLUMNS,
+                        "attempts": V12_ATTEMPT_COLUMNS,
+                        "submissions": SUBMISSIONS_WITH_PREVIEW,
+                        "notices": NOTICES_BEFORE_MESSAGE_ID}
+
+# v14 是 AW-106 落地后的形状：多了 `tickets.requester_session_id` 与 `notices.message_id`，
+# 还没有 `tickets.owner_session_id`——15 要加的正是那一列（AW-114 后落地，所以顺延一级）。
+V14_REQUIRED_TABLES = V13_REQUIRED_TABLES
+V14_TICKET_COLUMNS = V12_TICKET_COLUMNS | {"requester_session_id"}
+V14_REQUIRED_COLUMNS = {**V13_REQUIRED_COLUMNS,
+                        "tickets": V14_TICKET_COLUMNS,
+                        "submissions": SUBMISSIONS_WITH_PREVIEW,
+                        "notices": REQUIRED_COLUMNS["notices"]}
+
+# v15 多出 `tickets.owner_session_id`；`merges` 仍是七列的老形状（16 才加 source 等四列），
+# 这里显式冻结，不从 REQUIRED_COLUMNS 继承。
+V15_REQUIRED_TABLES = V14_REQUIRED_TABLES
+V15_TICKET_COLUMNS = V14_TICKET_COLUMNS | {"owner_session_id"}
+V15_REQUIRED_COLUMNS = {**V14_REQUIRED_COLUMNS, "tickets": V15_TICKET_COLUMNS,
+                        "merges": MERGES_BEFORE_SOURCE}
+
 
 def column_names(conn, table):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -263,15 +333,22 @@ def validate_columns(conn, required, tables=None):
 
 
 # 每一步升级：升级前该版本应有的形状、升级语句、以及「声称旧版本却已经有新东西」的识别方式。
+#
+# **键是这一步装配完成后的版本号**（`MIGRATIONS[16]` = 15 → 16 那一步），不是升级前的版本号：
+# 这样 `sorted(MIGRATIONS)` 就是「这份引擎认得的全部版本」，末端那一个必然等于 `SCHEMA_VERSION`，
+# 读到 16 与「16 是当前版本」是同一件事，不必再从 `SCHEMA_VERSION` 反过来猜哪一级是最后一级。
+# 代价是取步时要比库里的版本号 +1（见 `migration_step()`）——这一步只有一处，写在函数里。
+# 判据本身（形状、`already_applied`、拒绝文案）逐字照抄上游工作区：那边按升级前的版本号登记，
+# 同一条判据在两边的语义完全相同，只有键位挪了一格。
 MIGRATIONS = {
-    3: {
+    4: {
         "tables": V3_REQUIRED_TABLES,
         "columns": V3_REQUIRED_COLUMNS,
         "statements": ["ALTER TABLE attempts ADD COLUMN coordinator_session_id TEXT"],
         "already_applied": lambda conn: "coordinator_session_id" in column_names(conn, "attempts"),
         "already_applied_message": "Database claims an older version but already has the newer column; inspect it, do not migrate",
     },
-    4: {
+    5: {
         "tables": V4_REQUIRED_TABLES,
         "columns": V4_REQUIRED_COLUMNS,
         "statements": [
@@ -282,7 +359,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "merges" in expected_tables(conn),
         "already_applied_message": "Database claims version 4 but already has the merges table; inspect it, do not migrate",
     },
-    5: {
+    6: {
         "tables": V5_REQUIRED_TABLES,
         "columns": V5_REQUIRED_COLUMNS,
         "statements": [
@@ -303,7 +380,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "questions" in expected_tables(conn),
         "already_applied_message": "Database claims version 5 but already has the questions table; inspect it, do not migrate",
     },
-    6: {
+    7: {
         "tables": V6_REQUIRED_TABLES,
         "columns": V6_REQUIRED_COLUMNS,
         "statements": [
@@ -320,7 +397,7 @@ MIGRATIONS = {
                                          or "coordinator_workdir" in column_names(conn, "attempts")),
         "already_applied_message": "Database claims version 6 but already has notices or coordinator_workdir; inspect it, do not migrate",
     },
-    7: {
+    8: {
         "tables": V7_REQUIRED_TABLES,
         "columns": V7_REQUIRED_COLUMNS,
         "statements": [
@@ -332,7 +409,7 @@ MIGRATIONS = {
                                          or "wake_kind" in column_names(conn, "notices")),
         "already_applied_message": "Database claims version 7 but already has the newer notices columns; inspect it, do not migrate",
     },
-    8: {
+    9: {
         "tables": V8_REQUIRED_TABLES,
         "columns": V8_REQUIRED_COLUMNS,
         "statements": [
@@ -344,7 +421,7 @@ MIGRATIONS = {
                                          or "reviewed_sha" in column_names(conn, "merges")),
         "already_applied_message": "Database claims version 8 but already has submissions.head_sha or merges.reviewed_sha; inspect it, do not migrate",
     },
-    9: {
+    10: {
         "tables": V9_REQUIRED_TABLES,
         "columns": V9_REQUIRED_COLUMNS,
         "statements": [
@@ -359,7 +436,7 @@ MIGRATIONS = {
                                          or "base_sha" in column_names(conn, "submissions")),
         "already_applied_message": "Database claims version 9 but already has criteria_version or submissions.base_sha; inspect it, do not migrate",
     },
-    10: {
+    11: {
         "tables": V10_REQUIRED_TABLES,
         "columns": V10_REQUIRED_COLUMNS,
         "statements": [
@@ -399,7 +476,7 @@ MIGRATIONS = {
                                          or column_notnull(conn, "tickets", "prd_sha256") is False),
         "already_applied_message": "Database claims version 10 but already has projects.next_number, the ticket_links table or a nullable tickets.prd_sha256; inspect it, do not migrate",
     },
-    11: {
+    12: {
         "tables": V11_REQUIRED_TABLES,
         "columns": V11_REQUIRED_COLUMNS,
         "statements": [
@@ -425,7 +502,7 @@ MIGRATIONS = {
                                          or column_notnull(conn, "tickets", "prd_sha256") is not False),
         "already_applied_message": "Database claims version 11 but already has the batches table, attempts.batch_key or tickets.batch_id (or a v10-shaped tickets table); inspect it, do not migrate",
     },
-    12: {
+    13: {
         "tables": V12_REQUIRED_TABLES,
         "columns": V12_REQUIRED_COLUMNS,
         "statements": [
@@ -436,12 +513,64 @@ MIGRATIONS = {
         "already_applied": lambda conn: "conflict_preview" in column_names(conn, "submissions"),
         "already_applied_message": "Database claims version 12 but already has submissions.conflict_preview; inspect it, do not migrate",
     },
+    14: {
+        "tables": V13_REQUIRED_TABLES,
+        "columns": V13_REQUIRED_COLUMNS,
+        "statements": [
+            # 两列都可空，存量行留 NULL=「那时没有这一项」。请求方不许拿协调会话冒充（PRD-015 R5），
+            # 消息 id 也不许拿时间戳或标题凑一个：这两种都是把推定写成事实。
+            "ALTER TABLE tickets ADD COLUMN requester_session_id TEXT",
+            "ALTER TABLE notices ADD COLUMN message_id TEXT",
+        ],
+        "already_applied": lambda conn: ("requester_session_id" in column_names(conn, "tickets")
+                                         or "message_id" in column_names(conn, "notices")
+                                         or "owner_session_id" in column_names(conn, "tickets")),
+        "already_applied_message": "Database claims version 13 but already has a 14 or 15 column; inspect it, do not migrate",
+    },
+    15: {
+        "tables": V14_REQUIRED_TABLES,
+        "columns": V14_REQUIRED_COLUMNS,
+        "statements": [
+            # 存量单的 owner 用「它当前那一代的 coordinator_session_id」回填：那是当时的责任人，
+            # 不是「现在还活着的那条会话」。没有当前尝试的单留 NULL——给它们编一个 owner
+            # 等于指名一条从没派发过这张单的会话。
+            "ALTER TABLE tickets ADD COLUMN owner_session_id TEXT",
+            "UPDATE tickets SET owner_session_id = ("
+            " SELECT a.coordinator_session_id FROM attempts a WHERE a.id = tickets.current_attempt)"
+            " WHERE owner_session_id IS NULL AND current_attempt IS NOT NULL",
+        ],
+        "already_applied": lambda conn: "owner_session_id" in column_names(conn, "tickets"),
+        "already_applied_message": "Database claims version 14 but already has tickets.owner_session_id; inspect it, do not migrate",
+    },
+    16: {
+        "tables": V15_REQUIRED_TABLES,
+        "columns": V15_REQUIRED_COLUMNS,
+        "statements": lambda conn: [
+            f"ALTER TABLE merges ADD COLUMN {column} TEXT"
+            for column in MERGE_BACKFILL_COLUMNS if column not in column_names(conn, "merges")
+        ],
+        # 四列全部可空，存量行留 NULL=「那时没有这一项」。批量填 `auto_merge` 或
+        # `backfill` 会把「后来补的」和「当时记的」永久混在一起，正是这张单要分的东西。
+        # 只拒绝「缺了一部分」：说明库被动过，不是这一级的正常中间态；四列都在、只有
+        # 版本号没推进（真实发生过：另一个会话为了让 master 上的旧代码读库，把版本号
+        # 单独改回 15）时应当把版本补完，而不是把人挡在门外。
+        "already_applied": lambda conn: (
+            any(column in column_names(conn, "merges") for column in MERGE_BACKFILL_COLUMNS)
+            and not all(column in column_names(conn, "merges") for column in MERGE_BACKFILL_COLUMNS)),
+        "already_applied_message": "Database claims version 15 but only some of merges.source / verified_by / verified_at / note exist; inspect it, do not migrate",
+    },
 }
 
 
 def upgrade_chain():
     """已知升级链的文案：从 MIGRATIONS 的键推出来，不再手写「3 -> 4 -> 5」，免得加一级就成假话。"""
-    return " -> ".join([str(version) for version in sorted(MIGRATIONS)] + [str(SCHEMA_VERSION)])
+    levels = sorted(MIGRATIONS)
+    return " -> ".join([str(levels[0] - 1)] + [str(version) for version in levels])
+
+
+def migration_step(conn_version):
+    """库声称第 N 版时要跑的那一步：键就是装配完成后的版本，所以取 N + 1。"""
+    return MIGRATIONS.get(conn_version + 1)
 
 
 def validate_schema(conn):
@@ -511,9 +640,9 @@ def migrate_database(path):
             validate_schema(conn)
             return {"database": str(path), "schema_version": SCHEMA_VERSION, "from_version": SCHEMA_VERSION,
                     "migrated": False, "message": "已是最新，没有修改任何行"}
-        require(version in MIGRATIONS, "SCHEMA_MISMATCH",
+        step = migration_step(version)
+        require(step is not None, "SCHEMA_MISMATCH",
                 f"Unsupported schema version {version}; known upgrades are {upgrade_chain()}")
-        step = MIGRATIONS[version]
         validate_columns(conn, step["columns"], step["tables"])
         require(not step["already_applied"](conn), "SCHEMA_MISMATCH", step["already_applied_message"])
         conn.execute("BEGIN IMMEDIATE")
@@ -521,10 +650,15 @@ def migrate_database(path):
             # 事务内再确认一次，避免两次读之间版本被换掉。
             require(conn.execute("PRAGMA user_version").fetchone()[0] == version, "SCHEMA_MISMATCH",
                     "Schema version changed while migrating")
-            # 逐级升级：3 → 4 → 5 → … → 11，每一级只跑自己那几条语句。
+            # 逐级升级：3 → 4 → 5 → … → 16，每一级只跑自己那几条语句。
             current = version
             while current < SCHEMA_VERSION:
-                for statement in MIGRATIONS[current]["statements"]:
+                step_statements = MIGRATIONS[current + 1]["statements"]
+                # 语句可以是固定列表，也可以按当前列集合现算（只用于「补完一半落地的迁移」
+                # 那一级），调用处的形状一致。
+                if callable(step_statements):
+                    step_statements = step_statements(conn)
+                for statement in step_statements:
                     conn.execute(statement)
                 current += 1
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
