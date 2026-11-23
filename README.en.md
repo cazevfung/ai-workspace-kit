@@ -8,7 +8,7 @@
 
 [The problem](#the-problem-it-solves) · [What it is](#what-it-is) · [Context boundaries](#context-boundaries) · [Life of a ticket](#the-life-of-one-ticket) · [Gates](#gates-and-decision-points) · [Known limitations](#known-limitations) · [Install](#install) · [Demo](#verification-and-demo)
 
-The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.5.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md` (Cindy, Claude Code, Codex).
+The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.5.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md`. Dispatch inside Cindy is measured (`create_project` / `send_to_session`); hosts such as Claude Code and Codex are only covered at the "files, scripts and cron" layer — dispatch there follows the manual plan under "Two kinds of host" below. The kit has not run the full loop on those hosts, so this README does not claim "supported".
 
 ---
 
@@ -158,7 +158,7 @@ Team modes and subagents answer who runs and how work is assigned; this workspac
 
 ## Known limitations
 
-- Opening a new executor session after `claim_ticket` depends on host capability — `send_to_session` in Cindy; other hosts supply that step or bind a manually opened session with `bind_session`.
+- Opening a new executor session after `claim_ticket` depends on host capability — `send_to_session` in Cindy; other hosts do not have that step, so follow `python onboard.py --host generic` (see "Two kinds of host" under Verification and demo) and stop at the open-session step when no real session id is available. Never guess one.
 - No built-in scheduler: resuming stalled tickets requires a host-side scheduled job that checks the database and re-dispatches.
 - One ticket runs per project by default; parallelism requires an explicit `allow_parallel`.
 - The skills are written mainly in Chinese and are not yet translated.
@@ -205,7 +205,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 630 = 984, 0 failures
+python tools/run_tests.py            # should pass: tests/ 354 + tools/ 644 = 998, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -214,18 +214,44 @@ Then connect the workspace to the host and a business repository:
 ```bash
 cd ~/ai-workspace
 python onboard.py --json                       # create_project -> open session -> first instruction, full arguments
+python onboard.py --host generic --json         # non-Cindy host: manual dispatch plan (create_ticket -> claim_ticket -> open your own session -> bind_session -> submit_result)
 python tools/add_project.py D:/my-project      # writes .agents/ticket-config.json and points core.hooksPath at .githooks
 ```
 
+### Two kinds of host: Cindy, and agents that only have files, scripts and cron
+
+The last-but-one step of a dispatch is always "open a new executor session", but the two kinds of host do not offer the same thing. Cindy has host tools; other agents only have files, scripts and cron:
+
+| Capability | Cindy | Other agents (Claude Code, Codex, a plain terminal) |
+| --- | --- | --- |
+| Register the workspace as a project | `create_project`, receipt carries `project_path` | no such tool: the project directory comes from `python tools/add_project.py <dir>` |
+| Open an executor session | `send_to_session` without `target_session_id` creates one | open it yourself: another terminal, the host's "new session" command, or a one-off subtask |
+| Where the session id comes from | `get_current_session_id`, the `target_session_id` in the create receipt | whatever id the host itself reports: the new session, a task receipt, or the host's session list |
+| Scheduled dispatch and reminders | `schedule_create` | the host's cron or the system scheduler, with the arguments printed by `python tools/schedule_plan.py` |
+| Look a session back up | `list_sessions` (by `workdir`) | `get_ticket`: read `state` and `attempts[-1].session_id` |
+
+On a non-Cindy host, ask for the manual plan with `--host generic`; no `cindy_helper` tool appears in it:
+
+```bash
+python onboard.py --host generic --json                                  # six steps with full arguments
+python onboard.py --host generic --json --session-id <real id from the host>   # session already open: fill it into bind_session
+```
+
+The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> submit_result -> get_ticket`. Step 3, `open_session`, is not a host tool: a person or the host opens the executor session, and **what that step must hand back is the session id the host itself reported**. `--session-id` runs through `onboard.check_session_id` first: empty strings, leftover `<...>` placeholders, path separators (the shape you get from a temporary directory name), and values containing `unknown` / `placeholder` are all rejected with exit code 2. For the same reason, `coordinator_session_id` at step 2 can only come from the host.
+
+**No real session id, no `bind_session`: stop at `open_session`.** On 2026-11-17 (AW-007) a session id was stitched together from a temporary directory name: `bind_session` accepted it, and `list_sessions` never had that session — the database looked dispatched while nothing was executing. A non-Cindy host has no `list_sessions` to check with, so step 6 `get_ticket` is the check: `state` is `running` / `awaiting_review` and `attempts[-1].session_id` matches step 3 character for character.
+
+**Untested is not "supported".** This section gives a path and stop points at the "files, scripts and cron" layer; the kit has not run the full loop on Claude Code or Codex, and this README does not say otherwise.
+
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 984 (`tests/` 354, `tools/` 630) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 998 (`tests/` 354, `tools/` 644) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 984 tests
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 998 tests
 python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
 ```
 

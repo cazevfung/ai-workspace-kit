@@ -101,6 +101,82 @@ class PlanShapeTest(unittest.TestCase):
                              set(onboard.FAILURES[name]))
 
 
+class GenericPlanTest(unittest.TestCase):
+    """非 Cindy 宿主：计划里不许出现宿主工具，停点必须写死在开会话那一步。"""
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="onboard-generic-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.workspace, ignore_errors=True))
+        self.plans = onboard.build_plans(self.workspace, project_name="演示项目", host="generic")
+        self.plan = self.plans["generic_dispatch"]
+
+    def test_host_default_stays_cindy(self):
+        self.assertEqual({"bootstrap", "dispatch_ticket"},
+                         set(onboard.build_plans(self.workspace)))
+        self.assertEqual({"generic_dispatch"}, set(self.plans))
+
+    def test_generic_plan_is_manual_without_host_tools(self):
+        self.assertEqual(
+            ["create_ticket", "claim_ticket", "open_session", "bind_session", "submit_result", "get_ticket"],
+            [step["tool"] for step in self.plan["steps"]],
+        )
+        self.assertEqual([1, 2, 3, 4, 5, 6], [step["order"] for step in self.plan["steps"]])
+        for step in self.plan["steps"]:
+            self.assertNotEqual("cindy_helper", step["server"], step["tool"])
+            self.assertTrue(step["args"], step["tool"])
+
+    def test_generic_open_session_is_a_local_step(self):
+        step = self.plan["steps"][2]
+        self.assertEqual("open_session", step["tool"])
+        self.assertEqual("local", step["server"])
+        self.assertEqual("local", step["kind"])
+        self.assertNotIn("open_session", onboard.CINDY_HELPER_TOOLS)
+        self.assertNotIn("open_session", onboard.TASK_CENTER_TOOLS)
+
+    def test_generic_bind_step_names_a_real_session_id(self):
+        step = self.plan["steps"][3]
+        self.assertEqual("bind_session", step["tool"])
+        self.assertEqual(onboard.SESSION_ID_PLACEHOLDER, step["args"]["session_id"])
+        self.assertTrue(step["requires_real_session_id"])
+        self.assertIn("真实", step["check"])
+        self.assertIn("不许猜", step["check"])
+
+    def test_generic_stop_points_name_the_aw007_incident(self):
+        joined = "\n".join(self.plan["stop_points"])
+        self.assertIn("AW-007", joined)
+        self.assertIn("list_sessions", joined)
+        self.assertIn("停在第 3 步", joined)
+        self.assertIn("没有宿主建会话能力时就停在第 3 步", joined)
+
+    def test_generic_capabilities_say_what_is_missing(self):
+        capabilities = self.plan["host_capabilities"]
+        self.assertFalse(capabilities["create_project"])
+        self.assertFalse(capabilities["send_to_session"])
+        self.assertFalse(capabilities["schedule_create"])
+        self.assertTrue(capabilities["files_scripts_cron"])
+
+    def test_generic_steps_have_failure_stops(self):
+        self.assertEqual({step["tool"] for step in self.plan["steps"]},
+                         set(onboard.FAILURES["generic_dispatch"]))
+        self.assertIn("AW-007", onboard.FAILURES["generic_dispatch"]["open_session"])
+
+
+class SessionIdGuardTest(unittest.TestCase):
+    def test_a_real_looking_id_passes(self):
+        ok, reason = onboard.check_session_id("a31d514c-8517-4ab9-80bf-5519cc7d65cd")
+        self.assertTrue(ok, reason)
+        self.assertEqual("", reason)
+
+    def test_guesses_and_placeholders_are_rejected(self):
+        for value in ("", "   ", "<真实 session_id>", "{session_id}", "unknown", "placeholder",
+                      "TODO", "占位", "D:/tmp/awk106", "C:\\Users\\tmp\\run", "x" * 501):
+            with self.subTest(value=value):
+                ok, reason = onboard.check_session_id(value)
+                self.assertFalse(ok, value)
+                self.assertTrue(reason, value)
+
+
+
 class CliTest(unittest.TestCase):
     def test_json_prints_both_plans(self):
         result = run_cli("--json")
@@ -147,6 +223,50 @@ class CliTest(unittest.TestCase):
     def test_missing_workspace_is_a_usage_error(self):
         result = run_cli("--workspace", str(Path(tempfile.gettempdir()) / "does-not-exist-onboard"))
         self.assertEqual(2, result.returncode)
+
+    def test_generic_json_carries_bind_template_and_stop(self):
+        result = run_cli("--host", "generic", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual("generic", payload["host"])
+        self.assertEqual(["generic_dispatch"], list(payload["plans"]))
+        self.assertFalse(payload["host_capabilities"]["send_to_session"])
+        self.assertTrue(payload["must_not"])
+        bind = [step for step in payload["plans"]["generic_dispatch"]["steps"]
+                if step["tool"] == "bind_session"][0]
+        self.assertEqual(onboard.SESSION_ID_PLACEHOLDER, bind["args"]["session_id"])
+        self.assertIn("AW-007", "\n".join(payload["plans"]["generic_dispatch"]["stop_points"]))
+
+    def test_generic_text_names_every_step_and_the_stop(self):
+        result = run_cli("--host", "generic")
+        self.assertEqual(0, result.returncode, result.stderr)
+        for name in ("create_ticket", "claim_ticket", "open_session", "bind_session",
+                     "submit_result", "get_ticket"):
+            self.assertIn(name, result.stdout)
+        self.assertIn("停在第 3 步", result.stdout)
+        self.assertIn("不许拿猜的 session_id", result.stdout)
+
+    def test_generic_rejects_a_guessed_session_id(self):
+        for value in ("D:/tmp/awk106", "unknown", "<真实 session_id>"):
+            with self.subTest(value=value):
+                result = run_cli("--host", "generic", "--session-id", value, "--json")
+                self.assertEqual(2, result.returncode, result.stdout)
+                self.assertIn("不许猜", result.stderr)
+
+    def test_generic_fills_a_real_session_id(self):
+        session = "a31d514c-8517-4ab9-80bf-5519cc7d65cd"
+        result = run_cli("--host", "generic", "--session-id", session, "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        bind = [step for step in payload["plans"]["generic_dispatch"]["steps"]
+                if step["tool"] == "bind_session"][0]
+        self.assertEqual(session, bind["args"]["session_id"])
+        self.assertEqual("命令行给出", payload["session_identity"]["source"])
+
+    def test_session_id_is_only_for_generic(self):
+        result = run_cli("--session-id", "a31d514c-8517-4ab9-80bf-5519cc7d65cd", "--json")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("generic", result.stderr)
 
 
 if __name__ == "__main__":

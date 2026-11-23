@@ -120,7 +120,9 @@ skills 市场的入口 skill（指向仓库）              ← 薄入口，不�
 ## 6. 已知限制（诚实清单）
 
 - **派发仍需宿主**：`claim_ticket` 之后「新建一个执行会话」这一步依赖 Cindy 的
-  `send_to_session`；其他宿主需要自己补这一步，或手工开会话再 `bind_session`。
+  `send_to_session`；其他宿主没有这一步，用 `python onboard.py --host generic --json` 打出手工计划
+  （`create_ticket → claim_ticket → 自己开会话 → bind_session → submit_result`），拿不到宿主报出的
+  真实 session id 就停在开会话那一步，不许拿临时目录名之类的东西拼一个。
 - **跨平台差异**：Windows 用目录联接（junction）链接技能，macOS/Linux 用符号链接；
   `install.py` 已按平台处理，但没有在所有发行版上穷举测试。
 - **没有远端推送**：合并只在本地 `master` 上进行；要接 GitHub 远端，按你自己的仓库流程加。

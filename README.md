@@ -8,7 +8,7 @@ English version: [README.en.md](README.en.md)
 
 [它解决什么问题](#它解决什么问题) · [它是什么](#它是什么) · [上下文边界](#上下文边界) · [一张单的一生](#一张单的一生) · [闸门与判定点](#闸门与判定点) · [已知限制](#已知限制) · [安装](#安装) · [验证与 demo](#验证与-demo)
 
-这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.5.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主；Cindy、Claude Code、Codex 均可。
+这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.5.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主。Cindy 里的派发已实测（`create_project` / `send_to_session`）；Claude Code、Codex 这类宿主只保证「文件、脚本与 cron」这一层，派单按下文「两种宿主」那一节的手工计划走——本套件没有在这些宿主上真跑过完整闭环，所以不写「已支持」。
 
 ---
 
@@ -163,7 +163,7 @@ graph LR
 
 选用之前应当知道四条限制。
 
-- 「`claim_ticket` 之后自动新建执行会话」依赖宿主能力：Cindy 里是 `send_to_session`，其他宿主需要自己补这一步，或手工开会话再 `bind_session`。
+- 「`claim_ticket` 之后自动新建执行会话」依赖宿主能力：Cindy 里是 `send_to_session`，其他宿主没有这一步——按 `python onboard.py --host generic` 的手工计划走（见「验证与 demo」一节的「两种宿主」），拿不到真实 session id 就停在开会话那一步，不许猜。
 - 巡航不是内置调度器：仓库里没有定时任务，要把停住的工单续上，需要配合宿主的定时任务定期查库、重新派发。
 - 默认一次一张单，并行要显式传 `allow_parallel`。
 - 技能内容以中文为主，暂未翻译。
@@ -208,7 +208,7 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 630 = 984 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 644 = 998 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -217,8 +217,34 @@ python tools/doc_gate.py --all       # 应退出 0
 ```bash
 cd ~/ai-workspace
 python onboard.py --json                       # create_project → 开会话 → 第一条指令，每步完整参数
+python onboard.py --host generic --json        # 不是 Cindy 的宿主：手工派单计划（create_ticket → claim_ticket → 自己开会话 → bind_session → submit_result）
 python tools/add_project.py D:/my-project      # 业务仓库写 .agents/ticket-config.json 并指向 .githooks
 ```
+
+### 两种宿主：Cindy 与「只有文件、脚本和 cron」的 agent
+
+派单的倒数第二步都是「新开一个执行会话」，但两种宿主能给的支撑不一样。Cindy 有宿主工具，其他 agent 只有文件、脚本与 cron：
+
+| 能力 | Cindy | 其他 agent（Claude Code、Codex、手工终端） |
+| --- | --- | --- |
+| 把工作区加成项目 | `create_project`，回执给 `project_path` | 没有这个工具：项目目录来自 `python tools/add_project.py <目录>` |
+| 新建执行会话 | `send_to_session` 不传 `target_session_id` 即新建 | 自己开会话：另开一个终端、用宿主的「新建会话」命令，或开一次性子任务 |
+| 会话标识从哪取 | `get_current_session_id`，新建回执里的 `target_session_id` | 宿主自己报出的那个 id：新会话自报、任务回执、或宿主会话列表 |
+| 定时派单与催单 | `schedule_create` | 宿主的 cron、系统计划任务，参数由 `python tools/schedule_plan.py` 打印 |
+| 反查会话 | `list_sessions`（按 `workdir`） | `get_ticket`：看 `state` 与 `attempts[-1].session_id` |
+
+非 Cindy 宿主用 `--host generic` 打出手工计划，里面一个 `cindy_helper` 工具都不出现：
+
+```bash
+python onboard.py --host generic --json                                  # 六步与每步完整参数
+python onboard.py --host generic --json --session-id <宿主给的真实 id>   # 会话已经开好时直接填进 bind_session
+```
+
+顺序是 `create_ticket → claim_ticket → open_session → bind_session → submit_result → get_ticket`。第 3 步 `open_session` 不是宿主工具，由人或宿主自己开一个执行会话；**这一步要交回的是宿主自己报出的 session id**。第 4 步的 `--session-id` 先过 `onboard.check_session_id`：空串、还留着 `<…>` 占位、含路径分隔符（从临时目录名拆出来的那种）、含 `unknown` / `placeholder` / `占位` 之类字样的值一律拒绝，退出码 2。同一个道理，第 2 步 `claim_ticket` 的 `coordinator_session_id` 也只能向宿主取。
+
+**拿不到真实 session id 就停在 `open_session` 那一步，不许拿猜的顶替。** 2026-11-17 的 AW-007 就是从临时目录名拼了一个 session id：`bind_session` 照收，`list_sessions` 里根本没有那条会话——库里写得像开工了，实际没有任何会话在做。要证明这条会话真的在执行，非 Cindy 宿主没有 `list_sessions`，就用第 6 步 `get_ticket` 反查：`state` 是 `running` / `awaiting_review`，且 `attempts[-1].session_id` 与第 3 步一字不差。
+
+**没跑过的不写成支持。** 这一节给的是「文件、脚本与 cron 这一层可用」的路径与停点；Claude Code、Codex 上本套件没有跑过完整闭环，所以 README 不写「已支持」。
 
 ### 接项目这一步：clone 之后先跑 `add_project.py`
 
@@ -243,14 +269,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 984 项（`tests/` 354、`tools/` 630）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 998 项（`tests/` 354、`tools/` 644）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 984 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 998 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 

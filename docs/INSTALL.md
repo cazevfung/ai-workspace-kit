@@ -85,6 +85,11 @@ python tools/doc_gate.py --all       # 应退出 0
 - **Claude Code**：安装时加 `--link-agents`，或手工把技能链到 `~/.claude/skills`。
 - **Codex**：同上，链到 `~/.codex/skills`。
 
+**不是 Cindy 的宿主没有 `send_to_session`。** 派单用 `python onboard.py --host generic --json` 打出手工计划：
+`create_ticket → claim_ticket → open_session → bind_session → submit_result → get_ticket`。第 3 步由你
+自己开一个执行会话，把**宿主自己报出的** session id 填进第 4 步；拿不到就停在那一步，不许猜。
+套件没有在 Claude Code / Codex 上跑过完整闭环，所以只保证「文件、脚本与 cron」这一层可用。
+
 ## 卸载
 
 ```bash

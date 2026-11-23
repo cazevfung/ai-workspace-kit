@@ -9,6 +9,7 @@
 
     python onboard.py                  # 打印三步的人读计划
     python onboard.py --json           # 每步完整参数，供技能与插件复用
+    python onboard.py --host generic   # 非 Cindy 宿主：输出手工计划，不含任何宿主工具
     python onboard.py --dry-run        # 预演：仍然只打印，不写任何文件、不调宿主
     python onboard.py --json --dry-run # 预演 + JSON
 
@@ -21,7 +22,18 @@
 - `dispatch_ticket`：get_ticket → claim_ticket → send_to_session → list_sessions，
   派发一张工单时用；其中 send_to_session / list_sessions 与 bootstrap 同一份参数。
 
-退出码：0 打印成功；2 参数不合法（例如工作区目录不存在）。
+两种宿主，两条路（`--host` 决定用哪条）：
+
+- `cindy`（默认）：有 `create_project` / `send_to_session` / `schedule_create`，
+  上面两张计划照旧可用。
+- `generic`：Claude Code、Codex、手工终端这类宿主只有文件、脚本与 cron。没有
+  `send_to_session`，所以计划换成 `generic_dispatch`：create_ticket → claim_ticket →
+  open_session（`local` 步，人或宿主自己开）→ bind_session → submit_result →
+  get_ticket（反查绑定）。**没有宿主建会话能力时就停在 open_session 那一步，不许拿猜的
+  session_id 顶替**——2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，
+  `list_sessions` 里根本没有那条会话。同一条规矩也写在 `check_session_id()` 里。
+
+退出码：0 打印成功；2 参数不合法（工作区目录不存在、`--session-id` 是猜的或配错宿主）。
 
 依据：PRD-001 v0.1 的闭环形状与「归属不猜」；AGENTS.md 硬规则五（派发是新开一个
 会话，执行者自己 bind_session）。
@@ -44,10 +56,18 @@ HERE = Path(__file__).resolve().parent
 # 撞上 tools/test_onboard.py 与 tools/test_plugin_plan.py 的断言，而不是等用户装完
 # 才发现某个名字在宿主里不存在。
 CINDY_HELPER_TOOLS = ("list_projects", "create_project", "send_to_session", "list_sessions")
-TASK_CENTER_TOOLS = ("get_ticket", "claim_ticket")
+TASK_CENTER_TOOLS = ("get_ticket", "claim_ticket", "create_ticket", "bind_session", "submit_result")
 # `local` 步：不经过宿主，由会话在本地写文件。它故意不在上面两张清单里——
 # 混进去就等于声称宿主有这个工具。
 LOCAL_STEP_KIND = "local"
+# `open_session` 同理：非 Cindy 宿主没有建会话的工具，这一步只能是人或宿主自己做。
+OPEN_SESSION_TOOL = "open_session"
+HOSTS = ("cindy", "generic")
+# 非 Cindy 宿主要求「真实 session id」而不是猜一个：2026-11-17 AW-007 的分界线。
+SESSION_ID_PLACEHOLDER = "<真实 session_id：第 3 步宿主返回的那个，原样填写，不许猜>"
+SESSION_ID_LIMIT = 500  # 与 bind_session 的 text(data, "session_id", 500) 一致
+SESSION_ID_REJECT_MARKERS = ("placeholder", "占位", "unknown", "todo", "tbd",
+                             "guess", "猜", "fake", "dummy", "example", "sample")
 RECEIPT_RELATIVE = ".data/onboard-receipt.json"
 RECEIPT_FIELDS = ("project_path", "target_session_id", "working_dir", "created_at")
 
@@ -79,7 +99,187 @@ FAILURES = {
                            "返回 created 但标题不是本单 → 回执发错了地方，停掉误建任务再带 target_session_id 重发。",
         "list_sessions": "找不到 title/workingDir 匹配的执行会话 → 派发未完成；不要自己 bind_session 顶替执行者。",
     },
+    "generic_dispatch": {
+        "create_ticket": "CRITERIA_NOT_JUDGEABLE → 每条判据要么「命令 + 期望输出」、要么「判断类 + 反例」，"
+                         "缺一条就不开单（一个字段不写进库）；NOT_FOUND → 先 add_project 把项目接进来；"
+                         "号由库里发：不要自己填 ticket_id。",
+        "claim_ticket": "DISPATCH_BUSY → 同项目已有在途单，先做完那张；BLOCKED_BY_DEPENDENCY → 前置单还没 done。"
+                        "拿不到宿主自己给的会话标识就停在这一步：不要用目录名、工单号或任何路径拆一个字符串顶替协调者。",
+        "open_session": "没有宿主建会话能力就停在这里：不许拿临时目录名、运行目录、工单号或任何路径拆出来的字符串"
+                        "顶替真实 session_id（2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，"
+                        "list_sessions 里根本没有那条会话）。拿不到真实 id 就不 bind，也不继续 submit。",
+        "bind_session": "PROJECT_MISMATCH → project_root 与库里登记的项目根不一致，先回第 3 步核项目；"
+                        "SELF_DISPATCH → 你绑的是协调会话自己，回去开一个独立的执行会话；"
+                        "STALE_ATTEMPT → 重新 get_ticket 取当前 attempt。不许改传一个猜的 session_id 重试。",
+        "submit_result": "head_sha / base_sha 不是 40 位十六进制 → 用 git rev-parse HEAD 与 git merge-base HEAD master 的输出；"
+                         "ARTIFACT_CHANGED → 成果被改、删或移出项目，重新提交；"
+                         "STALE_PRD → PRD 改过，走 revise_ticket，不要直接重交。",
+        "get_ticket": "state 不是 running，或 attempts[-1].session_id 与第 3 步那个不一致 → 绑定没成，"
+                      "不要说已经开工；先看 attempts[*].session_id 再决定重绑还是重开会话。",
+    },
 }
+
+
+def check_session_id(value) -> tuple[bool, str]:
+    """一个 session 标识能不能进 bind_session。纯函数，不改任何东西。
+
+    为什么要这一道：2026-11-17 AW-007 从临时目录名拼了一个 id，`bind_session` 照收，
+    `list_sessions` 里根本没有那条会话。库能收不等于会话存在，所以把「看起来就是猜的」
+    挡在计划层：空串、还留着占位符、带路径分隔符、带占位词、超长。
+
+    返回 `(能不能用, 不能用的原因)`；能用时原因为空串。
+    """
+    if not isinstance(value, str):
+        return False, "不是字符串"
+    text = value.strip()
+    if not text:
+        return False, "是空的：bind_session 需要宿主真正返回的那个标识"
+    if len(text) > SESSION_ID_LIMIT:
+        return False, f"有 {len(text)} 字符，超过 bind_session 的 {SESSION_ID_LIMIT} 字符上限"
+    if any(mark in text for mark in "<>{}"):
+        return False, "还留着占位符：这不是宿主返回的标识"
+    lowered = text.lower()
+    for marker in SESSION_ID_REJECT_MARKERS:
+        if marker in lowered:
+            return False, f"含有占位或猜测的字样（{marker}）：这不是宿主返回的标识"
+    if "/" in text or "\\" in text:
+        return False, "含路径分隔符：从目录名或路径拆出来的字符串不是会话标识"
+    return True, ""
+
+
+def _generic_open_step(order: int) -> dict:
+    """第 3 步：人或宿主自己开一个执行会话。它没有工具可调，所以标 local。"""
+    return {
+        "order": order,
+        "tool": OPEN_SESSION_TOOL,
+        "server": "local",
+        "kind": LOCAL_STEP_KIND,
+        "call_via": "人或宿主自己做：另开一个终端会话 / 用宿主自己的新建命令开一个任务 / 开一次性子任务",
+        "args": {
+            "who": "一个独立的执行会话（不能是当前这条协调会话）",
+            "how": ["人在另一个终端里开一个会话",
+                    "用宿主自己的「新建会话」命令或快捷键开一个任务",
+                    "宿主的一次性子任务（必须在 submit_result 的 evidence 里注明「无法追问」）"],
+            "must_return": "宿主自己报出的 session id：新会话自己报的、宿主回执里的、或宿主会话列表里那一条的 id",
+            "must_not_return": "临时目录名、运行目录、工单号或任何从路径拆出来的字符串",
+        },
+        "check": "拿到的是宿主自己报出的真实 session id，并能在宿主里再查一次看到这条会话；"
+                 "拿不到就停在这一步，不许拿猜的 session_id 顶替。",
+    }
+
+
+def _generic_plan(workspace: str, *, project_id: str, ticket_id: str,
+                  expected_revision: int, session_id: str | None = None) -> dict:
+    """非 Cindy 宿主的派单计划：整张计划里一个宿主工具都没有。"""
+    bind_session = session_id or SESSION_ID_PLACEHOLDER
+    steps = [
+        {
+            "order": 1,
+            "tool": "create_ticket",
+            "server": "task_center",
+            "call_via": "python -m task_center --db <中心库> create_ticket --request-id <唯一编号> --input <JSON文件>",
+            "args": {
+                "project_id": project_id,
+                "title": "<工单标题：一句话说清这单要改什么>",
+                "deliverable": "<主题 + 明确不覆盖什么>",
+                "prd_path": "<项目内的 PRD 相对路径>",
+                "criteria": ["<命令 + 期望输出，或「判断类」+ 反例；至少一条>"],
+            },
+            "check": "回执里的 ticket_id 是库里发的号，不要自己编；没有现成工单时从这一步开始，已有工单就跳到第 2 步。",
+        },
+        {
+            "order": 2,
+            "tool": "claim_ticket",
+            "server": "task_center",
+            "call_via": "python -m task_center --db <中心库> claim_ticket --request-id <唯一编号> --input <JSON文件>",
+            "args": {
+                "project_id": project_id,
+                "ticket_id": ticket_id,
+                "expected_revision": expected_revision,
+                "coordinator_session_id": "<宿主自己给的会话标识：当前这条会话的那个，向宿主取>",
+                "coordinator_workdir": workspace,
+            },
+            "check": "回执带 attempt_id 与 dispatching；拿不到宿主自己给的会话标识就停在这一步——"
+                     "不要用路径名或工单号顶替协调者。",
+        },
+        _generic_open_step(3),
+        {
+            "order": 4,
+            "tool": "bind_session",
+            "server": "task_center",
+            "call_via": "python -m task_center --db <中心库> bind_session --request-id <唯一编号> --input <JSON文件>",
+            "args": {
+                "project_id": project_id,
+                "ticket_id": ticket_id,
+                "attempt_id": "<第 2 步回执里的 attempt_id>",
+                "session_id": bind_session,
+                "project_root": workspace,
+            },
+            "requires_real_session_id": True,
+            "check": "session_id 必须是第 3 步里宿主报出的真实标识，原样填写；没有真实标识就不 bind，"
+                     "不许猜、也不许从目录名拼。回执的 session_id 与本步传入的一字不差才算绑上；"
+                     "PROJECT_MISMATCH 回第 3 步核项目根，SELF_DISPATCH 说明你开的是同一条会话。",
+        },
+        {
+            "order": 5,
+            "tool": "submit_result",
+            "server": "task_center",
+            "call_via": "python -m task_center --db <中心库> submit_result --request-id <唯一编号> --input <JSON文件>",
+            "args": {
+                "project_id": project_id,
+                "ticket_id": ticket_id,
+                "attempt_id": "<第 2 步回执里的 attempt_id>",
+                "session_id": bind_session,
+                "summary": "<成果摘要>",
+                "artifacts": [f"{workspace}/<成果文件>", f"{workspace}/<自检记录>"],
+                "evidence": ["<跑过的命令与输出摘要>"],
+                "risks": ["<已知风险；没有就写空数组>"],
+                "head_sha": "<git rev-parse HEAD 的 40 位十六进制>",
+                "base_sha": "<git merge-base HEAD master 的 40 位十六进制>",
+            },
+            "check": "提交时用第 4 步同一个 session_id；head_sha 是被验收的那棵树，base_sha 是它分叉自的 commit，"
+                     "两个都不是「填表那一刻 master 的 sha」。",
+        },
+        {
+            "order": 6,
+            "tool": "get_ticket",
+            "server": "task_center",
+            "call_via": "python -m task_center --db <中心库> get_ticket --request-id <唯一编号> --input <JSON文件>",
+            "args": {"project_id": project_id, "ticket_id": ticket_id},
+            "check": "非 Cindy 宿主没有 list_sessions 可查，就用这一下反查：state 是 running / awaiting_review，"
+                     "且 attempts[-1].session_id 与第 3 步拿到的那个一字不差，才算这条会话真的在执行这张单。",
+        },
+    ]
+    return {
+        "purpose": "非 Cindy 宿主（Claude Code / Codex / 手工终端）派一张单：库里开单、领取、由人或宿主开执行会话、"
+                   "执行者自己绑定、提交成果。",
+        "host": "generic",
+        "host_capabilities": {
+            "create_project": False,
+            "send_to_session": False,
+            "schedule_create": False,
+            "files_scripts_cron": True,
+        },
+        "stop_points": [
+            "没有宿主建会话能力时就停在第 3 步（open_session）：不许拿猜的 session_id 顶替。"
+            "2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，list_sessions 里根本没有那条会话。",
+            "第 2 步拿不到宿主自己给的会话标识就停：协调者的标识也只能问宿主，不许拼。",
+            "第 4 步 bind_session 的 session_id 只能用第 3 步宿主报出的那个；"
+            "校验由 onboard.check_session_id 做，猜的值在计划层就被拒。",
+            "第 6 步 get_ticket 里 state 与 session_id 对不上，就是绑定没成：不要说已经开工。",
+        ],
+        "session_identity": {
+            "rule": "执行会话的 session_id 必须来自宿主自己（新会话自报、宿主回执、或宿主会话列表）；"
+                    "协调会话的标识也必须向宿主取。禁止从临时目录名、运行目录或任何路径拆一个字符串当标识。",
+            "source": "命令行给出" if session_id else "第 3 步由宿主报出",
+            "reject": ["空串", "含 < > { } 的占位符", "含路径分隔符",
+                       "含 placeholder/占位/unknown/todo/tbd/guess/猜 等字样", f"超过 {SESSION_ID_LIMIT} 字符"],
+            "guard": "onboard.check_session_id",
+        },
+        "must_not": "没有宿主建会话能力时就停在第 3 步，不许拿猜的 session_id 顶替；"
+                     "拿不到真实标识就不 bind_session，也不提交成果。",
+        "steps": steps,
+    }
 
 
 def _send_step(order: int, workspace: str, title: str, message: str,
@@ -144,9 +344,22 @@ def build_plans(workspace: str, *, project_name: str | None = None,
                 title: str = "AI 工作区 · 协调会话",
                 agent_kind: str | None = None, model: str | None = None,
                 project_id: str = "ai-workspace", ticket_id: str = "<工单号>",
-                expected_revision: int = 1) -> dict:
-    """返回两条计划。纯函数：不读环境、不写文件、不调宿主。"""
+                expected_revision: int = 1, host: str = "cindy",
+                session_id: str | None = None) -> dict:
+    """返回该宿主的计划。纯函数：不读环境、不写文件、不调宿主。
+
+    `host="cindy"`（默认）返回 bootstrap + dispatch_ticket 两张；`host="generic"`
+    只返回 generic_dispatch 一张，里面没有任何 cindy_helper 工具。默认值不变是为了
+    插件与 verify 对得上：`plugin/draft/main.js` 的 PLANS 比的是默认那张。
+    """
+    if host not in HOSTS:
+        raise ValueError(f"未知宿主：{host}（只收 {' / '.join(HOSTS)}）")
     workspace = str(Path(workspace).expanduser().resolve())
+    if host == "generic":
+        return {"generic_dispatch": _generic_plan(
+            workspace, project_id=project_id, ticket_id=ticket_id,
+            expected_revision=expected_revision, session_id=session_id,
+        )}
     name = project_name or Path(workspace).name or "AI 工作区"
     bootstrap = {
         "purpose": "把已装好的工作区加成宿主项目，开一个协调会话，并把第一条指令发进去。",
@@ -210,28 +423,31 @@ def build_plans(workspace: str, *, project_name: str | None = None,
     return {"bootstrap": bootstrap, "dispatch_ticket": dispatch}
 
 
-def render_text(plans: dict, *, workspace: str, dry_run: bool) -> str:
+def render_text(plans: dict, *, workspace: str, dry_run: bool, host: str = "cindy") -> str:
     lines = [
         "AI 工作区 · 启动计划",
         f"工作区：{workspace}",
-        "调用方式：cindy_mcp_call_tool(server=\"cindy_helper\", tool=\"call_tool\", "
-        "args={\"name\": <工具名>, \"args\": <参数>})",
-        "预演：只打印计划，不写文件、不调宿主。" if dry_run else "这一步不会自己执行；照计划逐条调，失败按给出的停点处理。",
-        "",
-        "== bootstrap（装完 → 加成项目 → 开协调会话）",
+        f"宿主：{host}",
     ]
-    for step in plans["bootstrap"]["steps"]:
-        lines.append(f"{step['order']}. {step['tool']}  [{step['server']}]")
-        lines.append(f"   参数：{json.dumps(step['args'], ensure_ascii=False)}")
-        lines.append(f"   核对：{step['check']}")
-    lines += ["", "== dispatch_ticket（claim 之后 → 派发执行会话）"]
-    for step in plans["dispatch_ticket"]["steps"]:
-        lines.append(f"{step['order']}. {step['tool']}  [{step['server']}]")
-        lines.append(f"   参数：{json.dumps(step['args'], ensure_ascii=False)}")
-        lines.append(f"   核对：{step['check']}")
+    if host == "generic":
+        lines.append("调用方式：task_center 步骤用 `python -m task_center --db <中心库> <操作> --request-id <唯一编号> "
+                     "--input <JSON文件>`；`open_session` 是 local 步，由人或宿主自己开。")
+    else:
+        lines.append("调用方式：cindy_mcp_call_tool(server=\"cindy_helper\", tool=\"call_tool\", "
+                     "args={\"name\": <工具名>, \"args\": <参数>})")
+    lines.append("预演：只打印计划，不写文件、不调宿主。" if dry_run
+                 else "这一步不会自己执行；照计划逐条调，失败按给出的停点处理。")
+    for plan_name, plan in plans.items():
+        lines += ["", f"== {plan_name}（{plan['purpose']}）"]
+        for step in plan["steps"]:
+            lines.append(f"{step['order']}. {step['tool']}  [{step['server']}]")
+            lines.append(f"   参数：{json.dumps(step['args'], ensure_ascii=False)}")
+            lines.append(f"   核对：{step['check']}")
+        for point in plan.get("stop_points", []):
+            lines.append(f"停点：{point}")
     lines += ["", "== 失败停点"]
-    for plan_name, failures in FAILURES.items():
-        for tool, advice in failures.items():
+    for plan_name in plans:
+        for tool, advice in FAILURES[plan_name].items():
             lines.append(f"- {plan_name}/{tool}：{advice}")
     return "\n".join(lines)
 
@@ -248,6 +464,10 @@ def main(argv=None) -> int:
     parser.add_argument("--ticket-id", default="<工单号>", help="派发计划里的工单号")
     parser.add_argument("--expected-revision", type=int, default=1, help="派发计划里的工单 revision")
     parser.add_argument("--json", action="store_true", help="输出机器可读的完整计划")
+    parser.add_argument("--host", choices=HOSTS, default="cindy",
+                        help="宿主类型：cindy（有 create_project / send_to_session）或 generic（只有文件、脚本与 cron）")
+    parser.add_argument("--session-id", default=None,
+                        help="generic 宿主已有真实会话标识时直接填进 bind_session；猜的或占位的值会被拒（退出 2）")
     parser.add_argument("--dry-run", action="store_true", help="预演：零副作用（本命令本来就不写文件）")
     args = parser.parse_args(argv)
 
@@ -256,6 +476,18 @@ def main(argv=None) -> int:
         print(f"工作区目录不存在：{workspace}", file=sys.stderr)
         return 2
     workspace = workspace.resolve()
+
+    session_id = args.session_id
+    if session_id is not None:
+        if args.host != "generic":
+            print("`--session-id` 只用于 `--host generic`：Cindy 的 session id 由 send_to_session 回执给出。",
+                  file=sys.stderr)
+            return 2
+        ok, reason = check_session_id(session_id)
+        if not ok:
+            print(f"session_id 不可用：{reason}。不许猜，也不许从目录名拼一个；"
+                  "拿不到宿主报出的真实标识就停在 open_session 那一步。", file=sys.stderr)
+            return 2
 
     plans = build_plans(
         str(workspace),
@@ -266,22 +498,35 @@ def main(argv=None) -> int:
         project_id=args.project_id,
         ticket_id=args.ticket_id,
         expected_revision=args.expected_revision,
+        host=args.host,
+        session_id=session_id,
     )
     payload = {
         "ok": True,
         "workspace": str(workspace),
         "dry_run": bool(args.dry_run),
+        "host": args.host,
         "side_effects": [],
-        "call_via": "cindy_mcp_call_tool",
+        "call_via": "cindy_mcp_call_tool" if args.host == "cindy"
+                    else "python -m task_center --db <中心库> <操作> --request-id <唯一编号> --input <JSON文件>",
         "cindy_helper_tools": list(CINDY_HELPER_TOOLS),
         "plans": plans,
         "failure_paths": FAILURES,
         "first_instruction": FIRST_INSTRUCTION,
     }
+    if args.host == "generic":
+        # 宿主能力与停点在顶层也放一份：调用方不必先拆 plans 才能答「这个宿主能不能建会话」。
+        plan = plans["generic_dispatch"]
+        payload.update({
+            "host_capabilities": plan["host_capabilities"],
+            "stop_points": plan["stop_points"],
+            "session_identity": plan["session_identity"],
+            "must_not": plan["must_not"],
+        })
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print(render_text(plans, workspace=str(workspace), dry_run=args.dry_run))
+        print(render_text(plans, workspace=str(workspace), dry_run=args.dry_run, host=args.host))
     return 0
 
 

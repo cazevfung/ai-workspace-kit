@@ -2,6 +2,18 @@
 
 ## 未发布
 
+### 非 Cindy 宿主也能派单：`--host generic` 与「不许猜 session id」（AWK-106）
+
+2026-11-17 的 AW-007：从临时目录名拼了一个 session id 调 `bind_session`，库照收，`list_sessions` 里根本没有那条会话。根因在于文档只写了一句「其他宿主需要自己补这一步」，没有可照着做的形状，也没有停点。
+
+- `kit/onboard.py` 新增 `--host generic`：计划从 `create_project / send_to_session` 换成 `create_ticket → claim_ticket → open_session → bind_session → submit_result → get_ticket`，全程不出现在 `cindy_helper` 工具里；`open_session` 标 `local`，由人或宿主自己开，**要交回宿主自己报出的真实 session id**。
+- 新增 `check_session_id()` 与 `--session-id`：空串、残留 `<…>` 占位、含路径分隔符（AW-007 的形态）、含 `unknown` / `placeholder` / `占位` 之类字样的值一律拒，退出码 2；拒绝理由写清「不许猜」。`build_plans(host="generic")` 默认把这个占位值摆在 `bind_session` 的 `session_id` 上，并在同一步写 `requires_real_session_id: true`——计划本身不会拿假 id 交差。
+- 输出顶层的 `host_capabilities` 把差异写成字段：`create_project` / `send_to_session` / `schedule_create` 为 `false`，`files_scripts_cron` 为 `true`；`stop_points` 把「拿不到真实 id 就停在第 3 步」与 AW-007 原文一并给出。
+- 默认 `--host cindy` 的两张计划、`CINDY_HELPER_TOOLS`、插件 `PLANS` 一致性检查一字未改；`TASK_CENTER_TOOLS` 补了 `create_ticket` / `bind_session` / `submit_result`（本来就是引擎操作，只是之前没进计划）。
+- `README` / `README.en` 新增「两种宿主」一节（差别表 + 取真实 session id 的方法 + 停点）；开头那句「Claude Code、Codex 均可」改成「Cindy 已实测，其他宿主只保证文件、脚本与 cron 这一层」；`docs/INSTALL.md` / `docs/SHARING.md` 的同一句指向 `--host generic`。
+- 用例：`kit/tools/test_onboard.py` 加 14 项（generic 计划形状、`local` 步、停点含 AW-007、能力字段、session id 判据八种反例、CLI 四条）。合计 984 → 998 项（`tests/` 354 + `tools/` 644）。
+- 刻意没做的：不实现任何宿主适配器，不改 `task_center/` 与 `send_to_session`，不改 `plugin/` 与 `dist/`，不升 `VERSION`、不打 tag、不推送。
+
 ### 沙箱安装不再改写真实的 `~/.agents`（AWK-113）
 
 2026-11-23 22:10 的真实事故：一个验收会话把工作区装到临时目录 `D:\awk109-verify\ws`，`--agents-home` 用了默认值（真实 `~/.agents`），安装器无条件写 `<agents_home>/center.json`，于是真实 `center.json` 被改指到沙箱的空库。后果不是「这次装错了」而是「所有工作区工具一起读到空库」——`work_gate` / `auto_merge` / 钩子全报 0 张在途，巡检据此发出错误指令。
@@ -10,7 +22,7 @@
 - `install.py` 新增 `--allow-user-config`。两种默认行为改了：`--agents-home` 落在真实用户目录以外时**一个用户级文件都不写**（`center.json` / `skills/` / `intake/` / 安装清单）；`--agents-home` 就是真实目录而那里的 `center.json` 已指向**别的**库时**拒绝**，在复制第一个文件之前退出（码 2）并把原内容原样打印。首次安装与「同一个库再装一次」行为不变。
 - 跳过用户级配置时工作区指针 `<工作区>/.agents/center.json` 也不写：它记的是 `agents_home`，而那里没有 `center.json` 时闸门按「指针指丢」报 `DB_NOT_FOUND` 不回落；不写指针，闸门走「本工作区 `.data`」那一步，装出来的工作区照常可用。
 - `--dry-run` 预报这三类结果：会写哪些用户级文件、会跳过什么、会拒绝什么。
-- 用例：新增 `kit/tools/test_install_guard.py`（17 项）——沙箱默认不写（真跑安装，临时 `--agents-home`）、显式开关才写、首次安装与同库重装不变、真装重指默认拒绝且文件字节不变、`--dry-run` 三类预报、快照能认出「改一个字节」与「多一个文件」。端到端用例全部拒绝写真实 `~/.agents`：真装重指那条用假 HOME（`USERPROFILE` / `HOME`），并在跑之前先确认子进程的 `Path.home()` 真是它，不是就跳过。合计 967 → 984 项（`tests/` 354 + `tools/` 630）。
+- 用例：新增 `kit/tools/test_install_guard.py`（17 项）——沙箱默认不写（真跑安装，临时 `--agents-home`）、显式开关才写、首次安装与同库重装不变、真装重指默认拒绝且文件字节不变、`--dry-run` 三类预报、快照能认出「改一个字节」与「多一个文件」。端到端用例全部拒绝写真实 `~/.agents`：真装重指那条用假 HOME（`USERPROFILE` / `HOME`），并在跑之前先确认子进程的 `Path.home()` 真是它，不是就跳过。合计 967 → 984 项（`tests/` 354 + `tools/` 630），AWK-106 再加 14 项后是 998 项（`tools/` 644）。
 - `verify/verify_install.py`：安装命令补开关，并加两项现场检查——不带开关的沙箱安装一个用户级文件都不写、真实 `~/.agents` 装前装后快照一致（只读比对）。现在 23 项全过。
 - `docs/INSTALL.md` / `README` / `README.en` / `bootstrap-skill/ai-workspace-setup`：写清默认跳过什么、怎么显式开、拒绝时怎么办；`kit/docs/closing.md` 的「中心库怎么被发现」补一句「沙箱默认安装不写指针，走第 5 步」。
 - 刻意没做的：不改 `task_center/`，不改 `center_config` 的发现顺序，不迁移历史安装，不自动备份或轮转旧 `center.json`，不升 `VERSION`、不打 tag、不推送。
