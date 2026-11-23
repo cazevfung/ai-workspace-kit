@@ -31,9 +31,15 @@
   open_session（`local` 步，人或宿主自己开）→ bind_session → submit_result →
   get_ticket（反查绑定）。**没有宿主建会话能力时就停在 open_session 那一步，不许拿猜的
   session_id 顶替**——2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，
-  `list_sessions` 里根本没有那条会话。同一条规矩也写在 `check_session_id()` 里。
+  `list_sessions` 里根本没有那条会话。同一条规矩也写在 `check_session_id()` 里：它只收
+  UUID 形状，把目录名 slug 化出来的串（`session_D_AI`、`D_AI工作区`）也挡在外面。
+  它**只核形状、不核存在**——形状对了也要靠第 6 步 `get_ticket` 反查那条会话真的在执行。
 
-退出码：0 打印成功；2 参数不合法（工作区目录不存在、`--session-id` 是猜的或配错宿主）。
+两份 payload 不同源（2026-11-24 返工）：`--host generic` 的 JSON 里没有 `cindy_helper_tools`
+这个键，`failure_paths` 只有 `generic_dispatch` 一个分区。bootstrap / dispatch_ticket 的停点
+全是 Cindy 专用，混进 generic 的 payload 就与 `host_capabilities.create_project=false` 打架。
+
+退出码：0 打印成功；2 参数不合法（工作区目录不存在、`--session-id` 不是 UUID 形状或配错宿主）。
 
 依据：PRD-001 v0.1 的闭环形状与「归属不猜」；AGENTS.md 硬规则五（派发是新开一个
 会话，执行者自己 bind_session）。
@@ -42,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -68,6 +75,17 @@ SESSION_ID_PLACEHOLDER = "<真实 session_id：第 3 步宿主返回的那个，
 SESSION_ID_LIMIT = 500  # 与 bind_session 的 text(data, "session_id", 500) 一致
 SESSION_ID_REJECT_MARKERS = ("placeholder", "占位", "unknown", "todo", "tbd",
                              "guess", "猜", "fake", "dummy", "example", "sample")
+# 2026-11-24 返工（AWK-106 C4）：只挡占位词与路径分隔符不够。`session_D_AI`、
+# `D_AI工作区` 这类「把目录名 slug 化」的串既没有分隔符、也没有占位词，旧判据照样放行，
+# 一路写进 bind_session。所以判据改成正面的形状：只收 UUID，允许带前缀。
+# 本仓库里的真实会话 id 都是这个形状；宁可拒收，也不放一个看起来像 id 的目录名进去。
+SESSION_ID_SHAPE = re.compile(
+    r"^(?:[A-Za-z][A-Za-z0-9_.]*[_:-])?"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+SESSION_ID_SHAPE_TEXT = "8-4-4-4-12 位小写十六进制的 UUID，可带前缀（如 session_<uuid>）"
+SESSION_ID_SHAPE_ADVICE = ("本仓库里的真实会话 id 都是 UUID；你的宿主若不是这个形状，"
+                           "就在计划里写『此处由你填写真实 id』，不要猜、不要从路径拼。")
 RECEIPT_RELATIVE = ".data/onboard-receipt.json"
 RECEIPT_FIELDS = ("project_path", "target_session_id", "working_dir", "created_at")
 
@@ -125,7 +143,14 @@ def check_session_id(value) -> tuple[bool, str]:
 
     为什么要这一道：2026-11-17 AW-007 从临时目录名拼了一个 id，`bind_session` 照收，
     `list_sessions` 里根本没有那条会话。库能收不等于会话存在，所以把「看起来就是猜的」
-    挡在计划层：空串、还留着占位符、带路径分隔符、带占位词、超长。
+    挡在计划层。
+
+    判据是正面的形状：**只收 UUID**（8-4-4-4-12 小写十六进制，允许带前缀），其余一律拒。
+    空串、占位符、路径分隔符、占位词各自给出原因；`session_D_AI` / `D_AI工作区` 这种把
+    目录名 slug 化出来的形态既没有分隔符也没有占位词，只有形状判据拦得住。
+
+    **只核形状、不核存在**：形状合法的随手 id 也过得了这道闸门，它在宿主里到底有没有，
+    只能靠第 6 步 `get_ticket` 反查——所以计划里不写「已验证存在」。
 
     返回 `(能不能用, 不能用的原因)`；能用时原因为空串。
     """
@@ -144,6 +169,10 @@ def check_session_id(value) -> tuple[bool, str]:
             return False, f"含有占位或猜测的字样（{marker}）：这不是宿主返回的标识"
     if "/" in text or "\\" in text:
         return False, "含路径分隔符：从目录名或路径拆出来的字符串不是会话标识"
+    if not SESSION_ID_SHAPE.match(text):
+        shown = text if len(text) <= 60 else text[:57] + "..."
+        return False, (f"不是 UUID 形状（只收 {SESSION_ID_SHAPE_TEXT}，收到的是「{shown}」）："
+                       + SESSION_ID_SHAPE_ADVICE)
     return True, ""
 
 
@@ -161,10 +190,11 @@ def _generic_open_step(order: int) -> dict:
                     "用宿主自己的「新建会话」命令或快捷键开一个任务",
                     "宿主的一次性子任务（必须在 submit_result 的 evidence 里注明「无法追问」）"],
             "must_return": "宿主自己报出的 session id：新会话自己报的、宿主回执里的、或宿主会话列表里那一条的 id",
-            "must_not_return": "临时目录名、运行目录、工单号或任何从路径拆出来的字符串",
+            "must_not_return": "临时目录名、运行目录、工单号或任何从路径拆出来的字符串；也不接受把它们 slug 化出来的串（session_D_AI、D_AI工作区）",
         },
         "check": "拿到的是宿主自己报出的真实 session id，并能在宿主里再查一次看到这条会话；"
                  "拿不到就停在这一步，不许拿猜的 session_id 顶替。",
+        "shape_only": "onboard.check_session_id 只核形状（UUID）、不核存在：闸门放行不等于这条会话真的在宿主里。",
     }
 
 
@@ -217,7 +247,8 @@ def _generic_plan(workspace: str, *, project_id: str, ticket_id: str,
             },
             "requires_real_session_id": True,
             "check": "session_id 必须是第 3 步里宿主报出的真实标识，原样填写；没有真实标识就不 bind，"
-                     "不许猜、也不许从目录名拼。回执的 session_id 与本步传入的一字不差才算绑上；"
+                     "不许猜、也不许从目录名拼，slug 化过的一样不行。闸门只核形状、不核存在；"
+                     "回执的 session_id 与本步传入的一字不差才算绑上；"
                      "PROJECT_MISMATCH 回第 3 步核项目根，SELF_DISPATCH 说明你开的是同一条会话。",
         },
         {
@@ -265,14 +296,21 @@ def _generic_plan(workspace: str, *, project_id: str, ticket_id: str,
             "2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，list_sessions 里根本没有那条会话。",
             "第 2 步拿不到宿主自己给的会话标识就停：协调者的标识也只能问宿主，不许拼。",
             "第 4 步 bind_session 的 session_id 只能用第 3 步宿主报出的那个；"
-            "校验由 onboard.check_session_id 做，猜的值在计划层就被拒。",
+            "校验由 onboard.check_session_id 做，只收 UUID 形状，猜的值与目录名 slug 在计划层就被拒。",
+            "这道闸门只核形状、不核存在：形状对也不等于宿主里真有这条会话，"
+            "所以计划里不写「已经存在」这类话，只写「必须来自宿主回执或用户」。",
             "第 6 步 get_ticket 里 state 与 session_id 对不上，就是绑定没成：不要说已经开工。",
         ],
         "session_identity": {
             "rule": "执行会话的 session_id 必须来自宿主自己（新会话自报、宿主回执、或宿主会话列表）；"
                     "协调会话的标识也必须向宿主取。禁止从临时目录名、运行目录或任何路径拆一个字符串当标识。",
+            "shape": f"只收 UUID：{SESSION_ID_SHAPE_TEXT}",
+            "does_not_check": "闸门只核形状、不核存在。这个 id 必须来自宿主回执或用户；"
+                              "形状合法也不代表宿主里有这条会话，存在性只能靠第 6 步 get_ticket 反查。",
             "source": "命令行给出" if session_id else "第 3 步由宿主报出",
-            "reject": ["空串", "含 < > { } 的占位符", "含路径分隔符",
+            "reject": ["空串",
+                       "不是 UUID 形状（含把目录名 slug 化出来的串，如 session_D_AI、D_AI工作区）",
+                       "含 < > { } 的占位符", "含路径分隔符",
                        "含 placeholder/占位/unknown/todo/tbd/guess/猜 等字样", f"超过 {SESSION_ID_LIMIT} 字符"],
             "guard": "onboard.check_session_id",
         },
@@ -509,13 +547,17 @@ def main(argv=None) -> int:
         "side_effects": [],
         "call_via": "cindy_mcp_call_tool" if args.host == "cindy"
                     else "python -m task_center --db <中心库> <操作> --request-id <唯一编号> --input <JSON文件>",
-        "cindy_helper_tools": list(CINDY_HELPER_TOOLS),
         "plans": plans,
         "failure_paths": FAILURES,
         "first_instruction": FIRST_INSTRUCTION,
     }
     if args.host == "generic":
+        # C3（2026-11-24 返工）：`--host generic` 的 payload 里不能有 `cindy_helper_tools` 这个键，
+        # `failure_paths` 也只能有 generic_dispatch。bootstrap / dispatch_ticket 的停点全是 Cindy
+        # 专用（create_project / send_to_session），留在这份 payload 里等于说「这个宿主有那些步骤」，
+        # 与 host_capabilities.create_project=false 自相矛盾。
         # 宿主能力与停点在顶层也放一份：调用方不必先拆 plans 才能答「这个宿主能不能建会话」。
+        payload["failure_paths"] = {"generic_dispatch": FAILURES["generic_dispatch"]}
         plan = plans["generic_dispatch"]
         payload.update({
             "host_capabilities": plan["host_capabilities"],
@@ -523,6 +565,8 @@ def main(argv=None) -> int:
             "session_identity": plan["session_identity"],
             "must_not": plan["must_not"],
         })
+    else:
+        payload["cindy_helper_tools"] = list(CINDY_HELPER_TOOLS)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:

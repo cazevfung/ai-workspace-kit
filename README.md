@@ -208,7 +208,7 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 644 = 998 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 650 = 1004 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -233,14 +233,27 @@ python tools/add_project.py D:/my-project      # 业务仓库写 .agents/ticket-
 | 定时派单与催单 | `schedule_create` | 宿主的 cron、系统计划任务，参数由 `python tools/schedule_plan.py` 打印 |
 | 反查会话 | `list_sessions`（按 `workdir`） | `get_ticket`：看 `state` 与 `attempts[-1].session_id` |
 
-非 Cindy 宿主用 `--host generic` 打出手工计划，里面一个 `cindy_helper` 工具都不出现：
+非 Cindy 宿主用 `--host generic` 打出手工计划，里面一个 `cindy_helper` 工具都不出现：payload 里连 `cindy_helper_tools` 这个键都没有，`failure_paths` 只有 `generic_dispatch` 一个分区（`bootstrap` / `dispatch_ticket` 的停点全是 Cindy 专用，不进这份 payload）。这条可以当场核：
+
+```bash
+python onboard.py --host generic --json | python -c "import json,sys; p=json.load(sys.stdin); print(sorted(p)); print(sorted(p['failure_paths']))"
+```
+
+```
+['call_via', 'dry_run', 'failure_paths', 'first_instruction', 'host', 'host_capabilities', 'must_not', 'ok', 'plans', 'session_identity', 'side_effects', 'stop_points', 'workspace']
+['generic_dispatch']
+```
+
+再往下是六步与每步的完整参数：
 
 ```bash
 python onboard.py --host generic --json                                  # 六步与每步完整参数
 python onboard.py --host generic --json --session-id <宿主给的真实 id>   # 会话已经开好时直接填进 bind_session
 ```
 
-顺序是 `create_ticket → claim_ticket → open_session → bind_session → submit_result → get_ticket`。第 3 步 `open_session` 不是宿主工具，由人或宿主自己开一个执行会话；**这一步要交回的是宿主自己报出的 session id**。第 4 步的 `--session-id` 先过 `onboard.check_session_id`：空串、还留着 `<…>` 占位、含路径分隔符（从临时目录名拆出来的那种）、含 `unknown` / `placeholder` / `占位` 之类字样的值一律拒绝，退出码 2。同一个道理，第 2 步 `claim_ticket` 的 `coordinator_session_id` 也只能向宿主取。
+顺序是 `create_ticket → claim_ticket → open_session → bind_session → submit_result → get_ticket`。第 3 步 `open_session` 不是宿主工具，由人或宿主自己开一个执行会话；**这一步要交回的是宿主自己报出的 session id**。第 4 步的 `--session-id` 先过 `onboard.check_session_id`，而这道闸门**只收 UUID 形状**（`8-4-4-4-12` 位小写十六进制，可带前缀如 `session_<uuid>`）：空串、残留 `<…>` 占位、含 `unknown` / `placeholder` / `占位` 之类字样、带路径分隔符、以及把目录名 slug 化出来的串（`session_D_AI`、`D_AI工作区`）一律拒绝，退出码 2。本仓库里的真实会话 id 都是 UUID；你的宿主若不是这个形状，就在计划里写『此处由你填写真实 id』，不要猜、不要从路径拼。同一个道理，第 2 步 `claim_ticket` 的 `coordinator_session_id` 也只能向宿主取。
+
+**闸门只核形状、不核存在。** 形状合法但随手写的 id 也能过闸门，它在宿主里到底有没有，只能靠第 6 步 `get_ticket` 反查；所以计划里没有任何「已验证存在」的说法——只写「这个 id 必须来自宿主回执或用户」。
 
 **拿不到真实 session id 就停在 `open_session` 那一步，不许拿猜的顶替。** 2026-11-17 的 AW-007 就是从临时目录名拼了一个 session id：`bind_session` 照收，`list_sessions` 里根本没有那条会话——库里写得像开工了，实际没有任何会话在做。要证明这条会话真的在执行，非 Cindy 宿主没有 `list_sessions`，就用第 6 步 `get_ticket` 反查：`state` 是 `running` / `awaiting_review`，且 `attempts[-1].session_id` 与第 3 步一字不差。
 
@@ -269,14 +282,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 998 项（`tests/` 354、`tools/` 644）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1004 项（`tests/` 354、`tools/` 650）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 998 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1004 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 

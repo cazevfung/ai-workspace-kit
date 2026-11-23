@@ -205,7 +205,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 644 = 998, 0 failures
+python tools/run_tests.py            # should pass: tests/ 354 + tools/ 650 = 1004, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -230,14 +230,27 @@ The last-but-one step of a dispatch is always "open a new executor session", but
 | Scheduled dispatch and reminders | `schedule_create` | the host's cron or the system scheduler, with the arguments printed by `python tools/schedule_plan.py` |
 | Look a session back up | `list_sessions` (by `workdir`) | `get_ticket`: read `state` and `attempts[-1].session_id` |
 
-On a non-Cindy host, ask for the manual plan with `--host generic`; no `cindy_helper` tool appears in it:
+On a non-Cindy host, ask for the manual plan with `--host generic`; no `cindy_helper` tool appears anywhere in the payload — the `cindy_helper_tools` key is absent, and `failure_paths` carries only `generic_dispatch` (the `bootstrap` / `dispatch_ticket` stop points are Cindy-only and stay out of this payload). Check it directly:
+
+```bash
+python onboard.py --host generic --json | python -c "import json,sys; p=json.load(sys.stdin); print(sorted(p)); print(sorted(p['failure_paths']))"
+```
+
+```
+['call_via', 'dry_run', 'failure_paths', 'first_instruction', 'host', 'host_capabilities', 'must_not', 'ok', 'plans', 'session_identity', 'side_effects', 'stop_points', 'workspace']
+['generic_dispatch']
+```
+
+The six steps with their full arguments:
 
 ```bash
 python onboard.py --host generic --json                                  # six steps with full arguments
 python onboard.py --host generic --json --session-id <real id from the host>   # session already open: fill it into bind_session
 ```
 
-The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> submit_result -> get_ticket`. Step 3, `open_session`, is not a host tool: a person or the host opens the executor session, and **what that step must hand back is the session id the host itself reported**. `--session-id` runs through `onboard.check_session_id` first: empty strings, leftover `<...>` placeholders, path separators (the shape you get from a temporary directory name), and values containing `unknown` / `placeholder` are all rejected with exit code 2. For the same reason, `coordinator_session_id` at step 2 can only come from the host.
+The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> submit_result -> get_ticket`. Step 3, `open_session`, is not a host tool: a person or the host opens the executor session, and **what that step must hand back is the session id the host itself reported**. `--session-id` runs through `onboard.check_session_id` first, and that gate **accepts the UUID shape only** (`8-4-4-4-12` lowercase hex, optional prefix such as `session_<uuid>`): empty strings, leftover `<...>` placeholders, `unknown` / `placeholder`-style words, path separators, and slugged directory names (`session_D_AI`, `D_AI工作区`) are all rejected with exit code 2. Every real session id in this workspace is a UUID; if your host's ids are not that shape, write "fill in the real id here" in the plan — do not guess, and do not build one from a path. For the same reason, `coordinator_session_id` at step 2 can only come from the host.
+
+**The gate checks shape, not existence.** A well-formed id typed at random passes the gate too; whether it exists in the host is settled only by step 6 `get_ticket`. That is why the plan never says an id is "verified to exist" — only that it must come from a host receipt or the user.
 
 **No real session id, no `bind_session`: stop at `open_session`.** On 2026-11-17 (AW-007) a session id was stitched together from a temporary directory name: `bind_session` accepted it, and `list_sessions` never had that session — the database looked dispatched while nothing was executing. A non-Cindy host has no `list_sessions` to check with, so step 6 `get_ticket` is the check: `state` is `running` / `awaiting_review` and `attempts[-1].session_id` matches step 3 character for character.
 
@@ -245,13 +258,13 @@ The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> s
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 998 (`tests/` 354, `tools/` 644) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 1004 (`tests/` 354, `tools/` 650) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 998 tests
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 1004 tests
 python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
 ```
 

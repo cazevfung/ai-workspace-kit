@@ -33,11 +33,11 @@
   4. `bind_session`（task_center）：`attempt_id` 取第 2 步回执，`session_id` 取第 3 步拿到的真实 id，`project_root` 是登记的项目根；
   5. `submit_result`（task_center）：`summary` / `artifacts` / `evidence` / `risks` / `head_sha` / `base_sha`；
   6. `get_ticket`（task_center）：反查 `state == running` 且该 attempt 的 `session_id` 与第 3 步一字不差——这是非 Cindy 宿主唯一能做的「反查会话」，因为 `list_sessions` 不在它手里。
-- 新增 `SESSION_ID_PLACEHOLDER` 与 `check_session_id(value)`：空串、含 `<`/`>`、含 `placeholder` / `占位` / `unknown` / `todo` / `tbd` / `猜`、含路径分隔符（`/` 或 `\`，AW-007 的形态）、超过 500 字符，一律判不通过并给出原因；`--session-id` 传进来的值先过这道判据，不过就退出 2，不打印计划。
-- `onboard.py --host generic` 的 JSON 增顶层 `host` / `host_capabilities` / `stop_points` / `session_identity` / `must_not`，其中 `stop_points` 含那句硬话：「没有宿主建会话能力时就停在第 3 步，不许拿猜的 session_id 顶替（2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，list_sessions 里根本没有）」。
-- `README.md` 与 `README.en.md`：新增同一口径的一节，用一张表写清两种宿主的差别（Cindy 有 `create_project` / `send_to_session` / `schedule_create`；其他 agent 只有文件、脚本与 cron），并写清非 Cindy 宿主怎么拿到真实 session id、拿不到时停在哪一步；第 11 行那句「Cindy、Claude Code、Codex 均可」改成「Cindy 已实测；其他宿主只保证文件、脚本与 cron 这一层，未实测」。
+- 新增 `SESSION_ID_PLACEHOLDER` 与 `check_session_id(value)`：判据是正面的形状——**只收 UUID**（`8-4-4-4-12` 位小写十六进制，可带前缀如 `session_<uuid>`），其余一律判不通过。空串、含 `<`/`>`、含 `placeholder` / `占位` / `unknown` / `todo` / `tbd` / `猜`、含路径分隔符（`/` 或 `\`，AW-007 的形态）、超过 500 字符，各自给出原因；`--session-id` 传进来的值先过这道判据，不过就退出 2，不打印计划。只收形状这一条是 2026-11-24 返工补的：只挡占位词与分隔符挡不住把目录名 slug 化出来的串（`session_D_AI`、`D_AI工作区`）。闸门**只核形状、不核存在**，计划里不写「已验证存在」。
+- `onboard.py --host generic` 的 JSON 增顶层 `host` / `host_capabilities` / `stop_points` / `session_identity` / `must_not`，其中 `stop_points` 含那句硬话：「没有宿主建会话能力时就停在第 3 步，不许拿猜的 session_id 顶替（2026-11-17 AW-007：从临时目录名拼了一个 session id，库照收，list_sessions 里根本没有）」。同一份 payload 里**不出现 `cindy_helper_tools`**，`failure_paths` 只有 `generic_dispatch`——bootstrap / dispatch_ticket 的停点全是 Cindy 专用，留在里面就与 `host_capabilities.create_project=false` 自相矛盾。
+- `README.md` 与 `README.en.md`：新增同一口径的一节，用一张表写清两种宿主的差别（Cindy 有 `create_project` / `send_to_session` / `schedule_create`；其他 agent 只有文件、脚本与 cron），并写清非 Cindy 宿主怎么拿到真实 session id、拿不到时停在哪一步；第 11 行那句「Cindy、Claude Code、Codex 均可」改成「Cindy 已实测；其他宿主只保证文件、脚本与 cron 这一层，未实测」。README 里贴的 generic 输出必须与 `python onboard.py --host generic --json` 真跑的一字不差（返工 C3 补的锚）。
 - `docs/INSTALL.md`、`docs/SHARING.md` 各改一句，把「其他宿主自己补」指向 `python onboard.py --host generic`。
-- `kit/tools/test_onboard.py`：新增 generic 计划、停点、session id 判据与 CLI 四组用例。
+- `kit/tools/test_onboard.py`：新增 generic 计划、停点、session id 判据与 CLI 四组用例；返工再加两组——slug 形态逐条 exit 2（`session_D_AI`、`D_AI工作区`、目录名 slug）、形状合法但随手写的 id 过闸门而计划不声称「已验证」；另加 README 贴的 generic 输出与真跑结果逐字一致的锚。
 
 给谁看：手上有 Claude Code / Codex / 一台终端、装完套件却不知道派单那一步怎么走的人，以及替他们写文档的人。他要能照着六步敲完，且在任何一步拿不到真实标识时知道该停。
 
@@ -102,6 +102,15 @@
 在 `.worktrees/AWK-106` 分支上提交（commit 钩子会调 `work_gate.py`，需 `TASK_CENTER_TICKET=AWK-106` 且尝试为 `running`）；`submit_result` 的 `head_sha` 取 `git rev-parse HEAD`，`base_sha` 取 `git merge-base HEAD master`，`artifacts` 每条带 `.worktrees/AWK-106/` 前缀；回执只发一条（工单号 + 状态 + 提交 sha）给协调会话 `33da2d7b-16c1-4541-92e0-a070e436bcd0`。
 
 证据：`git rev-parse HEAD` 输出 40 位十六进制且与 `submit_result` 的 `head_sha` 一致；`get_ticket` 回执 `state` 为 `awaiting_review`、`submissions[-1].artifacts` 每条以 `.worktrees/AWK-106/` 开头；两条命令退出码 0。
+
+### 六、返工（验收 reject：C3、C4）
+
+验收结论 reject（review 367b30df），两条不通过：
+
+- **C4（占位 id 只拦住了一半）**：`--session-id session_D_AI` 退出 0，原样写进 `bind_session`——那是从工作树路径压平出来的串，旧判据既没有分隔符也没有占位词，拦不住；`D_AI工作区` 同理。处置：`check_session_id` 改成**只收 UUID 形状**，其余 exit 2，错误文案写清「本仓库里的真实会话 id 都是 UUID；你的宿主若不是这个形状，就在计划里写『此处由你填写真实 id』，不要猜、不要从路径拼」；计划文案里不许出现任何「已验证存在」的说法，只写「这个 id 必须来自宿主回执或用户，闸门只核形状、不核存在」。
+- **C3（README 与实际输出不符）**：README 写「`--host generic` 不会输出任何一个 cindy_helper 工具」，而 `--json` 的 payload 里仍有 `cindy_helper_tools` 与 bootstrap / dispatch_ticket 的停点。处置：generic 的 payload 删掉 `cindy_helper_tools` 这个键，`failure_paths` 只留 `generic_dispatch`；README 贴的那段输出换成真跑出来的原文，并用用例把「README 那一串 == 实际输出」钉住。
+
+证据：`python onboard.py --host generic --session-id session_D_AI --json` 与 `--session-id D_AI工作区 --json` 均退出 2、stderr 含「UUID」与「不要猜」；`python onboard.py --host generic --json | grep -c cindy_helper` 输出 `0`；`python tools/test_onboard.py` 全部 OK（含 slug 反例与 README 一致性的新用例）；`python tools/run_tests.py` 末行「结果：全部通过」。
 
 ## 不做什么
 
