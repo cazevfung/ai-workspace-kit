@@ -2,6 +2,17 @@
 
 ## 未发布
 
+### `next_action` 不再看不见「已验收但没合并」（AWK-114）
+
+2026-11-23 当晚真实发生三次（`AW-139`、`AWK-113`、`AWK-106`）：单已经 `done`、`merges` 里没有行，`auto_merge.py --list` 把它列进「真待合并」，`next_action.py` 却报 `dispatch_execute` 去开下一张单，每次都要人或巡检把合并这一步抳回来。
+
+- 根因不是顺位（合并本来就在派执行之前），是**判据少了一层**：`next_action` 只看 `submissions.head_sha` 一个事实，既不读历史豁免清单，也不看 `ticket/<单号>` 分支在不在。于是「没有分支头、清单里也没有它」的单进了 `skipped: no_branch_head`，`action` 照旧是 `dispatch_execute`——同一现场两个答案。
+- 现在三档判据逐条对齐 `auto_merge.py --list`：有 `head_sha` → 待合并；没有 `head_sha` 但在 `<项目根>/docs/unmerged-exemptions.json` 里 → 历史豁免（`skipped: exempted`）；清单里也没有 → 问 git `ticket/<单号>` 分支在不在（在 → 待合并，走 `--record-only`；不在 → `skipped: no_branch_head` 并把「快照该刷新了」写在 `detail` 里；查不了 → 进 `stop` 当故障报）。
+- 豁免清单与分支判断**直接调 `auto_merge` 的 `load_exemptions` / `exists`**，不重写这套规则；`auto_merge.py` 与 `task_center/` 一个字节未改。合并命中时人读那一行点名单号，多张命中时把其余单号一并列出；提交里没有分支头时在 `stop` 里写明合并记录会按 `unverified` 落库。
+- 这一路径仍然只读：不 `claim`、不写库、不改工单状态、不自动补合并记录。退出码口径不变（0 有活 / 2 没活 / 1 出错）。
+- 用例：`kit/tools/test_next_action.py` 新增 `MergeCriteriaTest` 七项——分支已合入且池子里另有可领单时仍报 `merge`、补上 `merges` 行后不再报、有 `ticket/<单号>` 分支但提交没有分支头的算待合并、历史直做与豁免单都不算、以及一条交叉用例（同一份临时库上 `auto_merge --list` 的「真待合并/历史豁免」两栏与 `next_action` 的 `merge` 候选单号与顺序逐字相等）。合计 1004 → 1012 项（`tests/` 354 + `tools/` 658）。
+- 刻意没做：不改 `auto_merge.py`、不改 `task_center/`、不把「done 但一条提交都没有」升级成阻塞派发、不自动跑 `backfill_merges.py --apply`、不升 `VERSION`、不打 tag、不推送。
+
 ### 非 Cindy 宿主也能派单：`--host generic` 与「不许猜 session id」（AWK-106）
 
 2026-11-17 的 AW-007：从临时目录名拼了一个 session id 调 `bind_session`，库照收，`list_sessions` 里根本没有那条会话。根因在于文档只写了一句「其他宿主需要自己补这一步」，没有可照着做的形状，也没有停点。
