@@ -6,6 +6,8 @@
 `RootIsIdentityTest` 那一组锁另一件事：`root` 是身份、`project_id` 是标签
 （PRD-009 §4.4 / AC05）——同一 root 重复登记复用原记录且不改标签，开单不要求先登记。
 """
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -190,6 +192,82 @@ class RootIsIdentityTest(RegistryCase):
         # alpha 已指向项目甲；再拿 alpha 去登项目乙（未登记）不能当「重复登记」静默复用。
         self.error("CONFLICT", "register_project", {"project_id": "alpha", "name": "甲", "root": str(self.beta)})
         self.assertEqual([("alpha", "甲")], self.labels())
+
+
+class RenameProjectTest(RegistryCase):
+    """显示名可改，身份不动（AW-115）。
+
+    起因是 `projects.name` 写错之后没有正当途径改：`unregister_project` 对有工单的项目
+    直接报 `PROJECT_HAS_TICKETS`（cindy-harmony 名下 70 张），而进度页读的就是这名字。
+    这一组锁三件事：改名只动 `name`、非法输入一行不写、改过的事在 events 里查得到。
+    """
+
+    def project_row(self, project_id="alpha"):
+        conn = sqlite3.connect(str(self.db))
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+
+    def rename_events(self):
+        conn = sqlite3.connect(str(self.db))
+        self.addCleanup(conn.close)
+        rows = conn.execute("SELECT detail FROM events WHERE operation='rename_project' ORDER BY id")
+        return [json.loads(detail) for (detail,) in rows]
+
+    def test_rename_changes_only_the_display_name(self):
+        ticket = self.ticket()
+        before = dict(self.project_row())
+        result = self.ok("rename_project", {"project_id": "alpha", "name": "甲（正式）"})
+        self.assertEqual("甲", result["old_name"])
+        self.assertEqual("甲（正式）", result["name"])
+        self.assertEqual("alpha", result["project_id"])
+        after = dict(self.project_row())
+        # name 变了，其余逐字不动：id / root / next_number 都是身份与发号盘。
+        self.assertEqual("甲（正式）", after["name"])
+        self.assertEqual({k: v for k, v in before.items() if k != "name"},
+                         {k: v for k, v in after.items() if k != "name"})
+        self.assertEqual([("alpha", "甲（正式）")], self.labels())
+        # 工单还挂在同一个 project_id 下，改完照样读得出来。
+        self.assertEqual(ticket["id"], self.ok("get_ticket", {"project_id": "alpha",
+                                                              "ticket_id": self.tid()})["id"])
+
+    def test_rename_keeps_the_next_number_plate(self):
+        self.ticket()
+        plate = self.project_row()["next_number"]
+        self.ok("rename_project", {"project_id": "alpha", "name": "甲二"})
+        self.assertEqual(plate, self.project_row()["next_number"])
+        # 发号接着原来的盘子走，不从 1 重来。
+        second = self.ticket("t2")
+        self.assertEqual(f"ALPHA-{plate:03d}", second["id"])
+
+    def test_rename_writes_an_event_with_old_and_new_name(self):
+        self.ok("rename_project", {"project_id": "alpha", "name": "甲三", "changed_by": "sess-1"})
+        details = [row["result"] for row in self.rename_events() if "result" in row]
+        self.assertEqual(1, len(details), details)
+        self.assertEqual("甲", details[0]["old_name"])
+        self.assertEqual("甲三", details[0]["name"])
+        self.assertEqual("sess-1", details[0]["changed_by"])
+
+    def test_empty_name_is_rejected_and_nothing_is_written(self):
+        for bad in ("", "   ", None):
+            payload = {"project_id": "alpha", "name": bad}
+            self.error("INVALID_INPUT", "rename_project", payload)
+        self.assertEqual("甲", self.project_row()["name"])
+        self.assertEqual([("alpha", "甲")], self.labels())
+        self.assertEqual([], [row for row in self.rename_events() if "result" in row])
+
+    def test_over_long_name_is_rejected_and_nothing_is_written(self):
+        self.error("INVALID_INPUT", "rename_project", {"project_id": "alpha", "name": "字" * 201})
+        self.assertEqual("甲", self.project_row()["name"])
+        self.assertEqual([], [row for row in self.rename_events() if "result" in row])
+        # 边界那一条是收的：200 个字进得去。
+        self.ok("rename_project", {"project_id": "alpha", "name": "字" * 200})
+        self.assertEqual("字" * 200, self.project_row()["name"])
+
+    def test_unknown_project_is_rejected_and_nothing_is_written(self):
+        self.error("NOT_FOUND", "rename_project", {"project_id": "ghost", "name": "甲四"})
+        self.assertEqual([("alpha", "甲")], self.labels())
+        self.assertEqual([], [row for row in self.rename_events() if "result" in row])
 
 
 if __name__ == "__main__":

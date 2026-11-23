@@ -72,6 +72,20 @@ VERDICT_STATUS = {"已收尾": "已收尾", "等一句答复": "等一句答复"
 IN_FLIGHT_STATES = CLOSING_BLOCKING_STATES
 
 PLACEHOLDER = re.compile(r"^(?:无|暂无|没有|待补充|待定|补充|todo|tbd)[\s。.；;!！?？]*$", re.I)
+
+# 第 5 节「欠 AI 的下一步」的落点：下一个会话必须能拿着它去干活。三种形态各一个正则，
+# 取并集——工单/PRD 号（AW-108、PRD-004）、文件路径（tools/close_gate.py、docs/closing.md）、
+# 反引号里的一段命令或标识（`python tools/run_tests.py`、`auto_merge`）。第三种故意宽容：
+# 本仓库的命令与文件名一律写在反引号里，要求它「以命令词开头」会把 `bind` 这种库操作
+# 判红，而真实收尾包 `tasks/closing-R-016.md` 第 5 节第 7 条正是这个写法。
+NEXT_STEP_TICKET = re.compile(r"\b[A-Z]{1,6}-\d{1,4}\b")
+NEXT_STEP_PATH = re.compile(
+    r"[\w.\-]*[/\\][\w.\-]+|\b[\w\-]+\.(?:md|py|txt|json|ya?ml|toml|sqlite3?|ps1|sh|cmd|bat|cfg|ini|html|css|js|ts)\b",
+    re.I,
+)
+NEXT_STEP_CODE = re.compile(r"`[^`\n]+`")
+# 第 5 节按「每条」切：有列表标记时以标记为界（续行并入同一条），没有标记时按空行切段。
+ITEM_START = re.compile(r"^\s*(?:[-*+]|\d+[.)、])\s+")
 ROUND_NO = re.compile(r"^轮次[：:]\s*(R-\d{3})\s*$", re.M)
 STATUS_LINE = re.compile(r"^状态[：:]\s*(\S+)\s*$", re.M)
 HEADING = re.compile(r"^## ")
@@ -136,6 +150,61 @@ def round_status(root):
     return round_no, status, problems
 
 
+def next_step_items(body):
+    """把第 5 节切成「每条」：列表项各为一条，续行并入上一条。
+
+    续行必须并进去，否则一个长句换个行就会被当成第二条去判，闸门天天误红。
+    """
+    lines = body.splitlines()
+    if any(ITEM_START.match(line) for line in lines):
+        items = []
+        current = None
+        for line in lines:
+            if ITEM_START.match(line):
+                if current is not None:
+                    items.append(current)
+                current = [line]
+            elif current is not None and line.strip():
+                current.append(line)
+        if current is not None:
+            items.append(current)
+        return ["\n".join(item).strip() for item in items if "\n".join(item).strip()]
+    return [block.strip() for block in re.split(r"\n\s*\n", body) if block.strip()]
+
+
+def has_locator(item):
+    return bool(
+        NEXT_STEP_TICKET.search(item) or NEXT_STEP_PATH.search(item) or NEXT_STEP_CODE.search(item)
+    )
+
+
+def inspect_fifth_section(found, path):
+    """第 5 节的落点判据：每条都要指向一个能打开的东西。缺节由调用方各自报过。"""
+    fifth = found.get(SECTIONS[4])
+    if fifth is None:
+        return []
+    problems = []
+    items = next_step_items(fifth)
+    if not items:
+        problems.append(
+            f"{path}: 第 5 节是空的；要么写一条带落点的下一步（工单/PRD 号、文件路径、"
+            "反引号里的命令或标识），要么把「决定不做」写进第 4 节并给原因"
+        )
+        return problems
+    for item in items:
+        if has_locator(item):
+            continue
+        head = item.splitlines()[0].strip()
+        if len(head) > 40:
+            head = head[:40] + "…"
+        problems.append(
+            f"{path}: 第 5 节的这一条没有落点：`{head}`；每条必须出现工单/PRD 号、文件路径、"
+            "或反引号里的一段命令或标识之一（「补进第二张单」这种写法下一个会话无从下手）；"
+            "决定不做就写进第 4 节并给原因，第 5 节不用为它编一条"
+        )
+    return problems
+
+
 def inspect_package(path):
     """查收尾包的结构，返回 (问题列表, 结论或 None)。结论只认三档之一。"""
     path = Path(path)
@@ -187,6 +256,8 @@ def inspect_package(path):
                 f"{path}: 第 7 节的结论写成 `{head or '（空）'}`，只收三档之一：{'、'.join(VERDICTS)}；"
                 "写成自由文本就判不出下一步该干什么"
             )
+
+    problems.extend(inspect_fifth_section(found, path))
 
     return problems, verdict
 

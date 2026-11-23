@@ -437,6 +437,75 @@ class MergeTest(unittest.TestCase):
         self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha=sha, source="guess"))
         self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
 
+    # --- AW-127：第三个出处 manual（手工合并） -----------------------------
+
+    def test_manual_merge_records_its_own_source_and_what_the_gate_did_not_run(self):
+        """C1 正向 / C3：手工合并写 source=manual，闸门哪几步没跑留在 note，核对命令由工具写。
+
+        auto_merge 在 cindy-harmony 上跑不动时，合入是手工 `git merge --no-ff` 做的；
+        这条记录若写成 auto_merge，后人会以为预演、临时工作树测试、合并后测试都跑过。
+        """
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        note = "手工 git merge --no-ff 合入：没跑冲突预演与临时工作树测试，合并后手动跑了 run_tests"
+        receipt = self.ok("merge_ticket", self.merge_payload(
+            commit=sha, reviewed_sha=sha, source="manual", note=note), "manual-landed")
+        merge = self.ok("get_ticket", self.scope())["merges"][0]
+        expected = f"git -C {self.project_root().replace(chr(92), '/')} merge-base --is-ancestor {sha} master"
+        self.assertEqual("manual", merge["source"])
+        self.assertEqual("manual", receipt["source"])
+        self.assertEqual(note, merge["note"])
+        self.assertEqual(expected, merge["verified_by"])
+        self.assertIsNotNone(merge["verified_at"])
+
+    def test_manual_merge_requires_a_reason_and_a_verifiable_tree(self):
+        """C3：手工档必须写清闸门哪几步没跑；没有可核对的树就不许写这一档。"""
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        # 不写原因、或只写空白：手工档的 note 不是可选装饰，它承载「闸门跑了哪几步」。
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(source="manual", reviewed_sha=sha))
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            source="manual", reviewed_sha=sha, note="   "))
+        # 调用方不能自己写「我核对过了」：命令由工具当场跑出来。
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            source="manual", reviewed_sha=sha, note="手工合并", verified_by="git merge-base --is-ancestor x master"))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+        # 老提交没有 head_sha：这一档要核祖先关系，核不了就不许自称手工合并——那是编。
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("UPDATE submissions SET head_sha=NULL")
+            conn.commit()
+        finally:
+            conn.close()
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            source="manual", reviewed_sha="unverified", note="手工合并"))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
+    def test_manual_merge_refuses_a_tree_that_is_not_in_the_target(self):
+        """C1 / C3：确实没落地的拒绝并点名，一行不写——手工合并也得有可核对的落点。"""
+        self.git_repo()
+        side = self.side_sha()
+        self.done(head_sha=side)
+        self.notice(status="failed")
+        result = self.call("merge_ticket", self.merge_payload(
+            reviewed_sha=side, commit=side, source="manual", note="手工合并"))
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("NOT_LANDED", result["error"]["code"], result)
+        self.assertIn(self.tid("t1"), result["error"]["message"])
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
+    def test_auto_merge_still_owns_no_written_reason(self):
+        """旧行为不变：正常合并路径照旧不收 note——它不是人写的记录，不需要辩解。"""
+        self.done()
+        self.notice()
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            source="auto_merge", note="手工合并，闸门没跑"))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
     def test_repair_backfill_command_only_normalises_the_path_spelling(self):
         """C5 的前置：存量值只能“同一命令、另一种路径写法”，否则拒。"""
         self.git_repo()

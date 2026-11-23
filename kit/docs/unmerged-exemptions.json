@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-11-23T07:47:22+00:00",
+  "generated_by": "tools/backfill_merges.py",
+  "target_branch": "master",
+  "pending": 0,
+  "empty_means": "此刻没有「state=done 但没有 merges 行、又没有 head_sha」的单。以前列在这里的历史单只有两种去向：证据补齐了（A 档补了 merges），或者已被 archived 终态覆盖 —— archived 不算 done，既不需要也不允许补合并记录。所以读到空清单就是答案，不必再去翻旧版本找它们。",
+  "reason": "这些单的「已验收但没有合并记录」没有可核对的证据（最新提交没有 head_sha），补一条记录等于把没人记过写成已经合了。它们不是等待合并的单。",
+  "check_command": "python tools/backfill_merges.py --dry-run",
+  "entries": []
+}

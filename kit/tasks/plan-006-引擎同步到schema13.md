@@ -4,7 +4,7 @@
 
 - `kit/PRD/PRD-001-工作区使用与工单体系.md` v0.1：§2 闭环形状、§3「一次一张」与「收尾可判定」、AC2（一张单能从创建走到验收）。
 - 既有事实（2026-11-22 实测）：套件的 `kit/task_center/db.py` 迁移只到第 8 版（schema 9），工作区是第 12 版（schema 13）；四次缺的迁移是 9（`criteria_version` / `base_sha`）、10（发号盘 + `ticket_links` + `prd_sha256` 可空）、11（车次 + 索引收窄）、12（`conflict_preview`）。
-- 实测失败样本：`python kit/tools/auto_merge.py --ticket AWK-100 --repo D:/ai-workspace-kit --db D:/AI工作区/.data/task-center.sqlite3 --dry-run` 报 `SCHEMA_MISMATCH: Unsupported task-center schema`，同一张单改用工作区的 `tools/auto_merge.py` 才能合（合并提交 `39926e1`）。
+- 实测失败样本：`python kit/tools/auto_merge.py --ticket AWK-100 --repo D:/ai-workspace-kit --db <上游工作区>/.data/task-center.sqlite3 --dry-run` 报 `SCHEMA_MISMATCH: Unsupported task-center schema`，同一张单改用工作区的 `tools/auto_merge.py` 才能合（合并提交 `39926e1`）。
 - 第二个实测样本：套件仓库根没有 `.agents/ticket-config.json`，`auto_merge` 第 2 步直接拒；用 `kit/tools/add_project.py` 补出来才走得下去。
 
 ## 所用 skill
@@ -47,7 +47,7 @@
 
 `kit/tools/auto_merge.py`、`work_gate.py` 等按需同步。目标是 `python kit/tools/auto_merge.py --list` 读同一个共享库（schema 13）不再报 `SCHEMA_MISMATCH`。
 
-验证：`python kit/tools/auto_merge.py --list --db D:/AI工作区/.data/task-center.sqlite3` 退出码 0 并列出已验收未合并的工单（可以为空清单）；`python kit/tools/work_gate.py --list` 退出码 0。
+验证：`python kit/tools/auto_merge.py --list --db <上游工作区>/.data/task-center.sqlite3` 退出码 0 并列出已验收未合并的工单（可以为空清单）；`python kit/tools/work_gate.py --list` 退出码 0。
 
 ### 任务 4：接项目这一步写进文档
 
@@ -65,9 +65,9 @@
 
 - 不同步 `PRD-010`~`PRD-015` 正文、不同步技能文本、不补 `idle_watch.py` 与 `project_doctor.py`。
 - 不发版、不打 tag、不推送。
-- 不迁移、不备份 `D:/AI工作区/.data` 里的真库；迁移演练只在临时目录做。
+- 不迁移、不备份 上游工作区 `.data` 里的真库；迁移演练只在临时目录做。
 - 不改验收与合并的判断规则去迁就差异——两边不一致时改套件，不改规则。
-- 不动 `D:/AI工作区` 主检出。
+- 不动上游工作区的主检出。
 
 ## 未决
 

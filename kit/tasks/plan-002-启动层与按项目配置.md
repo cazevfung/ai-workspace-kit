@@ -15,7 +15,7 @@
 ## 交付物
 
 - 主题：装上就能开工。新增 `kit/onboard.py`（打印「create_project → 开协调会话 → 第一条指令」的调用计划，`--json` 给每步完整参数，`--dry-run` 零副作用）；新增 `kit/tools/add_project.py`（给业务仓库写 `.agents/ticket-config.json` 并把 `core.hooksPath` 指向套件 `.githooks`）；`kit/tools/auto_merge.py` 改读该配置，缺配置时非零退出并提示跑 `add_project.py`；新增 `skills/workspace/bootstrap-workspace`；把 `plugin/draft/` 升级成可安装的清单与入口，暴露 `bootstrap` 与 `dispatch_ticket`；新增 `verify/verify_onboard.py`，在临时 HOME 里跑完九步。
-- 不覆盖：不重写 `task_center/` 的操作与 schema；不改 `work_gate` / `close_gate` / `doc_gate` 的判定规则（`doc_gate` 只补「源码树里技能放在 `skills/workspace` 与 `skills/generic`」这条发现路径）；不动 `D:/AI工作区`；不做契约瘦身、不补新 PRD、不做巡航、不发布。
+- 不覆盖：不重写 `task_center/` 的操作与 schema；不改 `work_gate` / `close_gate` / `doc_gate` 的判定规则（`doc_gate` 只补「源码树里技能放在 `skills/workspace` 与 `skills/generic`」这条发现路径）；不动上游工作区；不做契约瘦身、不补新 PRD、不做巡航、不发布。
 
 ## 任务
 
@@ -67,15 +67,15 @@
 
 ### 8. 全量回归与文档
 
-跑两处测试，更新 `verify/verify_install.py` 的技能计数（6 / 26）与 `README` 里新增命令的入口，确认 `D:/AI工作区` 一个字节都没动。
+跑两处测试，更新 `verify/verify_install.py` 的技能计数（6 / 26）与 `README` 里新增命令的入口，确认上游工作区一个字节都没动。
 
 - 验证：`python tools/run_tests.py` 期望末行 `结果：全部通过`、两处用例数都打印、合计不少于开工基线（那个数记在 `CHANGELOG.md` 的 0.3.0 条目里，此处不再抄一遍），退出码 0。
-- 验证：`git -C D:/AI工作区 status --porcelain` 期望输出为空，退出码 0。
+- 验证：`git -C <上游工作区> status --porcelain` 期望输出为空，退出码 0。
 
 ## 不做什么
 
 - 不重写 `task_center/` 的代码、操作表与 schema；不改 `work_gate` / `close_gate` / `doc_gate` 的判定条件。
-- 不动 `D:/AI工作区` 的任何文件，不把 `.data/` 与 `_sandbox/` 纳入提交。
+- 不动上游工作区的任何文件，不把 `.data/` 与 `_sandbox/` 纳入提交。
 - 不做契约瘦身、不补新 PRD、不做巡航、不发布插件到市场、不推送远端。
 - 验收与合并不由执行会话做：本计划只产出可被独立会话复核的成果。
 

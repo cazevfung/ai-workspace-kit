@@ -1,0 +1,873 @@
+#!/usr/bin/env python
+"""无人值守派单的前置检查：读中心库算下一步该做什么，只读，不出手。
+
+为什么要有这个脚本：库里排着 planned 单、有验收完没合的单、有等验收的单，这些
+事以前靠协调会话记得去看。做成定时任务之后有两个问题必须当场解决，而且它们都
+不是「记得更勤」能解决的：
+
+1. **空转要钱。** 池子是空的、在途单还在跑的时候，定时任务醒来一次就要读一遍
+   上下文、开一轮对话。所以「有没有活」这件事必须由一个不看脸的脚本回答：它算
+   不出下一步就退出 2，调度侧据此不启动对话。**判据是退出码，不是输出里的一句话。**
+2. **故障不许变成「没活」。** 库读不开、库版本不对、项目归属查不出——这些是
+   不知道，不是空闲。两者混在一起最糟：调度侧会安安静静地不干活，而现场是坏
+   的。所以本脚本的退出码与同目录的 `wait_audit.py` 相反：`wait_audit` 用 2 表示
+   「库有问题」，这里 2 表示「没活」，**出错一律 1**（`PRD/PRD-010` §4.3 的那套
+   阈值与本脚本无关：这里没有任何时间阈值，判据全在库里的状态上）。
+
+四个结果，一次只给一个（互斥）：
+
+    dispatch_execute  池子里有可领的单 —— 派执行会话
+    dispatch_review   有单在等验收、且还没有验收会话在飞 —— 派验收会话
+    merge             有已验收未合并的   —— 合并
+    nothing           以上都没有 / 有在途单挡着 / 暂停中 / 验收在飞
+
+**优先级：验收 > 合并 > 派执行。** 理由不是偏好：`awaiting_review` 在
+`DISPATCH_BUSY` 的口径里算在途（`task_center/core.py` 的 `ACTIVE_TICKET_STATES`），
+它不在这个循环里被挪走，池子里的单一张也领不出来——所以它是唯一会卡住整条链的
+动作，先做它。合并不挡任何派发，晚一轮没关系。
+
+**验收派出去之后不再重复派（AW-133）。** 只看「在等验收 + 没有 `reviews` 行」是不够的：
+验收会话要跑几分钟才落结论，在这段窗口里库与几轮之前一模一样，于是同一张单会
+被连续几轮派第二个、第三个验收会话。所以派验收时要先落一条 `review_dispatched`
+事件（`task_center` 的同名写操作），本脚本见到它就**不再**把这单算成 `dispatch_review`，
+改把人读那一句写成「验收在飞」——`review_in_flight` 数组里带单号、提交与已经等了
+多久。窗口是 `task_center.core.REVIEW_IN_FLIGHT_SECONDS`（30 分钟）：超时还没有
+`reviews` 行就自动回落成可派，因为验收会话可能根本没起来。
+
+**它只作「已派」提示，不改另外三档的顺位。** `review_dispatched` 不进 `BLOCKING_STATES`：
+池子里有可领单、或另有已验收待合的单，该给还是照给。
+
+**与「在途」的关系。** 挡住派发的不是 `ACTIVE_TICKET_STATES` 的全部四个状态，而是
+去掉 `awaiting_review` 之后的三个：
+
+    dispatching  已领取、还没绑定执行会话（下一步是 bind_session，不是再领一张）
+    running      执行会话在跑
+    blocked      开了工在等一句话（PRD-005）
+
+`awaiting_review` 被排除，因为它自己的下一步就是「派验收」——把它当「忙」，这个
+循环就永远转不动。这一处不是把在途集合改小：`DISPATCH_BUSY` 一行没动，本脚本
+也不替它做判断，只是把「这一轮我能自己往前走吗」问清楚。
+
+**合并候选的两条限制，都写在输出里，不悄悄丢掉。**
+
+- 只认「提交里记了分支头（`submissions.head_sha`）」的单。合并要合的是一棵树；
+  没记分支头的提交是合并流程建立之前直接做在 master 上的，库里没有任何可合的
+  东西（`AW-004`~`AW-022` 就是这一类，`docs/closing.md` 与 `AGENTS.md` 都写着
+  不要替它们补记录）。它们进 `skipped`，带条数与单号，人看得见要不要处理。
+- 已有 `merges` 行的单不算未合并。
+
+**一个没有任何提交的 `done` 单不进 `skipped`，进 `stop`**：那是数据不自洽（验收
+必须基于一次提交），不是「历史遗留」，得当故障报出来。
+
+用法（在仓库根 {{WORKSPACE}}）：
+
+    python tools/next_action.py                  # 人读：一句话
+    python tools/next_action.py --json           # 机器读：结构化结果 + human 字段
+    python tools/next_action.py --project ai-workspace
+    python tools/next_action.py --pause-file <路径>   # 换暂停标记的位置
+
+退出码：**0 = 有活（三个动作之一）；2 = 没活（含暂停中、有在途单挡着）；1 = 出错**
+（库不存在/读不开/版本不对/缺表、项目归属查不出、参数写错）。1 与 2 分得开，
+是这个脚本存在的理由之一。
+
+`--project` 不传时按「已登记项目里 root 是当前目录上级的那个」推断；推断不出、
+或有多个同样深度的候选，都报错退出 1——项目归属不许猜（`AGENTS.md` 硬规则一）。
+
+暂停：标记文件存在就退出 2 并说明「暂停中」，一个动作都不给。默认位置
+`{{WORKSPACE}}/.data/dispatch-paused`；要临时停掉整条无人值守循环，建这个空文件
+就够了（`docs/无人值守派单.md`「怎么暂停」）。
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+# 状态集合与依赖层的算法都从 task_center 里取，不在这里再写一份：
+# 「可领」「未完成前置」「层数」三处口径要与 claim_ticket / list_tickets 逐字同源。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
+    ACTIVE_TICKET_STATES,
+    CLAIMABLE_STATES,
+    REVIEW_IN_FLIGHT_SECONDS,
+    dependency_depths,
+    pending_blockers,
+)
+from task_center.db import SCHEMA_VERSION  # noqa: E402
+
+# 四个结果的名字：人读输出、--json、退出码共用这一份，不另起别名。
+DISPATCH_EXECUTE = "dispatch_execute"
+DISPATCH_REVIEW = "dispatch_review"
+MERGE = "merge"
+NOTHING = "nothing"
+ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, NOTHING)
+# 有活的那三个。`nothing` 不在里面：退出码 0 只给「这一轮有事可做」。
+WORKING_ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE)
+
+# 挡住派发的三个状态：`ACTIVE_TICKET_STATES` 去掉 `awaiting_review`（理由见模块头）。
+BLOCKING_STATES = tuple(
+    state for state in ACTIVE_TICKET_STATES if state != "awaiting_review"
+)
+
+# 退出码。2 是「没活」而不是「出错」，与 wait_audit.py 相反，理由见模块头。
+EXIT_WORK = 0
+EXIT_ERROR = 1
+EXIT_IDLE = 2
+
+# 每个状态「停在哪一步」的一句人话。加新状态时要在这里补一句，否则会被报成
+# 一句泛泛的「在途」——无人值守最不需要的就是这种话。
+STEP_TEXT = {
+    "dispatching": "已领取、还没绑定执行会话（下一步是 bind_session）",
+    "running": "执行会话在跑",
+    "blocked": "开了工在等一句话（ask_ticket 落了问题）",
+}
+
+REQUIRED_TABLES = (
+    "projects", "tickets", "attempts", "submissions", "reviews", "merges",
+    "notices", "ticket_links", "questions", "events",
+)
+
+# 「验收已经派出去了」这件事在 `events` 里的 operation 名，与 `task_center` 的那个写操作同名。
+# 同一个名字两种行都会出现：成功那次带 `result`，被拒那次带 `rejected`——只有前者算「已派」。
+REVIEW_DISPATCHED = "review_dispatched"
+
+
+class PlannerError(RuntimeError):
+    """查不出结论时的唯一异常：带一句人能读的原因，由 main 打到 stderr。"""
+
+
+# ---------------------------------------------------------------- 库
+
+
+def default_ticket_db() -> Path:
+    """默认工单库：主检出的 `.data/task-center.sqlite3`。
+
+    在 `.worktrees/<工单号>/` 里跑时，本树没有 `.data`（不入库），按 `ROOT/.data`
+    取会报 `DB_NOT_FOUND`——那不是「没活」，是找错了库。所以先看本树，没有就按
+    git 的公共目录找到主检出，读主检出那份库（全仓只有一份）。与
+    `tools/wait_audit.py` 同一条找法，两个脚本查到不同的库，结论就会打架。
+    """
+    local = ROOT / ".data" / "task-center.sqlite3"
+    if local.is_file():
+        return local
+    try:
+        found = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+        output = (found.stdout or "").strip()
+        if found.returncode == 0 and output:
+            common = Path(output)
+            if not common.is_absolute():
+                common = (ROOT / common).resolve()
+            candidate = common.parent / ".data" / "task-center.sqlite3"
+            if candidate.is_file():
+                return candidate
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return local
+
+
+def default_pause_file() -> Path:
+    """默认暂停标记：放在工单库旁边（同一个 `.data/`，不入库）。
+
+    跟着库走而不是跟着脚本走，是因为库只有一份、脚本可能在 `.worktrees/<单号>/`
+    里跑；两处各认一个位置，就会出现「我建了标记它不认」。
+    """
+    return default_ticket_db().parent / "dispatch-paused"
+
+
+def read_only(path) -> sqlite3.Connection:
+    """只读打开：`mode=ro` + `PRAGMA query_only`，与 wait_audit / idle_watch 同一写法。"""
+    path = Path(path)
+    if not path.is_file():
+        raise PlannerError(f"DB_NOT_FOUND：库不存在：{path}")
+    try:
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+    except sqlite3.Error as exc:
+        raise PlannerError(f"DB_UNREADABLE：打不开库 {path}（{exc}）") from exc
+    return conn
+
+
+def check_schema(conn, path) -> None:
+    """库版本与关键表：对不上就报错，绝不当成「没活」。
+
+    `PRAGMA user_version` 是 schema 版本的唯一来源（`task_center/db.py` 写的就是
+    它）；`SCHEMA_VERSION` 从代码里取，不在这里再写一个数——加一级迁移时两处
+    不同步，这个脚本就会在旧库上算出一份看着像真的结论。
+    """
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.Error as exc:
+        raise PlannerError(f"DB_UNREADABLE：读不出库版本（{exc}）") from exc
+    if version != SCHEMA_VERSION:
+        raise PlannerError(
+            f"SCHEMA_MISMATCH：{path} 是 schema {version}，本脚本按 {SCHEMA_VERSION} 判；"
+            "先跑 migrate 再派单，不要按旧库的结论派发"
+        )
+    present = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    missing = [name for name in REQUIRED_TABLES if name not in present]
+    if missing:
+        raise PlannerError(
+            f"SCHEMA_MISMATCH：{path} 缺表 {', '.join(missing)}，算不出下一步"
+        )
+
+
+# ---------------------------------------------------------------- 项目归属
+
+
+def resolve_project(conn, project_id, cwd: Path) -> sqlite3.Row:
+    """定位这一次要在哪个项目里派单：给定了就核对，没给就按路径推断。
+
+    「推断不出就报错」比「拿第一个项目凑一个」重要：把别处的单领出来，代价比
+    多问一句高一个数量级（`AGENTS.md` 硬规则一）。
+    """
+    rows = conn.execute("SELECT id, name, root FROM projects ORDER BY id").fetchall()
+    if not rows:
+        raise PlannerError("PROJECT_NOT_FOUND：库里没有登记任何项目，先 register_project")
+    if project_id:
+        for row in rows:
+            if row["id"] == project_id:
+                return row
+        listed = "、".join(row["id"] for row in rows)
+        raise PlannerError(f"PROJECT_NOT_FOUND：库里没有 {project_id}（已登记：{listed}）")
+
+    resolved = Path(cwd).resolve()
+    matches = []
+    for row in rows:
+        try:
+            root = Path(row["root"]).resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved == root or resolved.is_relative_to(root):
+            matches.append((len(root.parts), row))
+    if not matches:
+        raise PlannerError(
+            f"PROJECT_NOT_FOUND：{resolved} 不在任何已登记项目的目录里，"
+            "用 --project 指定项目再跑"
+        )
+    matches.sort(key=lambda item: item[0], reverse=True)
+    if len(matches) > 1 and matches[0][0] == matches[1][0]:
+        tied = "、".join(row["id"] for depth, row in matches if depth == matches[0][0])
+        raise PlannerError(f"PROJECT_AMBIGUOUS：{resolved} 同时属于 {tied}，用 --project 指定")
+    return matches[0][1]
+
+
+# ---------------------------------------------------------------- 四类候选
+
+
+def project_tickets(conn, project_id, states) -> list[sqlite3.Row]:
+    marks = ",".join("?" for _ in states)
+    return conn.execute(
+        "SELECT * FROM tickets WHERE project_id=? AND state IN (" + marks + ")"
+        " ORDER BY created_at, id",
+        (project_id, *states),
+    ).fetchall()
+
+
+def latest_submission(conn, ticket_id):
+    """该工单全部尝试里 `created_at` 最大的一条提交。
+
+    返工之后 `current_attempt` 指向新尝试，旧提交仍在表里，所以按全部尝试取最新，
+    不只看当前尝试（与 `wait_audit.latest_submission` 同一口径）。
+    """
+    rows = conn.execute(
+        "SELECT s.* FROM submissions s JOIN attempts a ON a.id = s.attempt_id"
+        " WHERE a.ticket_id=? ORDER BY s.created_at, s.id",
+        (ticket_id,),
+    ).fetchall()
+    return rows[-1] if rows else None
+
+
+def has_review(conn, submission_id) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM reviews WHERE submission_id=? LIMIT 1", (submission_id,)
+    ).fetchone()
+    return row is not None
+
+
+def has_merge(conn, ticket_id) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM merges WHERE ticket_id=? LIMIT 1", (ticket_id,)
+    ).fetchone()
+    return row is not None
+
+
+def _parse_time(value):
+    """把库里存的时间读成带时区的 datetime；读不出来返回 None（不拿现在凑一个）。"""
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp
+
+
+def review_dispatched_events(conn, ticket_id) -> list[dict]:
+    """这张单上「验收已经派出去」的事实，按时间从新到旧。
+
+    只认带 `result` 的事件行：同一个 operation 名也会出现在被拒的调用里（`execute()` 与
+    `_record_rejection` 都写 `events`），那种行带的是 `rejected`，它说的是「想派但没记成」，
+    不是「已经派出去了」。两者混在一起会让一次失败悄悄压住下一轮派发。
+    """
+    rows = conn.execute(
+        "SELECT id, detail, created_at FROM events"
+        " WHERE ticket_id=? AND operation=? ORDER BY created_at DESC, id DESC LIMIT 20",
+        (ticket_id, REVIEW_DISPATCHED),
+    ).fetchall()
+    items = []
+    for row in rows:
+        try:
+            detail = json.loads(row["detail"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        result = detail.get("result") if isinstance(detail, dict) else None
+        if not isinstance(result, dict):
+            continue
+        items.append({
+            "event_id": row["id"],
+            "created_at": row["created_at"],
+            "submission_id": result.get("submission_id"),
+            "reviewer_session_id": result.get("reviewer_session_id"),
+            "note": result.get("note"),
+        })
+    return items
+
+
+def review_in_flight(conn, ticket_id, submission_id, now, stop) -> dict | None:
+    """这张单的这一份提交是不是已经有一位验收人在看（AW-133）。
+
+    两个条件同时成立才算在飞：事件指向**当前最新这份提交**、且时间在窗口内
+    （`REVIEW_IN_FLIGHT_SECONDS`）。指向旧提交的事件不算——返工后的新提交还没人看过。
+
+    时间读不出来时**按可派处理**：宁可多派一次验收，也不要因为一行脏时间把一张单
+    默默押住——那会变成「什么都没发生」的僵局。
+    """
+    for event in review_dispatched_events(conn, ticket_id):
+        if event["submission_id"] and event["submission_id"] != submission_id:
+            continue
+        stamp = _parse_time(event["created_at"])
+        if stamp is None:
+            stop.append(
+                f"{ticket_id} 有一条 review_dispatched 事件的时间读不出来"
+                f"（{event['created_at']!r}），按可派处理"
+            )
+            continue
+        waited = (now - stamp).total_seconds()
+        if waited < REVIEW_IN_FLIGHT_SECONDS:
+            return {
+                "ticket_id": ticket_id,
+                "submission_id": submission_id,
+                "event_id": event["event_id"],
+                "dispatched_at": event["created_at"],
+                "waited_seconds": int(waited),
+                "expires_in_seconds": int(REVIEW_IN_FLIGHT_SECONDS - waited),
+                "reviewer_session_id": event["reviewer_session_id"],
+            }
+    return None
+
+
+def blank_criteria(raw) -> bool:
+    """这条工单的条件是不是一条都没有（`planned` 允许空，其余状态不允许）。
+
+    `tickets.criteria` 存的是 JSON 文本。读不出来的行**不算**空条件：那是脏行，
+    不要拿一个解析失败去冒充「念头」把它静默筛掉；它照旧进候选，真有问题
+    到 `claim_ticket` 那一步会报出来。
+    """
+    if not raw:
+        return True
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return False  # 读不出来是脏行，不当成「空条件」悄悄筛掉；交给后面当作可领单报出来
+    return not value
+
+
+def blocking_rows(conn, project_id) -> list[dict]:
+    """挡住这一轮的在途单，每张带「停在哪一步」。
+
+    工单级状态是权威（`docs/protocol.md` 的「两处都写，权威在工单级」），所以这里
+    只看 `tickets.state`；尝试上的状态在 `blocked` 之外不参与判断，避免一条旧尝试
+    把一张已经收尾的单报成还在跑。
+    """
+    items = []
+    for row in project_tickets(conn, project_id, BLOCKING_STATES):
+        item = {
+            "ticket_id": row["id"],
+            "title": row["title"],
+            "state": row["state"],
+            "step": STEP_TEXT.get(row["state"], f"停在 {row['state']}"),
+        }
+        attempt = None
+        if row["current_attempt"]:
+            attempt = conn.execute(
+                "SELECT id, session_id, state FROM attempts WHERE id=?",
+                (row["current_attempt"],),
+            ).fetchone()
+        if attempt is not None:
+            item["attempt_id"] = attempt["id"]
+            item["session_id"] = attempt["session_id"]
+        if row["state"] == "blocked" and attempt is not None:
+            question = conn.execute(
+                "SELECT id, question FROM questions WHERE attempt_id=? AND state='open'"
+                " ORDER BY asked_at DESC LIMIT 1",
+                (attempt["id"],),
+            ).fetchone()
+            if question is not None:
+                item["question_id"] = question["id"]
+                item["question"] = question["question"]
+                item["step"] = "开了工在等一句话：已落库的开放问题还没人答"
+        items.append(item)
+    return items
+
+
+def review_candidates(conn, project_id, stop, in_flight=None, now=None) -> list[dict]:
+    """在等验收的单。取不到提交、或已经有验收结论的，进 `stop` 而不是候选。
+
+    验收已经派出去且还在窗口内的单进 `in_flight`，**不进**候选：同一份成果派两个验收人
+    是重复劳动，一个 accept 一个 reject 还会把状态机推出两条路。它也不是 `stop`——
+    没有出错，只是该等。
+    """
+    items = []
+    in_flight = in_flight if in_flight is not None else []
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    for row in project_tickets(conn, project_id, ("awaiting_review",)):
+        submission = latest_submission(conn, row["id"])
+        if submission is None:
+            stop.append(
+                f"{row['id']} 状态是 awaiting_review，但库里没有任何提交——"
+                "验收没有可依据的东西，需要人看这一行"
+            )
+            continue
+        if has_review(conn, submission["id"]):
+            stop.append(
+                f"{row['id']} 已有验收结论（提交 {submission['id']} 有 review 行），"
+                "工单状态还停在 awaiting_review——状态机慢一步，需要人把它走完"
+            )
+            continue
+        pending = review_in_flight(conn, row["id"], submission["id"], now, stop)
+        if pending is not None:
+            in_flight.append(pending)
+            continue
+        items.append({
+            "ticket_id": row["id"],
+            "title": row["title"],
+            "state": row["state"],
+            "revision": row["revision"],
+            "criteria_version": row["criteria_version"],
+            "submission_id": submission["id"],
+            "head_sha": submission["head_sha"],
+            "base_sha": submission["base_sha"],
+            "summary": submission["summary"],
+        })
+    return items
+
+
+def merge_candidates(conn, project_id, skipped, stop) -> list[dict]:
+    """已验收但库里没有合并记录的单。
+
+    只认提交里记了分支头的：合并要合的是一棵树，没记分支头的提交是合并流程之前
+    直接做在 master 上的，库里没有可合的东西。这一类进 `skipped` 并带条数，不悄悄
+    丢掉（`docs/无人值守派单.md`「merge 的前置与拒绝条件」）。
+    """
+    items = []
+    historical = []
+    for row in project_tickets(conn, project_id, ("done",)):
+        if has_merge(conn, row["id"]):
+            continue
+        submission = latest_submission(conn, row["id"])
+        if submission is None:
+            stop.append(
+                f"{row['id']} 是 done，但库里没有任何提交——合并没有可合的树，需要人看"
+            )
+            continue
+        head = submission["head_sha"]
+        if not head:
+            historical.append(row["id"])
+            continue
+        items.append({
+            "ticket_id": row["id"],
+            "title": row["title"],
+            "state": row["state"],
+            "head_sha": head,
+            "created_at": row["created_at"],
+            "submission_id": submission["id"],
+            "notice_count": conn.execute(
+                "SELECT COUNT(*) FROM notices WHERE ticket_id=?", (row["id"],)
+            ).fetchone()[0],
+        })
+    if historical:
+        skipped.append({
+            "reason": "no_branch_head",
+            "detail": "done 且无合并记录，但提交里没有分支头（合并流程之前的直接提交，"
+                      "库里没有可合的东西；要不要补记录由人决定）",
+            "ticket_ids": historical,
+        })
+    # 先验收的先合：同一份 master 上少积一层。排序按 created_at，与池子视图的
+    # 「同层按 created_at」一个习惯，不按单号字符串比大小（AW-9 与 AW-10 会排反）。
+    items.sort(key=lambda item: (item["created_at"], item["ticket_id"]))
+    return items
+
+
+def execute_candidates(conn, project_id, skipped) -> list[dict]:
+    """池子里可领的单：状态可领、`blocked_by` 全部 done、且写得出验收条件。
+
+    `claimable` 的定义从 `task_center.core` 取（`CLAIMABLE_STATES` +
+    `pending_blockers`），与 `list_tickets --planned` 那一列同源：这里多出来的只有
+    「挑哪一张」，不重新定义什么叫可领。排序也与池子视图一致：依赖层数升序，
+    同层按 `created_at`。
+
+    **条件空着的单不算可领**（AW-109）：`planned` 允许 0 条条件，那是「已经知道要补
+    什么、还写不出验收条件」的念头；`claim_ticket` 会报 `CRITERIA_NOT_JUDGEABLE`。
+    不在这里筛掉的话，无人值守派单器会一圈一圈地派一张永远领不走的单。
+    """
+    rows = project_tickets(conn, project_id, CLAIMABLE_STATES)
+    depths = dependency_depths(conn, [row["id"] for row in rows])
+    ordered = sorted(
+        rows, key=lambda row: (depths.get(row["id"], 0), row["created_at"], row["id"])
+    )
+    items, waiting, blank = [], [], []
+    for row in ordered:
+        if blank_criteria(row["criteria"]):
+            blank.append({
+                "ticket_id": row["id"],
+                "state": row["state"],
+                "created_at": row["created_at"],
+            })
+            continue
+        pending = pending_blockers(conn, row["id"])
+        if pending:
+            waiting.append({
+                "ticket_id": row["id"],
+                "blocked_by": [{"ticket_id": item["id"], "state": item["state"]}
+                               for item in pending],
+            })
+            continue
+        items.append({
+            "ticket_id": row["id"],
+            "title": row["title"],
+            "state": row["state"],
+            "revision": row["revision"],
+            "criteria_version": row["criteria_version"],
+            "prd_path": row["prd_path"],
+            "prd_sha256": row["prd_sha256"],
+            "depth": depths.get(row["id"], 0),
+        })
+    if waiting:
+        skipped.append({
+            "reason": "blocked_by_pending",
+            "detail": "可领状态但有前置单没 done（只有 done 算满足，cancelled 也算没满足）",
+            "tickets": waiting,
+        })
+    if blank:
+        skipped.append({
+            "reason": "no_criteria",
+            "detail": ("池子里的念头：条件还空着，领走也验收不了（claim_ticket 会报 "
+                       "CRITERIA_NOT_JUDGEABLE）；先 revise_ticket 补至少一条可判定条件"),
+            "tickets": blank,
+        })
+    return items
+
+
+# ---------------------------------------------------------------- 算下一步
+
+
+def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
+    """扫一遍，返回结构化结果（人读输出与 --json 都从这里出）。
+
+    只有一个时间阈值：**验收在飞**的 30 分钟窗口（`REVIEW_IN_FLIGHT_SECONDS`）。它必须
+    存在，否则「已派出去」这句话永远不会失效；所以 `now` 可以显式传入（用例靠它把
+    事件摆到 31 分钟前），不传就是此刻。其余四个结果全靠库里的状态与依赖边算出来，
+    同一个库同一个 `now` 跑两次结论必然一样（`generated_at` 除外）。
+    """
+    if conn.row_factory is not sqlite3.Row:
+        # 调用方拿到的是普通连接（夹具、嵌入式使用）时补上，下面的 row["列名"] 才成立。
+        conn.row_factory = sqlite3.Row
+    project = resolve_project(conn, project_id, Path(cwd or Path.cwd()))
+    pid = project["id"]
+    current = now or datetime.datetime.now(datetime.timezone.utc)
+    stop: list[str] = []
+    skipped: list[dict] = []
+    result = {
+        "schema": 1,
+        "generated_at": _now(),
+        "project_id": pid,
+        "project_root": project["root"],
+        "action": NOTHING,
+        "reason_code": "",
+        "human": "",
+        "ticket": None,
+        "dispatch": None,
+        "in_flight": [],
+        "review_in_flight": [],
+        "stop": stop,
+        "skipped": skipped,
+        "candidates": {DISPATCH_REVIEW: [], MERGE: [], DISPATCH_EXECUTE: []},
+    }
+
+    marker = Path(pause_path) if pause_path else default_pause_file()
+    if marker.is_file():
+        result["reason_code"] = "paused"
+        result["human"] = f"nothing：暂停中——{marker} 存在，一个动作都不给"
+        result["pause_file"] = str(marker)
+        return result
+
+    blocking = blocking_rows(conn, pid)
+    if blocking:
+        result["in_flight"] = blocking
+        names = "、".join(f"{item['ticket_id']}（{item['state']}：{item['step']}）"
+                         for item in blocking)
+        result["reason_code"] = "in_flight"
+        result["human"] = f"nothing：有在途单挡着——{names}；等它收尾再派下一张"
+        for item in blocking:
+            stop.append(
+                f"{item['ticket_id']} 停在 {item['state']}：{item['step']}"
+            )
+        return result
+
+    reviews = review_candidates(conn, pid, stop, result["review_in_flight"], current)
+    merges = merge_candidates(conn, pid, skipped, stop)
+    executes = execute_candidates(conn, pid, skipped)
+    result["candidates"] = {
+        DISPATCH_REVIEW: [item["ticket_id"] for item in reviews],
+        MERGE: [item["ticket_id"] for item in merges],
+        DISPATCH_EXECUTE: [item["ticket_id"] for item in executes],
+    }
+
+    if reviews:
+        pick = reviews[0]
+        result["action"] = DISPATCH_REVIEW
+        result["reason_code"] = "awaiting_review"
+        result["ticket"] = _ticket_head(conn, pick["ticket_id"])
+        result["dispatch"] = {
+            "ticket_id": pick["ticket_id"],
+            "attempt_id": _current_attempt(conn, pick["ticket_id"]),
+            "submission_id": pick["submission_id"],
+            "head_sha": pick["head_sha"],
+            "base_sha": pick["base_sha"],
+            "revision": pick["revision"],
+            "criteria_version": pick["criteria_version"],
+            "summary": pick["summary"],
+        }
+        result["human"] = (
+            f"{DISPATCH_REVIEW}：派验收 {pick['ticket_id']}"
+            f"（提交 {pick['submission_id']}，head {_short(pick['head_sha'])}）"
+        )
+        return _finish(result)
+
+    if merges:
+        pick = merges[0]
+        result["action"] = MERGE
+        result["reason_code"] = "done_not_merged"
+        result["ticket"] = _ticket_head(conn, pick["ticket_id"])
+        result["dispatch"] = {
+            "ticket_id": pick["ticket_id"],
+            "submission_id": pick["submission_id"],
+            "head_sha": pick["head_sha"],
+            "notice_count": pick["notice_count"],
+        }
+        if pick["notice_count"] == 0:
+            stop.append(
+                f"{pick['ticket_id']} 的 notices 为空：auto_merge 第 2 步会拒，"
+                "先由协调会话 record_notice 再合并"
+            )
+        result["human"] = (
+            f"{MERGE}：合并 {pick['ticket_id']}"
+            f"（已验收未合并，head {_short(pick['head_sha'])}）"
+        )
+        return _finish(result)
+
+    if executes:
+        pick = executes[0]
+        result["action"] = DISPATCH_EXECUTE
+        result["reason_code"] = "claimable"
+        result["ticket"] = _ticket_head(conn, pick["ticket_id"])
+        result["dispatch"] = {
+            "ticket_id": pick["ticket_id"],
+            "state": pick["state"],
+            "revision": pick["revision"],
+            "criteria_version": pick["criteria_version"],
+            "prd_path": pick["prd_path"],
+            "prd_sha256": pick["prd_sha256"],
+            "depth": pick["depth"],
+        }
+        basis = pick["prd_path"] or "（未登记 PRD 路径）"
+        result["human"] = (
+            f"{DISPATCH_EXECUTE}：派执行 {pick['ticket_id']}"
+            f"（{pick['state']}，依据 {basis}）"
+        )
+        return _finish(result)
+
+    if stop:
+        # 一个能自动做的动作都没有，但库里有不自洽的行：说「等人看」，不说「没活」。
+        result["reason_code"] = "needs_human"
+        result["human"] = "nothing：没有能自动做的动作，需要人看——" + "；".join(stop)
+        return _finish(result)
+
+    if result["review_in_flight"]:
+        # 验收派出去了、结论还没落库：这一轮什么也不派，但要说清在等谁、还等多久。
+        # 它不叫 `in_flight`：那个词说的是「有单挡着派发」，这里只是等一个已经开跑的动作。
+        waiting = "；".join(
+            f"{item['ticket_id']}（提交 {item['submission_id']}，"
+            f"已等 {_waited_text(item['waited_seconds'])}）"
+            for item in result["review_in_flight"]
+        )
+        minutes = REVIEW_IN_FLIGHT_SECONDS // 60
+        result["reason_code"] = "review_in_flight"
+        result["human"] = (
+            f"nothing：验收已经派出去、结论还没落库——{waiting}；"
+            f"不再重复派验收，{minutes} 分钟没有 reviews 行就自动回落成可派"
+        )
+        return _finish(result)
+
+    result["reason_code"] = "idle"
+    result["human"] = "nothing：没活——池子里没有可领的单，也没有待验收、待合并的单"
+    return _finish(result)
+
+
+def _finish(result: dict) -> dict:
+    """收口：把 `skipped` 里那些「看得见但不派动作」的行缀进人话。
+
+    为什么非要缀在人话里：一次 `done` 无合并记录的单如果没有分支头，它不是没活，
+    而是**没有可合的东西**——不派 `merge` 是对的，但让这句结论悄悄消失就说不清了
+    （`AGENTS.md` 与 `auto_merge.py --list` 都把这类单摆出来让人判断，这里不能替人
+    隐去）。结构化结果里已经是完整的行，人读那一行只补一句「另有 N 张，为什么」。
+    """
+    notes = []
+    # 只有在这一格不是「等验收」本身时才补这句：`nothing / review_in_flight` 的那句话
+    # 已经把单号与等待时间写全了，再缀一次就是同一件事说两遍。
+    if result.get("reason_code") != "review_in_flight":
+        for item in result.get("review_in_flight") or []:
+            notes.append(
+                f"另有 {item['ticket_id']} 的验收已经派出去（提交 {item['submission_id']}，"
+                f"已等 {_waited_text(item['waited_seconds'])}），不再重复派"
+            )
+    for item in result.get("skipped") or []:
+        if item.get("reason") == "no_branch_head":
+            ids = item.get("ticket_ids") or []
+            notes.append(
+                f"另有 {len(ids)} 张 done 且无合并记录，但提交里没有分支头"
+                f"（合并流程之前的直接提交，见 skipped）：{'、'.join(ids)}"
+            )
+    if notes:
+        result["human"] = result["human"] + "；" + "；".join(notes)
+    return result
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _waited_text(seconds: int) -> str:
+    """等待时长的人话：不满一分钟说「1 分钟以内」，别写「已等 0 分钟」——那读起来像没在等。"""
+    if seconds < 60:
+        return "1 分钟以内"
+    return f"{seconds // 60} 分钟"
+
+
+def _short(sha) -> str:
+    text = (sha or "").strip()
+    return text[:8] if text else "无"
+
+
+def _ticket_head(conn, ticket_id) -> dict:
+    row = conn.execute(
+        "SELECT id, title, state, revision, criteria_version, prd_path"
+        " FROM tickets WHERE id=?", (ticket_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _current_attempt(conn, ticket_id):
+    row = conn.execute(
+        "SELECT current_attempt FROM tickets WHERE id=?", (ticket_id,)
+    ).fetchone()
+    return row["current_attempt"] if row is not None else None
+
+
+# ---------------------------------------------------------------- 输出与入口
+
+
+def exit_code(action: str) -> int:
+    """有活 0，没活 2。`nothing` 一律 2——包括「有在途单挡着」与「需要人看」：
+    这两种调度侧都不该再开一轮对话，区别写在 `reason_code` 与 `stop` 里。"""
+    return EXIT_WORK if action in WORKING_ACTIONS else EXIT_IDLE
+
+
+def render_json(result: dict) -> str:
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="next_action.py",
+        description="读中心库算出无人值守的下一步动作（只读）。",
+        epilog="退出码：0 有活；2 没活（含暂停中、有在途单挡着）；1 出错。",
+    )
+    parser.add_argument(
+        "--db", default=None, metavar="PATH",
+        help=f"工单中心库；默认 {default_ticket_db()}",
+    )
+    parser.add_argument(
+        "--project", default=None, metavar="ID",
+        help="项目 id；不传时按当前目录在哪个已登记项目里推断（推断不出就报错）",
+    )
+    parser.add_argument(
+        "--pause-file", default=None, metavar="PATH",
+        help="暂停标记文件；默认放在工单库旁边（`.data/dispatch-paused`），存在即退出 2 并说明暂停中",
+    )
+    parser.add_argument("--json", action="store_true", help="输出结构化结果")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:  # Windows 控制台默认 GBK，中文一打印就 UnicodeEncodeError
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        args = parse_args(sys.argv[1:] if argv is None else list(argv))
+    except SystemExit as exc:  # --help 走这里，退出码 0；参数错是 2，改成 1 免得被当成没活
+        code = int(exc.code or 0)
+        return code if code == 0 else EXIT_ERROR
+
+    path = Path(args.db) if args.db else default_ticket_db()
+    conn = None
+    try:
+        conn = read_only(path)
+        check_schema(conn, path)
+        result = scan(conn, args.project, pause_path=args.pause_file)
+    except PlannerError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ERROR
+    except sqlite3.Error as exc:
+        print(f"DB_UNREADABLE：读库失败（{exc}）", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if args.json:
+        print(render_json(result))
+    else:
+        print(result["human"])
+    return exit_code(result["action"])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

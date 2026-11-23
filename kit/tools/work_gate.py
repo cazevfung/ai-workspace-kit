@@ -56,6 +56,11 @@ CLOSING_BLOCKING_STATES = ("dispatching", "running", "awaiting_review", "blocked
 # AC-R1-2（`ready` 在场时同一条命令必须非零）。其余四格都有尝试、有会话在做，
 # 不该因为别人在跑就让 --list 变成一条恒红的命令。
 WAITING_STATES = ("ready", "rework")
+# 池子的年龄线（AW-109）：一张 planned 排够这么多天还没动，就该被举到人眼前。
+# 为什么是 7：一轮（R-0NN）通常 1–2 天，7 天 = 跳 3–5 轮还没人碰，按「没人打算做」处理。
+# 不自动清理——`cancel_ticket` 是终止、不可自动恢复（pdsa-workflow），机器只管把念头举起来，
+# 不替人决定念头作废。这一处是全仓唯一的定义，`describe_pool()` 与 docs/closing.md 都按它说。
+PLANNED_MAX_DAYS = 7
 
 
 def center_candidates(repo=REPO, env=None):
@@ -439,23 +444,68 @@ def project_tickets(center_path, repo=REPO):
     return found, tickets
 
 
+def ticket_backing(tickets):
+    """找出能给「收尾包改动」背书的那张工单：当前尝试 `running` 且已绑定会话。
+
+    判据与 `verify()` 里那个 `bound` 一字相同（当前尝试 `state == "running"` 且
+    `session_id` 非空）：钩子拿不到调用方的会话号，能核的只有「有一张单正在被某个
+    会话执行」。`ready` / `rework` 是等人领走、`awaiting_review` 是成果在验收、
+    `done` 是已经结束——都不算有人在做，不能给改动背书。
+    """
+    for ticket in tickets:
+        if ticket["state"] != "running":
+            continue
+        attempt = next((item for item in ticket["attempts"] if item["id"] == ticket["current_attempt"]), None)
+        if attempt is not None and attempt["state"] == "running" and attempt["session_id"]:
+            return ticket, attempt
+    return None
+
+
+def staged_round_status(edits):
+    """从 `tasks/round.md` 的暂存增删行里取出状态位的新值。
+
+    判据与放行无关，只为了让 `packet` 分支的提示说真话：这一支放过时状态位可能
+    真的动过（三档之一 → `进行中`，即重开一轮），那句「状态位没动」在那种现场是
+    假的。读暂存行而不是工作区文件，是因为要报的就是「这次提交改成了什么」。
+    """
+    for line in reversed(list(edits or [])):
+        if not line.startswith("+"):
+            continue
+        match = ROUND_STATUS_LINE.search(line[1:])
+        if match is not None:
+            return match.group(1)
+    return None
+
+
 def closing_commit(repo=REPO, center_path=None, staged_paths=None):
-    """收尾提交：第三条放行路径。
+    """收尾类提交：先问这次提交在不在「收尾」，再问有没有工单。
 
-    为什么它必须存在：收尾包只能在「本项目没有任何工单在飞」的时刻提交（`close_gate
-    --check` 要求无在途单），而普通改动的放行要求一张绑定在 `running` 尝试上的工单。
-    两者不可能同时成立，所以收尾提交必须像合并提交那样被显式承认。
+    两类，判据差一件事：`tasks/round.md` 的状态位有没有改成三档之一
+    （`已收尾` / `等一句答复` / `需重开`）。
 
-    三条前提同时成立才放行，其余一律拒（`decide()` 一字未动，新逻辑只在这里）：
+    - **收尾提交**（状态位改成三档之一）：这就是收尾这个动作本身，必须趁「本项目
+      没有在飞的单」时提交（`close_gate --check` 要求无在途单），所以它像合并提交
+      那样是一条被显式承认的例外，不需要工单。
+    - **收尾包改动**（只动 `tasks/closing-*.md`，状态位没有改成三档之一）：它不是
+      收尾，是一条普通改动——给已收尾的轮次补记、改一份收尾包的说法、把状态位从
+      三档改回 `进行中`（重开一轮）都属于这一类。普通改动必须有工单背书，所以它按
+      `running` 放行而不是按例外放行（AW-124 现场：这类提交以前被一律当成收尾提交，
+      于是 `CLOSING_REJECTED`，只能 `--no-verify` 落盘）。
+
+    两类共同的窄条件（一字未放过）：
 
     1. 暂存路径全部落在 `tasks/closing-*.md` / `tasks/round.md` / `tasks/rounds.md`；
-    2. 本项目在途集合为空（含还没开始的 ready / rework，不含排在池子里的 planned）；
-    3. `tasks/round.md` 的暂存增删每一行都含 `状态：`，且至少有一份收尾包。
+    2. `tasks/round.md` 的暂存增删每一行都含 `状态：`，且至少有一份收尾包；
+    3. 收尾提交另要求在途集合为空（含还没开始的 ready / rework，不含池子里的 planned）。
 
-    返回 `{"verdict": "skip" | "allow" | "reject", "round": ..., "detail": ...}`。
-    三态是必要的：`skip` 交给普通规则（`decide()`），`reject` 不能落回普通规则——
-    否则一张 `running` 的工单就能为夹带的收尾提交背书，例外等于没设。拿不到暂存区、
-    拿不到库、读不到轮次行时一律 `reject` 并写明原因，不许因为「没报错」而放行。
+    两支共用第 1、2 条：收尾包改动允许带 `tasks/round.md`，但只允许改状态行，
+    每一增删行都含 `状态：`——与收尾提交同一道白名单，不是另一份。
+
+    返回 `{"verdict": "skip" | "allow" | "reject", "round": ..., "detail": ...}`；
+    `allow` 时另带 `mode`（`closing` / `packet`）。三态是必要的：`skip` 交给普通规则（`decide()`），
+    `reject` 不能落回普通规则——否则一张 `running` 的工单就能为夹带的收尾类提交背书，
+    例外等于没设。拿不到暂存区、拿不到库、读不到轮次行时一律 `reject` 并写明原因，
+    不许因为「没报错」而放行。
     """
     repo = Path(repo)
     if staged_paths is None:
@@ -474,7 +524,7 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
                 "detail": f"拿不到 tasks/round.md 的暂存 diff：{error}。判不出它只改了状态行，就不放行。"}
     status_only = bool(edits) and all(ROUND_STATUS_ANYWHERE.search(line) for line in edits)
 
-    # 只有「带收尾包」或「round.md 只改了状态行且没夹带别的文件」才可能是收尾提交；
+    # 只有「带收尾包」或「round.md 只改了状态行且没夹带别的文件」才可能是收尾类提交；
     # 其余交回普通规则。不放宽成「只要碰了 round.md 就按收尾提交判」：那会让一张
     # running 的工单正常改代码时被一条与它不相干的例外拦住。
     if not packets and not (round_touched and status_only and not outside):
@@ -511,6 +561,36 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
         return {"verdict": "reject", "round": round_no,
                 "detail": f"读不了中心库：{error.code}（{error.message}）；不知道有没有在途工单，就不放行。"}
 
+    # 分岔就在这里：状态位改成三档之一才是「这次提交在收尾」。
+    if not (round_touched and status in ROUND_CLOSED_STATUSES):
+        # 只改收尾包 = 一条普通改动。放行的依据是工单，不是收尾这条例外：
+        # 拿「本项目在途集合为空」去判它只会两面出错——有单在做时拒掉正当改动
+        # （AW-124），没单时又给没有依据的改发放行。
+        backing = ticket_backing(tickets)
+        if backing is None:
+            return {"verdict": "reject", "round": round_no,
+                    "detail": ("只改了收尾包、tasks/round.md 的状态位没有变成三档之一"
+                               "（已收尾 / 等一句答复 / 需重开），所以这不是收尾提交；"
+                               f"而项目 {found['project_id']} 里没有一张绑定在 running 尝试上的"
+                               "工单能给它背书。改收尾包本身是一条普通改动：先开一张工单、"
+                               "claim_ticket、bind_session，再带 TASK_CENTER_TICKET 提交。")}
+        ticket, attempt = backing
+        # 这一支放过时状态位不一定没动：三档之一 → `进行中`（重开一轮）也走这里。
+        # 所以按暂存行说清这次到底改成了什么，不再一律写「状态位没动」。
+        if round_touched:
+            new_status = staged_round_status(edits)
+            status_note = (f"tasks/round.md 的状态位这次改成了「{new_status}」，不在三档之内"
+                           "（已收尾 / 等一句答复 / 需重开）" if new_status else
+                           "tasks/round.md 这次只改了状态行，但没读出状态位的新值")
+        else:
+            status_note = "tasks/round.md 这次没有动，状态位没变"
+        return {"verdict": "allow", "round": round_no, "mode": "packet",
+                "ticket_id": ticket["id"], "attempt_id": attempt["id"],
+                "detail": (f"收尾包改动：{round_no} 的收尾包由工单 {ticket['id']} 背书"
+                           f"（当前尝试 {attempt['id']} 在 running、已绑定会话 {attempt['session_id']}）。"
+                           f"这不是收尾提交：{status_note}；"
+                           "所以改收尾包（含把状态位从三档改回进行中）是一条普通改动，按工单走。")}
+
     blocking = [f"{ticket['id']}（{ticket['state']}）" for ticket in tickets
                 if ticket["state"] in CLOSING_BLOCKING_STATES]
     if blocking:
@@ -518,7 +598,7 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
                 "detail": (f"项目 {found['project_id']} 还有 {len(blocking)} 张在途工单：{'、'.join(blocking)}；"
                            "close_gate 的 --check 也不会过。先等它验收或走 recover_ticket，再收尾。")}
 
-    return {"verdict": "allow", "round": round_no,
+    return {"verdict": "allow", "round": round_no, "mode": "closing",
             "detail": f"收尾提交：{round_no}"}
 
 
@@ -541,11 +621,16 @@ def project_snapshot(center_path, repo=REPO):
     counts = {state: 0 for state in CLOSING_BLOCKING_STATES}
     waiting = []
     planned = 0
+    pool = []
     landed = []
     for ticket in tickets:
         state = ticket["state"]
         if state == "planned":
             planned += 1
+            # 池子要逐张看得见（AW-109）：只数一个数，读的人分不出「念头」与「写好的单」，
+            # 也就看不出哪一张已经排了很久。这里只收三个字段，不把整张单抱进快照。
+            pool.append({"ticket_id": ticket["id"], "created_at": ticket["created_at"],
+                         "criteria_n": len(ticket.get("criteria") or [])})
         if state in counts:
             counts[state] += 1
             if state in WAITING_STATES:
@@ -558,6 +643,7 @@ def project_snapshot(center_path, repo=REPO):
         "total": sum(counts.values()),
         "waiting": waiting,
         "planned": planned,
+        "planned_tickets": pool,
         "landed": landed,
     }
 
@@ -571,6 +657,48 @@ def describe_in_flight(snapshot):
     detail = " / ".join(f"{state} {count}" for state, count in snapshot["states"].items())
     return (f"在途 {snapshot['total']} 张（{detail}）；"
             f"池子里另 {snapshot['planned']} 张 planned 排着，不算在途")
+
+
+def describe_pool(snapshot, now=None, max_days=None):
+    """池子明细：逐张点名、年龄、条件条数，并把超过年龄线的那几张挑出来。
+
+    `describe_in_flight()` 那一行只数张数（那句就是「planned 不算在途」的定义），读的人
+    看不出「这一张叫什么、排了多久、条件写完没有」。而「写不出条件的念头」正是那个位置
+    的用途（AW-109），所以这里把每一张的本事写在它旁边：
+
+    - 条件 0 条 → 标「条件空着」：它领不走（`claim_ticket` 报 `CRITERIA_NOT_JUDGEABLE`），
+      也不会被 `next_action.py` 派出去，出路只有 `revise_ticket` 补条件或 `cancel_ticket`；
+    - 年龄超过 `PLANNED_MAX_DAYS` → 进 `stale`，调用方据此判红。入口越轻、池子越长，
+      长到没人看就是另一种蒸发，所以年龄线必须有，且必须能让一条命令变红。
+
+    返回 `(lines, stale)`。`lines` 为空表示池子是空的；`stale` 里每项带 `ticket_id` 与
+    `days`。时间读不出来时不猜：那一张按「年龄未知」写，不进 `stale`。
+    """
+    now = now or datetime.now(timezone.utc)
+    max_days = PLANNED_MAX_DAYS if max_days is None else max_days
+    lines, stale, ages = [], [], []
+    for ticket in snapshot.get("planned_tickets") or []:
+        days = None
+        try:
+            stamp = datetime.fromisoformat(ticket["created_at"])
+        except (TypeError, ValueError):
+            stamp = None
+        if stamp is not None:
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            days = (now - stamp).total_seconds() / 86400
+            ages.append(days)
+        age = "年龄未知" if days is None else f"排了 {days:.1f} 天"
+        if ticket["criteria_n"]:
+            state = f"{ticket['criteria_n']} 条条件"
+        else:
+            state = "条件空着 ← 只能 revise_ticket 补条件或 cancel_ticket"
+        lines.append(f"池子：{ticket['ticket_id']} planned，{age}，{state}")
+        if days is not None and days > max_days:
+            stale.append({"ticket_id": ticket["ticket_id"], "days": days})
+    if ages:
+        lines.append(f"池子最老的一张排了 {max(ages):.1f} 天（年龄线 {max_days} 天）")
+    return lines, stale
 
 
 def unclosed_round(snapshot, repo=REPO):
@@ -692,6 +820,23 @@ def main(argv):
                 print("  它们是 ready / rework，都算在途：收尾闸门会拦，收尾提交的钩子也会拦。"
                       "没打算现在做就先 cancel_ticket 或在库里排成 planned。", file=sys.stderr)
         round_no, unclosed = unclosed_round(snapshot, args.repo)
+        pool_lines, pool_stale = ([], [])
+        if snapshot is not None:
+            # 池子明细逐张打印（不是只数张数）：念头与写好的单要分得出来，排久了要看得见。
+            pool_lines, pool_stale = describe_pool(snapshot)
+            for line in pool_lines:
+                print(line, file=sys.stderr)
+        # 年龄线只管「报出来」这一件事：报在哪里、谁去看。它是同一张池子从「可见」
+        # 逆成「长草」的分界线，所以不能只写一行提示而退出 0，也不能只进 JSON 而不说。
+        pool_stale_detail = None
+        if pool_stale:
+            listed = "、".join(f"{item['ticket_id']}（{item['days']:.1f} 天）" for item in pool_stale)
+            pool_stale_detail = (
+                f"pool-stale：池子里 {len(pool_stale)} 张 planned 排够 {PLANNED_MAX_DAYS} 天还没开工"
+                f"（{listed}）；条件补齐了就 claim_ticket，写不出条件就 revise_ticket 或 cancel_ticket"
+            )
+            if not args.json:
+                print(pool_stale_detail, file=sys.stderr)
         if unclosed is not None:
             print(unclosed, file=sys.stderr)
             print(f"本轮 {round_no} 没有收尾：先收尾再开新单（判据与落点见 docs/closing.md）。", file=sys.stderr)
@@ -712,6 +857,8 @@ def main(argv):
             )
         if unclosed is not None:
             failures.append(f"unclosed-round：本轮 {round_no} 没有收尾，先收尾再开新单")
+        if pool_stale_detail:
+            failures.append(pool_stale_detail)
         if args.json:
             result = {
                 "items": items, "count": len(items),
@@ -729,8 +876,14 @@ def main(argv):
     closing = closing_commit(args.repo, db_path)
     if closing["verdict"] == "allow":
         if args.json:
-            print(json.dumps({"ok": True, "result": {"mode": "closing", "round": closing["round"],
+            print(json.dumps({"ok": True, "result": {"mode": closing.get("mode", "closing"),
+                                                      "round": closing["round"],
                                                       "detail": closing["detail"]}}, ensure_ascii=False, indent=2))
+        elif closing.get("mode") == "packet":
+            # 收尾包改动走的是工单，不是收尾这条例外：说清依据，别让它看起来像特权。
+            print(closing["detail"])
+            print("  放行理由：暂存区只含收尾包（可带 round.md 的状态行），状态位没有改成三档之一，"
+                  "所以它不是收尾；而本项目的工单已把当前尝试落到 running 并绑定了会话，由它背书。")
         else:
             print(closing["detail"])
             print("  放行理由：暂存区只含收尾包与状态行，本项目没有在途工单；"

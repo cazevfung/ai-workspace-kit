@@ -11,6 +11,10 @@
 4. **释放时机各靠什么失效**：单子终结时尝试离开 `blocked`/`running`/`submitted`，
    索引条件失效、槽位自动空出；车次本身不因单子终结而关闭（`closed_at` 仍为空），
    关闭由最后一张单的合并记录那一侧落，`closed_at` 一旦非空，车次不再接受新单。
+5. **错误次序**：同一现场既「项目有在途单」又「车次在别人手里」时，报的是
+   `BATCH_OWNED_BY_OTHER`（AW-112；判据从 `PRD-014` R4.2 与 R3.1 推出，见 `claim_ticket` 里的注释）。
+6. **车次与工单同项目**：`tickets.batch_id` 指向别的项目的车次是脏行，按号取单的入口报
+   `BATCH_PROJECT_MISMATCH`，不做半程处理。
 
 车次行目前没有建车次的操作（`PRD-015` 的搭车实施单才做），所以夹具直接写库：
 插一行 `batches`、把 `tickets.batch_id` 指过去。这与「本单只落 schema 与 claim 闸门」
@@ -74,13 +78,13 @@ class BatchTest(unittest.TestCase):
     def scope(self, alias, **extra):
         return {"project_id": "p1", "ticket_id": self.tid(alias), **extra}
 
-    def batch(self, batch_id="b1", resource_key="资源:仓库:示例项目", closed_at=None):
+    def batch(self, batch_id="b1", resource_key="资源:仓库:{{WORKSPACE}}", closed_at=None, project_id="p1"):
         """写一行车次（没有建车次的操作，见文件头）。"""
         conn = sqlite3.connect(self.db)
         try:
             conn.execute("INSERT INTO batches(id,project_id,resource_key,owner_session_id,planned_at,closed_at)"
                          " VALUES (?,?,?,NULL,?,?)",
-                         (batch_id, "p1", resource_key, "2026-11-21T12:00:00+00:00", closed_at))
+                         (batch_id, project_id, resource_key, "2026-11-21T12:00:00+00:00", closed_at))
             conn.commit()
         finally:
             conn.close()
@@ -195,8 +199,9 @@ class BatchTest(unittest.TestCase):
 
     # --- 3. 车次归属只有一个判据 -------------------------------------------
 
-    def test_batch_owned_by_other_rejected(self):
-        """AC-R4-1 第二条：另一个会话领同一车次报 BATCH_OWNED_BY_OTHER，且不留行。"""
+    def test_second_session_on_a_batch_rejected(self):
+        """AC-R4-1 第二条（`PRD-014` 点名的就是这个名字）：另一个会话领同一车次报
+        BATCH_OWNED_BY_OTHER，且不留行。"""
         self.ticket("t1")
         self.ticket("t2")
         self.batch()
@@ -225,6 +230,70 @@ class BatchTest(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual({"active_session": True}, indexes)
+
+    # --- 3b. 错误次序：车次被占先于 DISPATCH_BUSY ---------------------------
+
+    def test_batch_error_before_busy(self):
+        """同一现场两个条件都满足时报 `BATCH_OWNED_BY_OTHER`，不是 `DISPATCH_BUSY`。
+
+        现场：t1 已在车次 b1 里 running（coordinator-1 持有），t2 也在 b1，
+        coordinator-2 不带 allow_parallel 来领 t2——「项目忙」与「车次是别人的」同时成立。
+        按 `PRD-014` R4.2（车次归属校验与 R3.1 的 `BLOCKED_BY_DEPENDENCY` 同一类，
+        回答的是「这张单能不能开工」）与 R3.1 的判序，它必须排在 `DISPATCH_BUSY` 之前；
+        另有一条可对照的旁证：`DISPATCH_BUSY` 给了 allow_parallel 这条出口，
+        车次归属没有出口，先报前者会把人送到一条走不通的路上。
+        """
+        self.ticket("t1")
+        self.ticket("t2")
+        self.ticket("t3")
+        self.batch()
+        self.ride("t1")
+        self.ride("t2")
+        self.bind(self.claim("t1")["attempt_id"], "t1")
+        # 前提先自证：项目此刻确实有在途单，`DISPATCH_BUSY` 的条件成立。
+        self.assertEqual("running", self.detail("t1")["state"])
+        result = self.error("BATCH_OWNED_BY_OTHER", "claim_ticket", self.scope(
+            "t2", expected_revision=1, coordinator_session_id="coordinator-2"))
+        self.assertIn("b1", result["error"]["message"])
+        self.assertIn("coordinator-1", result["error"]["message"])
+        self.assertEqual(0, self.attempt_count("t2"))
+        self.assertEqual("ready", self.detail("t2")["state"])
+        # 次席没被挟持：同一个现场、同一张项目里没有车次的单，仍报 DISPATCH_BUSY。
+        busy = self.error("DISPATCH_BUSY", "claim_ticket", self.scope(
+            "t3", expected_revision=1, coordinator_session_id="coordinator-2"))
+        self.assertIn(self.tid("t1"), busy["error"]["message"])
+
+    # --- 3c. 车次与工单不同项目 ----------------------------------------
+
+    def test_cross_project_batch_rejected_on_read(self):
+        """`tickets.batch_id` 指向别的项目的车次：脏行在按号取单的入口就拒。
+
+        本版没有建车次/搭车的操作（见文件头），所以脏行只能从库外进来；
+        判据放在 `_ticket` 这个「按号取单」的唯一入口，任何操作都绕不过去。
+        """
+        self.ticket("t1")
+        other = self.root / "另一个项目"
+        other.mkdir()
+        (other / "PRD.md").write_text("另一个项目的需求", encoding="utf-8")
+        self.ok("register_project", {"project_id": "p2", "name": "另一个项目", "root": str(other)})
+        self.batch(batch_id="b2", project_id="p2")
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("UPDATE tickets SET batch_id='b2' WHERE id=?", (self.tid("t1"),))
+            conn.commit()
+        finally:
+            conn.close()
+        for op, payload in (
+            ("get_ticket", self.scope("t1")),
+            ("claim_ticket", self.scope("t1", expected_revision=1,
+                                        coordinator_session_id="coordinator-1")),
+        ):
+            result = self.error("BATCH_PROJECT_MISMATCH", op, payload)
+            self.assertIn("b2", result["error"]["message"])
+            self.assertIn("p2", result["error"]["message"])
+        # 被拒的调用不产生尝试，也不把车次认走。
+        self.assertEqual(0, self.attempt_count("t1"))
+        self.assertIsNone(self.batch_row("b2")["owner_session_id"])
 
     # --- 4. 释放时机 -------------------------------------------------------
 

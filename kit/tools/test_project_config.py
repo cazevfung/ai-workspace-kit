@@ -1,9 +1,15 @@
-"""按项目配置的用例：add_project 写什么、auto_merge 缺配置时怎么停。
+"""按项目配置的用例：add_project 写什么、auto_merge 的测试命令按哪三层解。
 
-C5 要证明的不是「能读到 JSON」，而是缺配置时**不回落**到任何默认测试命令：
-以前 `auto_merge` 固定跑 `tools/run_tests.py`，项目没接进工作区也照样跑出一行
-「全部通过」；现在必须先有 `.agents/ticket-config.json`，缺失就在第 2 步停住并
-指向 `add_project.py`。
+判据从「缺配置就停」改成了「三层依次退」：合并工具的测试命令按
+`tools/merge-projects.json`（工作区侧一张表）→ 目标仓库自己的
+`.agents/ticket-config.json`（`add_project.py` 写的那一份）→ 缺省的
+`python tools/run_tests.py` 解，三层都没有才报 `NO_TEST_COMMAND`。
+改的原因是真实项目里两种配置都存在：新登记走表，老安装只写过自己那份文件；
+把它们当成互斥的话，其中一边的测试命令会被静默忽略。
+
+为什么不许「没配就空跑」：那会把「没跑测试」显示成「测试通过」。缺省这一层
+不是可选项，它是闸门本身；缺省也跑不起来（仓库里没有 `tools/run_tests.py`）
+时报的是 `NO_TEST_COMMAND`，不是「测试红」。
 """
 import json
 import os
@@ -12,7 +18,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -99,68 +104,66 @@ class AddProjectTest(RepoCase):
         self.assertIn("git init", str(caught.exception))
 
 
-class MissingConfigTest(RepoCase):
-    def test_load_project_config_names_add_project(self):
+class TestCommandLayersTest(RepoCase):
+    """三层解析：表格 → 仓库自己那份配置 → 缺省脚本。"""
+
+    def test_no_config_at_all_means_the_default_script(self):
+        plan = auto_merge.resolve_test_plan("p-test", repo=self.repo)
+        self.assertEqual("default", plan.kind)
+        self.assertIn("缺省", plan.describe())
+
+    def test_ticket_config_supplies_the_command_when_the_table_has_no_entry(self):
+        add_project.add_project(self.repo, test_cmd='python -c "print(1)"')
+        plan = auto_merge.resolve_test_plan("p-test", repo=self.repo)
+        self.assertEqual("command", plan.kind)
+        self.assertEqual(["python", "-c", "print(1)"], plan.command)
+        self.assertIn("ticket-config.json", plan.describe())
+
+    def test_the_table_wins_over_the_repository_config(self):
+        """表里登记了就以表为准：新的一层不该被老文件覆盖。"""
+        add_project.add_project(self.repo, test_cmd='python -c "print(1)"')
+        table = self.root / "merge-projects.json"
+        table.write_text(json.dumps({"projects": {"p-test": {"test_command": ["node", "x.mjs"]}}}),
+                         encoding="utf-8")
+        plan = auto_merge.resolve_test_plan("p-test", config_path=table, repo=self.repo)
+        self.assertEqual("command", plan.kind)
+        self.assertEqual(["node", "x.mjs"], plan.command)
+
+    def test_an_empty_test_cmd_in_the_repository_config_is_refused(self):
+        self.write(".agents/ticket-config.json", json.dumps({"test_cmd": []}))
         with self.assertRaises(auto_merge.Fail) as caught:
-            auto_merge.load_project_config(self.repo)
-        self.assertEqual(auto_merge.STEP_CONFIG, caught.exception.step)
-        self.assertIn("add_project.py", caught.exception.fix)
-
-    def test_run_merge_stops_before_any_test_or_git_write(self):
-        tip = self.git("rev-parse", "HEAD").stdout.strip()
-        ticket = {
-            "id": "AW-901", "project_id": "p-test", "title": "缺配置",
-            "state": "done", "merges": [],
-            "notices": [{"status": "sent", "detail": "fixture"}],
-            "submissions": [{"head_sha": tip}],
-        }
-        out = []
-        with mock.patch.object(auto_merge, "run_tests_in") as tests:
-            with self.assertRaises(auto_merge.Fail) as caught:
-                auto_merge.run_merge(
-                    self.repo, "AW-901", branch="ticket/AW-901", target="master",
-                    ticket_reader=lambda _: ticket, merge_recorder=lambda payload: payload,
-                    out=out.append, env=self.env,
-                )
-        tests.assert_not_called()
-        self.assertEqual(auto_merge.STEP_CONFIG, caught.exception.step)
-        self.assertIn("add_project.py", caught.exception.fix)
-        # 目标分支与配置都没动：失败发生在任何 git 写入之前。
-        self.assertFalse(self.config_path().exists())
-        self.assertEqual(tip, self.git("rev-parse", "master").stdout.strip())
-
-    def test_main_exits_non_zero_and_points_at_add_project(self):
-        """C5 的字面口径：缺配置时命令行非零退出，并提示跑 add_project。"""
-        out = []
-        code = auto_merge.main(["--ticket", "AW-901", "--repo", str(self.repo)], out=out.append)
-        text = "\n".join(out)
-        self.assertEqual(1, code, text)
-        self.assertIn("add_project.py", text)
-        self.assertIn(auto_merge.STEP_CONFIG, text)
-
-    def test_config_without_test_cmd_is_rejected(self):
-        self.write(".agents/ticket-config.json", json.dumps({"target_branch": "master"}))
-        with self.assertRaises(auto_merge.Fail) as caught:
-            auto_merge.load_project_config(self.repo)
+            auto_merge.resolve_test_plan("p-test", repo=self.repo)
+        self.assertEqual(auto_merge.MERGE_CONFIG_INVALID, caught.exception.code)
         self.assertIn("test_cmd", caught.exception.reason)
 
-    def test_config_without_target_branch_is_rejected(self):
-        self.write(".agents/ticket-config.json", json.dumps({"test_cmd": ["python", "-c", "pass"]}))
+    def test_a_broken_repository_config_is_not_silently_ignored(self):
+        self.write(".agents/ticket-config.json", "{不是 JSON")
         with self.assertRaises(auto_merge.Fail) as caught:
-            auto_merge.load_project_config(self.repo)
-        self.assertIn("target_branch", caught.exception.reason)
+            auto_merge.resolve_test_plan("p-test", repo=self.repo)
+        self.assertEqual(auto_merge.MERGE_CONFIG_INVALID, caught.exception.code)
+        self.assertIn("ticket-config.json", caught.exception.reason)
 
-    def test_run_tests_in_refuses_an_empty_test_cmd(self):
+    def test_default_target_prefers_the_repository_config_then_master(self):
+        self.assertEqual("master", auto_merge.default_target(self.repo))
+        add_project.add_project(self.repo, target_branch="main")
+        self.assertEqual("main", auto_merge.default_target(self.repo))
+
+    def test_missing_default_script_is_no_test_command_not_a_red_suite(self):
+        plan = auto_merge.resolve_test_plan("p-test", repo=self.repo)
         with self.assertRaises(auto_merge.Fail) as caught:
-            auto_merge.run_tests_in(self.repo, python=sys.executable, test_cmd=[], env=self.env)
-        self.assertIn("test_cmd", caught.exception.reason)
+            auto_merge.run_tests_in(self.repo, plan=plan, python=sys.executable, env=self.env)
+        self.assertEqual(auto_merge.NO_TEST_COMMAND, caught.exception.code)
+        self.assertIn("tools/run_tests.py", caught.exception.reason)
 
-    def test_config_round_trip_through_add_project(self):
-        add_project.add_project(self.repo, test_cmd="python -c pass")
-        config = auto_merge.load_project_config(self.repo)
-        self.assertEqual(["python", "-c", "pass"], config["test_cmd"])
-        self.assertEqual("master", config["target_branch"])
+    def test_the_default_script_runs_when_the_repository_has_one(self):
+        # 输出只写 ASCII：子进程的 stdout 按当前平台编码，用例不该被控制台编码左右。
+        self.write("tools/run_tests.py", "print('汇总：business 1 OK')\nraise SystemExit(0)\n")
+        plan = auto_merge.resolve_test_plan("p-test", repo=self.repo)
+        passed, summary, output = auto_merge.run_tests_in(
+            self.repo, plan=plan, python=sys.executable, env=self.env)
+        self.assertTrue(passed, output)
+        self.assertIn("business 1 OK", summary)
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
