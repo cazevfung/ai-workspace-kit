@@ -530,6 +530,32 @@ python tools/auto_merge.py --ticket AW-xxx
 
 工具在临时 worktree 里先合一次并跑**这个项目的测试命令**，绿了才 `git merge --no-ff`；红了一律中止，此时目标分支一动未动。真实合并后还会再跑一次同一个命令，再红就 `git reset --hard pre-merge-<工单号>` 回滚——回退点在合并前就打好了。回退点已存在时看它指向哪里：指向**当前目标分支 head**（上一轮停在第 5 步测试红或第 6 步回滚）就沿用，直接重跑；指向别处才拒，不覆盖旧回退点（`AW-131`）。合并成功后的清理按主检出根算 `.worktrees/<工单号>`，`--repo` 指向工作树时也不拼成 `<工作树>/.worktrees/<工单号>`。
 
+### 发布类工单的提交落在哪里
+
+**一句话：先在 `ticket/<工单号>` 上提交，由 `auto_merge` 合入 master，由合并那一步推，最后才打 tag。**
+
+发布单（发版、打包、改 `VERSION` 与 `CHANGELOG.md` 的那一类）跟普通单走同一条路，一步不少：
+
+```bash
+cd {{WORKSPACE}}
+git worktree add .worktrees/AWK-0xx -b ticket/AWK-0xx master   # 开工
+git -C .worktrees/AWK-0xx commit -m "AWK-0xx：发布 0.5.3"       # 提交落在工单分支上
+python tools/auto_merge.py --ticket AWK-0xx                     # 预演 → 测试 → --no-ff 合入 master → 写合并记录
+git -C {{WORKSPACE}} push origin master                         # 由合并那一步推，推进的是带合并提交的 master
+git tag v0.5.3 && git push origin v0.5.3                        # 合并记录写成功之后才打 tag
+```
+
+**直接落 master 会让两条记录路径同时失效。** 把提交直接 `git commit` 在主检出上再推，看起来更快，代价是「这张单到底合过没有」在库里永远补不上：
+
+1. **`auto_merge --ticket` 停在第 2 步。** 它要「源分支领先目标」，而改动根本没进分支，`rev-list --count master..ticket/AWK-0xx` 是 0，命令还没跑到测试就退出。
+2. **`--record-only` 也拒。** 它要「源分支 tip == 被验收的 sha」，而分支停在上一个版本的提交上，这条等式不成立。2026-11-23 的 AWK-115 就是这个现场：分支停在 `d849bc9960f89711b75daa01c94fa295780d8b34`（0.5.1），被验收的是 `83e22f0b1be7e4bbb9f6bc5d136fbed200597f37`（0.5.2，直接提交在 master 上），两个 sha 都不是同一棵树（`git rev-parse d849bc9 83e22f0` 可核），收口因此一条记录也写不了。0.5.0 / 0.5.1 / 0.5.2 三张单都是这么补记的：只能由人在 `merge_ticket` 的 `manual` 档里写清「哪几步跑了、哪几步没跑」，而这一档每次都要人现场判断「这到底算不算合过」。
+
+工具现在会当面说这件事：源分支不领先、而目标分支上已经有看着像这张单的提交时，`auto_merge` 第 2 步会打出「你可能把提交直接落 master 了」并点名那几个提交、指向本节；`--record-only` 则会点名「分支 tip」与「被验收的 sha」这两个完整 sha。看到哪一种都不是重试能过去的，要做的是把改动重新落在 `ticket/<工单号>` 上再合一次。
+
+**打 tag 之前必须已经有一条 `merges` 行。** tag 与 Release 一旦推出去就收不回来，而 `merges` 是唯一能查「这一版是哪次合并进来的」的记录；先打 tag 再补记录，等于把「没合过」印在版本号上，事后只能靠 tag 的时间戳去反推。`git tag` 之后别急着推：先 `echo '{"project_id":"<项目>","ticket_id":"AWK-0xx"}' | python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 get_ticket`，看一眼 `merges` 非空。
+
+**分支与工作树留到合并记录写成功之后再删。** 这是「先合并、后清理」在发布单上的样子：删早了 `auto_merge` 连源分支都找不到，那时能做的只有 `--record-only`，而它要求的等式已经被删掉的分支带走了。
+
 ### 别的项目怎么告诉闸门「我的测试怎么跑」
 
 缺省是 `python tools/run_tests.py`（本工作区的约定，`ai-workspace` 与 `cindy-dashboard` 都有这一份）。没有这一份的项目在 `tools/merge-projects.json` 里按 `project_id` 登记一条，`cindy-harmony` 就是这么登记的：
@@ -552,7 +578,7 @@ python tools/auto_merge.py --ticket AW-xxx
 
 **老提交（`head_sha` 为 NULL）怎么合。** schema 9 之前写下的提交没有这一列，库里有 140 多条这样的提交与几十张已验收未合并的老单。它们不能静默放行（那等于把「没核对过」写成「核对过」），也不能全堵死（那样老单永远合不了），所以留了一个明文出口：`reviewed_sha` 传字面量 `unverified`，它按原样写进 `merges.reviewed_sha`，于是「这单没记录过 sha」在库里查得到。`tools/auto_merge.py` 遇到这种单会自己这么传，并在输出里打一条警告；有 `head_sha` 的单传 `unverified` 会被拒（INVALID_INPUT）——那是把一个可核对的事自称没核对。历史合并记录不追溯：已有的 `merges` 行 `reviewed_sha` 就是 NULL，它如实表示那时还没有这一列。
 
-`--record-only` 也做同一道比对，它比的是那次合并合进来的那一支（`parent2` 指向的源分支 tip）：不等同样拒绝收口，由人决定这张单怎么算。
+`--record-only` 也做同一道比对，它比的是那次合并合进来的那一支（`parent2` 指向的源分支 tip）：不等同样拒绝收口，由人决定这张单怎么算。它的拒绝理由会点名「分支 tip」与「被验收的 sha」并把两个完整 sha 都打出来——这种现场多半是落点错了（提交直接落在目标分支上），处置见上面的「发布类工单的提交落在哪里」。
 
 ### 合并动了 schema 的工单：先对齐库，再写记录
 
@@ -600,7 +626,7 @@ python tools/auto_merge.py --ticket AW-058 --record-only
 
 接着三件事：
 
-1. **找到那次合并提交。** 在目标的祖先里按 `parent2 == 源分支 tip` 逐行比对 `git rev-list --parents <目标>`。找不到（当时是快进合并，根本没有合并提交）就非零退出、不写记录——记录里的那个 `commit` 必须是真合过的那一个，不能拿 HEAD 顶替。
+1. **找到那次合并提交。** 在目标的祖先里按 `parent2 == 源分支 tip` 逐行比对 `git rev-list --parents <目标>`。找不到（当时是快进合并，根本没有合并提交）就非零退出、不写记录——记录里的那个 `commit` 必须是真合过的那一个，不能拿 HEAD 顶替；输出里同时给出要找的分支 tip 与目标分支当前的提交。
 2. **在当前检出跑一遍全量测试**，绿了才写记录，`tests` 就是这次实跑的汇总行。红就非零退出，不写记录、不清理工作树与分支；回退点写在输出里：`pre-merge-<工单号>`，没有这个 tag 时就是合并提交的第一个父提交。
 3. **记录写成功之后清理**：`git worktree remove .worktrees/<工单号>`（存在才删）、`git branch -d ticket/<工单号>`。清理失败只报告、不改退出码——那时该做的是人工收拾，不是重跑（重跑会被第 1 步的 `ALREADY_MERGED` 挡回来）。工具不会 `--force` 删工作树：里面还有未提交改动时，该保留的正是那部分。
 

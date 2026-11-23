@@ -261,6 +261,39 @@ class TempRepoCase(RepoFixture):
         self.assertIsNone(self.tag_sha())
         self.assertEqual([], self.records)
 
+    def test_ahead_zero_with_master_looking_like_this_ticket_names_the_misplacement(self):
+        """源分支不领先、而 master 上已有像这张单的提交：要说中「你可能把提交直接落 master 了」。
+
+        这是 AWK-116 的现场：发布单的提交直接落在 master 上再推，于是分支停在上一版，
+        `auto_merge` 在第 2 步只报一句「源分支不领先」，人看不出是自己的落点错了。
+        断言三件事：话要点名、要指到 protocol 那一节、目标分支与记录都没动。
+        """
+        self.git("branch", self.BRANCH, "master")
+        self.write("VERSION", "0.5.3\n")
+        self.commit("AW-900：发布 0.5.3（直接落在 master 上）")
+        landed = self.head()
+        code, out = self.run_merge()
+        self.assertEqual(1, code, out)
+        self.assertIn("第 2 步", out)
+        self.assertIn("没有领先", out)
+        self.assertIn("你可能把提交直接落 master 了", out)
+        self.assertIn("docs/protocol.md", out)
+        self.assertIn("发布类工单的提交落在哪里", out)
+        self.assertIn(landed[:12], out, "要点名 master 上那个看着像这张单的提交")
+        self.assertEqual(landed, self.head(), "master 一指头都不许动")
+        self.assertIsNone(self.tag_sha(), "这一步不该打回退点")
+        self.assertEqual([], self.records, "不许写合并记录")
+
+    def test_ahead_zero_without_a_matching_commit_keeps_the_plain_sentence(self):
+        """不领先、master 上也没有像这张单的提交：输出仍是既有那句，不硬凑提醒。"""
+        self.git("branch", self.BRANCH, "master")
+        self.write("notes.txt", "无关的提交\n")
+        self.commit("改一下 notes，与工单号无关")
+        code, out = self.run_merge()
+        self.assertEqual(1, code, out)
+        self.assertIn("没有领先", out)
+        self.assertNotIn("你可能把提交直接落 master 了", out)
+
     def test_missing_source_branch_names_the_convention_not_a_traceback(self):
         """源分支不存在：报第 2 步与补救句，不许崩成 NameError。
 
@@ -1463,6 +1496,54 @@ class RecordOnlyTest(RepoFixture):
         self.assertEqual([], self.records)
         self.assertEqual(before, self.head())
         self.assertTrue(self.branch_exists())
+
+    def test_branch_tip_not_the_reviewed_sha_names_both_shas(self):
+        """AWK-116 现场：分支停在上一版提交、master 已前进。
+
+        拒绝理由必须点名「分支 tip」与「被验收的 sha」并把两个完整 sha 都打出来——
+        以前这里借的是「验收之后分支又变动过」那句通用话（真实原因恰恰相反：提交
+        压根没落在分支上），人只能靠猜。这一步在跑测试与写记录之前，所以记录、工作树、
+        分支、目标分支五样都不许动。
+        """
+        self.branch_work({"feature.txt": "feature\n"})
+        tip = self.head(f"refs/heads/{self.BRANCH}")
+        # 现场：分支停在上一版发布，后续那版直接提交在 master 上（没有再走合并）。
+        # 先让 master 快进到分支 tip，再在 master 上多一个提交：分支仍全在目标里，
+        # 但分支 tip 已经停在上一版——AWK-115 就是分支 d849bc9、被验收 83e22f0 这个形状。
+        self.git("merge", "--ff-only", self.BRANCH)
+        self.write("VERSION", "0.5.3\n")
+        self.commit("AW-900：发布 0.5.3（直接落在 master 上）")
+        landed = self.head()
+        self.reviewed_head = landed
+        self.assertNotEqual(tip, landed)
+        code, out = self.run_merge(record_only=True)
+        self.assertEqual(1, code, out)
+        self.assertIn("第 2 步", out)
+        self.assertIn("分支 tip", out)
+        self.assertIn("被验收的 sha", out)
+        self.assertIn(tip, out, "分支 tip 要打完整 sha")
+        self.assertIn(landed, out, "被验收的 sha 要打完整 sha")
+        self.assertEqual([], self.records, "拒绝时一条记录都不写")
+        self.assertTrue(self.branch_exists(), "拒绝时不许清分支")
+        self.assertEqual(landed, self.head(), "目标分支一指头都不许动")
+
+    def test_record_only_still_records_after_a_real_no_ff_merge(self):
+        """真 `--no-ff` 合并的现场照常收口：拒绝新判据不许把正常路径也拦掉。
+
+        与 `test_records_then_cleans_up` 的区别是这里显式把被验收的 sha 设成分支 tip 并
+        核对写进库的 `reviewed_sha` 就是那一支——「分支 tip 与被验收的 sha 一致」这个等式
+        成立时必须照旧成功，而不是被那条新话拦住。
+        """
+        commit = self.merged_without_record()
+        tip = self.head(f"refs/heads/{self.BRANCH}")
+        self.reviewed_head = tip
+        code, out = self.run_merge(record_only=True)
+        self.assertEqual(0, code, out)
+        self.assertEqual(1, len(self.records), out)
+        self.assertEqual(commit, self.records[0]["commit"])
+        self.assertEqual(tip, self.records[0]["reviewed_sha"])
+        self.assertFalse(self.worktree_dir().exists(), "成功后要清工作树")
+        self.assertFalse(self.branch_exists(), "成功后要清分支")
 
 
 class MergeJournalTest(RepoFixture):

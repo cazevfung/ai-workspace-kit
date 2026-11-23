@@ -52,6 +52,11 @@
    （分隔符与大小写按 Windows 口径归一，内容相同也算），merge 必然会以
    `untracked working tree file would be overwritten` 拒绝，所以在这里就停下、
    指名文件并给出补救；交集为空时行为与以前完全一样。见 `guard_untracked_overwrite`。
+   第 2 步的「源分支不领先」也分两种现场：改动还没提交，或提交落在了目标分支上。
+   后者的判据只用一个 git 事实——目标分支独有的提交里有没有消息提到这张单
+   （`git log <源>..<目标>` + 工单号）；命中就直说「你可能把提交直接落 <目标> 了」、
+   点名那几个提交，并指向 `docs/protocol.md` 的「发布类工单的提交落在哪里」。
+   命中不了则照旧只报原话，不多说一句。见 `landed_like_this_ticket`。
 3. 冲突预演：`git merge-tree`；有冲突就列出文件并中止，不自动解冲突。
 4. 打回退点 `pre-merge-<ticket>`（已存在**且指向当前目标分支 head** 时沿用：那是上一轮
    停在第 5 步测试红或第 6 步回滚留下的；指向别处才拒，不覆盖旧回退点）。
@@ -87,6 +92,11 @@ AW-058 就断在这里：master 上已经有那次合并提交，`merges` 里没
    但「源分支领先目标」换成「源分支已全在目标里」：
    `git merge-base --is-ancestor <源> <目标>` 为真，且 `rev-list --count <目标>..<源>` 为 0。
    这一步不预检未跟踪文件：这次不再往工作区写任何路径。
+2b. 紧接着比对「分支 tip」与「被验收的 sha」——它比正常路径的同一道判更早说话：
+   不等就点名这两个值、把两个**完整** sha 都打出来。这种现场多半不是「验收之后
+   又提交了」，而是提交直接落在目标分支上、分支停在上一版，所以理由里还要说明
+   落点错了、并指向 `docs/protocol.md` 的「发布类工单的提交落在哪里」。
+   见 `require_record_only_tree`。
 3. 在目标的祖先里找那次合并提交：`rev-list --parents <目标>` 逐行比对，取 `parent2`
    正好等于源分支 tip 的那一个。找不到（例如当时是快进合并，根本没有合并提交）就
    非零退出、不写记录——记录里的 commit 必须是真合过的那一个，不能拿 HEAD 顶替。
@@ -1597,6 +1607,25 @@ def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=Tr
 
     if require_ahead:
         if ahead == 0:
+            # 「源分支不领先」有两种现场，说的是两件不同的事：
+            # ① 改动还没提交（真没做完）；② 提交落在了目标分支上（发布类工单常这么干）。
+            # ②的判别只看一个 git 事实：目标分支独有的提交里有没有消息提到这张单。
+            # 不给这个提醒时，人只能看到「源分支不领先」一句，看不出是自己的落点错了。
+            landed = landed_like_this_ticket(repo, target, branch, ticket_id, env=env)
+            if landed:
+                detail = "\n".join(f"    {sha[:12]} {subject}" for sha, subject in landed[:5])
+                raise Fail(
+                    STEP_CHECKS,
+                    f"{branch} 没有领先 {target} 的提交（rev-list --count {target}..{branch} = 0），"
+                    f"而 {target} 上已经有看着像这张单的提交：\n{detail}\n"
+                    f"你可能把提交直接落 {target} 了。",
+                    f"发布/改动类工单要先在 ticket/<工单号> 上提交，再由 auto_merge 合入 {target}、"
+                    "由合并那一步推、最后才打 tag（见 docs/protocol.md 的「发布类工单的提交落在哪里」）。"
+                    f"此刻 --record-only 也过不去：它要求 {branch} 的 tip 与被验收的 sha 是同一个提交，"
+                    f"而提交落在 {target} 上时那条等式永远不成立。要把这次改动重新提交到 ticket 分支上"
+                    "再合，不要用 --record-only 顶替一次真实合并。"
+                    f"此时 {target}、回退点、journal、工作树与分支都没有动过。",
+                )
             raise Fail(
                 STEP_CHECKS,
                 f"{branch} 没有领先 {target} 的提交（rev-list --count {target}..{branch} = 0）。",
@@ -1684,6 +1713,71 @@ def guard_reviewed_sha(ticket, ticket_id, branch, tip, emit) -> str:
             f"那个提交（{head[:12]}）再合，要么让独立验收会话对现在的 tip 重新验收一次"
             f"（提交一次带 head_sha 的成果，再 review_result）。此刻 {ticket_id} 的合并记录没写、"
             "回退点 tag 没打、临时工作树没建，目标分支一指头没动。",
+        )
+    emit(f"被验收的树：{head}（与 {branch} 的 tip 一致）。")
+    return head
+
+
+def landed_like_this_ticket(repo, target, branch, ticket_id, env=None) -> list[tuple[str, str]]:
+    """目标分支独有的提交里，哪些看着像这张单的（消息含工单号）。
+
+    只读，不写任何东西。用来区分「源分支不领先」的两种现场：改动还没提交，还是提交
+    直接落在了目标分支上。判据只用 git 事实与工单号本身，不去猜作者的意图：
+    消息里出现 `AW-116` 这种字面量才算，命中不了就返回空列表，调用方照旧报原话。
+    返回 [(完整 sha, 首行标题), ...]，按 git log 的顺序（新的在前）。
+    """
+    if not ticket_id:
+        return []
+    proc = git(
+        repo, "log", "--format=%H%x1f%s", f"{branch}..{target}",
+        step=STEP_CHECKS, check=False, env=env,
+    )
+    if proc.returncode != 0:
+        # 两个 ref 有一个读不出来时不该把「不领先」变成另一句话：交给上游判。
+        return []
+    needle = str(ticket_id).casefold()
+    hits = []
+    for line in proc.stdout.splitlines():
+        sha, _, subject = line.partition("\x1f")
+        if sha and needle in subject.casefold():
+            hits.append((sha.strip(), subject.strip()))
+    return hits
+
+
+def require_record_only_tree(ticket, ticket_id, branch, tip, *, repo, target, env, emit) -> str:
+    """`--record-only` 收口时的「那次合并合进来的那一支」比对。
+
+    判的是与 `guard_reviewed_sha` 同一件事（分支 tip == 被验收的 sha），拒绝的话不同：
+    这里的现场几乎都是「提交直接落在目标分支上」，不是「验收之后分支又动了」，照抄那句
+    会把人指向相反的方向。所以拒绝理由点名两个值、把两个**完整** sha 都打出来，让人
+    能直接拿去核；命中「目标分支上有像这张单的提交」时再补一句落点说明。
+
+    老提交（没有 `head_sha`）原样交给 `guard_reviewed_sha`：那一档的处理是警告 + 记
+    `unverified`，不该被这里重写一遍。
+    """
+    head = reviewed_head_sha(ticket)
+    if head is None:
+        return guard_reviewed_sha(ticket, ticket_id, branch, tip, emit)
+    head = str(head).casefold()
+    if head != tip.casefold():
+        landed = landed_like_this_ticket(repo, target, branch, ticket_id, env=env)
+        misplaced = ""
+        if landed:
+            detail = "\n".join(f"    {sha[:12]} {subject}" for sha, subject in landed[:5])
+            misplaced = (
+                f"\n{target} 上已经有看着像这张单的提交：\n{detail}\n"
+                f"这多半就是提交直接落 {target} 了：落点错了，不是验收之后又改了分支。"
+            )
+        raise Fail(
+            STEP_SHA,
+            f"分支 tip 与被验收的 sha 不一致：分支 {branch} 的 tip 是 {tip}，"
+            f"被验收的 sha 是 {head}。--record-only 要收口的是「分支 tip 就是那次合并合进来的"
+            f"那一支」，这两个值不等就没有可比的那棵树，一条记录都不写。{misplaced}",
+            f"两条路：把 {branch} 退回到被验收的 {head[:12]} 再收口，或让独立验收会话对现在的 "
+            f"tip（{tip[:12]}）重新验收一次（提交一次带 head_sha 的成果，再 review_result）。"
+            f"若提交本来就没落在分支上（落到了 {target}），--record-only 帮不上忙——按 "
+            "docs/protocol.md 的「发布类工单的提交落在哪里」把改动重新落在 ticket 分支上再走一次"
+            f"合并。此刻 {ticket_id} 的合并记录没写、工作树与分支都还在、目标分支一指头没动。",
         )
     emit(f"被验收的树：{head}（与 {branch} 的 tip 一致）。")
     return head
@@ -2178,15 +2272,21 @@ def _record_only_steps(
     tip = checks["tip"]
 
     # 同一道比对：`--record-only` 比的是源分支 tip，也就是那次合并合进来的那一支。
-    reviewed_sha = guard_reviewed_sha(ticket, ticket_id, branch, tip, emit)
+    # 拒绝的话与正常合并不同：这里的现场多半是落点错了，详见 `require_record_only_tree`。
+    reviewed_sha = require_record_only_tree(
+        ticket, ticket_id, branch, tip, repo=repo, target=target, env=env, emit=emit
+    )
 
     commit = find_merge_commit(repo, target, tip, env=env)
     if commit is None:
         raise Fail(
             STEP_FIND,
-            f"{target} 的祖先里找不到「parent2 == {branch} 的 tip（{tip[:12]}）」的合并提交。",
+            f"在 {target} 的祖先里找不到合并提交：要的是 parent2 == {branch} 的 tip（{tip}），"
+            f"而 {target} 现在在 {checks['base']}。",
             "这条路径只收「--no-ff 真合过、但记录没写」的现场。快进合并没有合并提交，"
-            "记录下来会指错提交，所以不写：先核对 git log --graph，再由人决定这张单怎么算。",
+            "记录下来会指错提交，所以不写：先核对 git log --graph，再由人决定这张单怎么算。"
+            "若这次改动根本没在分支上合过（直接提交在目标分支上），按 docs/protocol.md 的"
+            "「发布类工单的提交落在哪里」把提交重新落在 ticket 分支上再走一次合并。",
         )
     emit(f"合并提交：{commit[:12]}（{target} 的祖先；parent2 是 {branch} 的 tip {tip[:12]}）")
     emit(f"测试命令：{plan.describe()}")
