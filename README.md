@@ -201,7 +201,7 @@ python install.py --link-agents               # 顺带为 ~/.claude 与 ~/.codex
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全绿
+python tools/run_tests.py            # 应全部通过：tests/ 303 + tools/ 422 = 725 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -236,7 +236,20 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的第 2 步就是「项目配置」——缺 `.agents/ticket-config.json`、缺 `test_cmd` 或 `target_branch`，它就停在那一步并指向 `add_project.py`，不会回落到任何默认测试命令。不配等于没有测试，而「没跑测试」绝不能长得像「跑过了」。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件装出来是 724 项。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 725 项（`tests/` 303、`tools/` 422）。
+这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
+
+```bash
+# 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
+DRILL=/tmp/awk104-drill
+python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 725 项
+python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
+```
+
+两种布局都要能跑：源码树里 `verify_receipt.py` 在仓库根（`install.py` 从那里复制），
+装出来的工作区里它在 `<工作区>/verify/`。`tools/test_verify_receipt.py` 两处都认，
+只装了一个跑不起来的壳就会当场报错，不会静静跳过。
 
 #### 与工作区（`D:/AI工作区`）的已知差异
 

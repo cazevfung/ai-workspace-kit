@@ -196,7 +196,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should be all green
+python tools/run_tests.py            # should pass: tests/ 303 + tools/ 422 = 725, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -210,7 +210,17 @@ python tools/add_project.py D:/my-project      # writes .agents/ticket-config.js
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` reads that file at step 2 and stops there when it is missing — it never falls back to a default test command, because "no tests configured" must not look like "tests passed".
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 724.
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 725 (`tests/` 303, `tools/` 422) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+
+```bash
+# temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
+DRILL=/tmp/awk104-drill
+python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 725 tests
+python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
+```
+
+Both layouts have to work: in the source tree `verify_receipt.py` sits at the repository root (`install.py` copies it from there), while in an installed workspace it sits at `<workspace>/verify/`. `tools/test_verify_receipt.py` accepts either; if only a non-runnable shell was shipped it errors out on the spot instead of skipping quietly.
 
 Known differences from the upstream workspace the engine was synced from: the task-centre engine matches its schema 16 (migrations 9–16, id issuing, `planned` queue and dependency links, trips, conflict preview, `criteria_version`, `tickets.requester_session_id` and `notices.message_id`, `tickets.owner_session_id` with `take_over_ticket` / `report_notice_failure`, and the four merge-provenance columns), and `kit/PRD/` now carries `PRD-001` plus the `PRD-010`~`PRD-015` bodies with paths rewritten for the kit (`grep -rl "D:/AI工作区" kit/PRD/` is empty) — `PRD-002`~`PRD-009` stay in `design/PRD/` as this toolkit's own design history. `auto_merge.py` keeps the kit variant that reads project config, and its pre-record schema gate is in place: it snapshots the database, migrates it with the merged code and reloads `task_center`, and it looks for the engine at **both** `task_center/db.py` and `kit/task_center/db.py` (looking only at the repository root is why that gate silently skipped in this very repo). Usage lines keep the `{{WORKSPACE}}` placeholder instead of a fixed path; and test fixtures are scrubbed (`<session-id>`, `X:/sample-project`). In `kit/docs/protocol.md` only the operations-and-fields table has been brought up to the current command surface (schema 16: `planned` pool, dependency links, trips, `base_sha`, conflict preview, `requester_session_id` / `owner_session_id` and the merge-provenance columns); the sections below it are still the old text, which is missing the PRD-005/013/014/015 bodies. Where that text and the `FIELDS` table in `task_center/core.py` disagree, the code and `kit/PRD/` win.
 

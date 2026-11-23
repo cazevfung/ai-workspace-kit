@@ -16,6 +16,7 @@
 
 装了什么：
   1. 工作区本体（task_center、tools、docs、tests、PRD 模板、tasks 起步文件）
+     以及能拿工作区当参数直接跑的校验脚本（verify/verify_receipt.py）
   2. 项目内技能 → <工作区>/.agents/skills
   3. 全部 25 个技能 → <agents-home>/skills（已存在的默认跳过，不覆盖）
   4. <agents-home>/center.json（指向本工作区唯一的中心库）
@@ -42,6 +43,13 @@ VERSION = (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VER
 PROJECT_ID = "ai-workspace"
 PROJECT_NAME = "AI 工作区"
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
+
+# 装进工作区 verify/ 的校验脚本：只装「拿一个工作区路径当参数就能跑」的那一个。
+# `verify_install.py` / `verify_onboard.py` 要调仓库根的 install.py / uninstall.py，
+# 那是套件源码树才有的东西；把它们装到别人的工作区里，会得到一份当场就找不到文件的
+# 脚本——装了个跑不起来的壳，比没装更难查。所以只复制 RECEIPT 这一个。
+VERIFY = HERE / "verify"
+WORKSPACE_VERIFIERS = ("verify_receipt.py",)
 
 WORKSPACE_SKILLS = sorted(p.name for p in (SKILLS / "workspace").iterdir() if (p / "SKILL.md").is_file())
 GENERIC_SKILLS = sorted(p.name for p in (SKILLS / "generic").iterdir() if (p / "SKILL.md").is_file())
@@ -187,6 +195,25 @@ def link_agent_dirs(home: Path, skills_root: Path, dry: bool) -> list[str]:
     return made
 
 
+def copy_workspace_verifiers(workspace: Path, workspace_str: str, dry: bool) -> list[str]:
+    """把能独立跑的校验脚本装到 <工作区>/verify/。
+
+    `tools/test_verify_receipt.py` 原本按源码布局取 `ROOT.parent/verify/`（套件仓库里
+    它在仓库根），装出来的工作区没有那一层，8 条用例就全红了。装这一步补上文件，
+    用例那一侧同时认两种布局（见该文件里的 `find_script`）。
+    """
+    installed = []
+    for name in WORKSPACE_VERIFIERS:
+        src = VERIFY / name
+        installed.append(name)
+        if dry:
+            continue
+        target = workspace / "verify" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(template_text(src.read_text(encoding="utf-8"), workspace_str).encode("utf-8"))
+    return installed
+
+
 def init_center(workspace: Path, dry: bool) -> bool:
     db = workspace / ".data" / "task-center.sqlite3"
     if dry:
@@ -247,6 +274,11 @@ def main(argv=None) -> int:
     if not KIT.is_dir():
         fail(f"找不到套件内容：{KIT}；请在套件仓库根目录运行")
         return 2
+    missing_verifiers = [name for name in WORKSPACE_VERIFIERS if not (VERIFY / name).is_file()]
+    if missing_verifiers:
+        fail(f"找不到校验脚本：{', '.join(str(VERIFY / n) for n in missing_verifiers)}；"
+             "请在套件仓库根目录运行（装出来的工作区里 verify/ 只放跑得起来的那几个）")
+        return 2
     if workspace.exists() and any(workspace.iterdir()) and not args.force:
         fail(f"目标目录非空：{workspace}；换一个目录，或加 --force 覆盖")
         return 2
@@ -254,6 +286,8 @@ def main(argv=None) -> int:
     step("1/7 复制工作区本体")
     copied = copy_tree(KIT, workspace, workspace_str, dry)
     say(f"   已复制 {copied} 个文件")
+    verifiers = copy_workspace_verifiers(workspace, workspace_str, dry)
+    say(f"   已复制校验脚本 {len(verifiers)} 个：{', '.join(f'verify/{n}' for n in verifiers)}")
 
     step("2/7 安装项目内技能")
     proj_installed, _ = install_skills(workspace / ".agents" / "skills", WORKSPACE_SKILLS,
@@ -344,6 +378,7 @@ def main(argv=None) -> int:
   python tools/work_gate.py --list                                   # 开工第一条命令
   python tools/run_tests.py                                          # 验证环境（应全绿）
   python tools/doc_gate.py --all                                     # 计划格式自检
+  python verify/verify_receipt.py --workspace .                      # 开工回执的形状（verify/ 已装进工作区）
 
 在工作区会话里，先读 AGENTS.md；要开工单时按 .agents/skills/ticket-dispatch 的顺序走。
 Cindy 里把这个目录加为项目，技能会自动从 {skills_root} 读到。

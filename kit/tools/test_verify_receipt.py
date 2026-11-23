@@ -13,7 +13,32 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SCRIPT = ROOT.parent / "verify" / "verify_receipt.py"
+
+
+def find_script() -> Path:
+    """找 `verify_receipt.py`：装出来的工作区和套件源码树各在一个位置。
+
+    两种布局的 `ROOT` 不一样，同一句取法只能在一边成立：
+
+    - 装出来的工作区：`ROOT` 就是工作区，`install.py` 把脚本装到 `<工作区>/verify/`；
+    - 套件源码树：`ROOT` 是 `kit/`，脚本在仓库根的 `../verify/`（`install.py` 从那里复制）。
+
+    先认工作区里那份（装完就是它），再退回源码树的仓库根。
+    两边都没有就直接抛：让这组用例整体报错。退化成 skip 或静默换一个路径，
+    等于把「校验脚本没装出来」这件事藏起来——那正是这 8 条用例要报的东西。
+    """
+    for candidate in (ROOT / "verify" / "verify_receipt.py",
+                      ROOT.parent / "verify" / "verify_receipt.py"):
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(
+        "找不到 verify_receipt.py：既不在工作区 %s，也不在套件仓库根 %s。"
+        "装出来的工作区应该有 <%s>/verify/verify_receipt.py。"
+        % (ROOT / "verify", ROOT.parent / "verify", ROOT)
+    )
+
+
+SCRIPT = find_script()
 
 GOOD = {
     "project_path": "D:/work/ws",
@@ -28,6 +53,23 @@ def run(workspace):
         [sys.executable, str(SCRIPT), "--workspace", str(workspace)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
+
+
+class ScriptLocationTest(unittest.TestCase):
+    """跑的是「本份安装」里那个脚本，而不是碰巧能拿到的同名文件。
+
+    这条钉住刚才那层退回逻辑的方向：装出来的工作区优先用它自己的 `verify/`，
+    源码树才回到仓库根。两边都不存在时 `find_script` 已经在模块导入时报错了，
+    所以这里不会因为「都没找到」而静静通过。
+    """
+
+    def test_script_comes_from_the_layout_this_file_lives_in(self):
+        installed = ROOT / "verify" / "verify_receipt.py"
+        source = ROOT.parent / "verify" / "verify_receipt.py"
+        self.assertTrue(installed.is_file() or source.is_file(),
+                        f"两个位置都没有 verify_receipt.py：{installed} 与 {source}")
+        expected = installed if installed.is_file() else source
+        self.assertEqual(SCRIPT, expected)
 
 
 class ReceiptTest(unittest.TestCase):
