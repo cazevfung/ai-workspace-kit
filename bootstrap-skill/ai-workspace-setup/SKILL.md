@@ -39,10 +39,13 @@ python install.py --workspace <路径>             # 真装
 装之前把预演输出给用户看一眼，尤其是：
 - 工作区目录；
 - 技能会装到 `~/.agents/skills`，同名技能默认**跳过不覆盖**；
-- 会写 `~/.agents/center.json` 与 `~/.agents/intake/`。
+- 会不会写用户级 `~/.agents/center.json` 与 `~/.agents/intake/`：`--agents-home` 不是本机真实用户目录时默认**不写**（一个字节都不写），要写得加 `--allow-user-config`；
+- 如果 `~/.agents/center.json` 已经指向**别的**库，默认安装会停在那里并以码 2 退出——那是保护，不是报错。
 
 用户已有同名技能、或 `~/.agents/center.json` 指向别的工作区时，先停下说明，
-让用户决定用 `--overwrite-skills` 还是换一个 `--agents-home`。**不要**替用户覆盖配置。
+让用户决定用 `--overwrite-skills`、换一个 `--agents-home`，还是由他自己确认重指
+（重指才用 `--allow-user-config`）。**不要**替用户覆盖配置，也不要为了让命令跑完
+自己加那个开关。
 
 ## 四、验证（拿输出，不要只说成功）
 

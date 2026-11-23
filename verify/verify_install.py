@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """安装自检：在临时目录真装一遍，确认装出来的东西能跑。
 
-不碰真实的 ~/.agents：用 --agents-home 把用户级目录重定向到临时目录。
+不碰真实的 ~/.agents：用 --agents-home 把用户级目录重定向到临时目录，并且在装前装后
+各取一次真实 ~/.agents 的只读快照比对（AWK-113：装到沙箱时一个字节都不许写）。
 
     python verify/verify_install.py            # 完整自检（约 1–2 分钟）
     python verify/verify_install.py --keep     # 保留临时目录，便于排查
@@ -23,6 +24,8 @@ for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "kit" / "tools"))
+import install_guard  # noqa: E402  —— 判据只有一处，自检不另写一套
 
 
 def run(cmd, cwd, timeout=600):
@@ -35,9 +38,11 @@ def main(argv=None) -> int:
     parser.add_argument("--keep", action="store_true", help="保留临时目录")
     args = parser.parse_args(argv)
 
-    base = Path(tempfile.mkdtemp(prefix="aiws-verify-"))
+    base = Path(tempfile.mkdtemp(prefix="aiws-verify-")).resolve()
     ws = base / "ws"
     agents = base / "agents"
+    real_agents = Path.home() / ".agents"
+    real_before = install_guard.tree_digest(real_agents)
     checks = []
 
     def check(name, ok, detail=""):
@@ -47,7 +52,8 @@ def main(argv=None) -> int:
     try:
         print(f"临时目录：{base}\n")
         result = run([sys.executable, str(ROOT / "install.py"),
-                      "--workspace", str(ws), "--agents-home", str(agents), "--no-git"], ROOT, timeout=300)
+                      "--workspace", str(ws), "--agents-home", str(agents),
+                      "--allow-user-config", "--no-git"], ROOT, timeout=300)
         check("install.py 退出 0", result.returncode == 0,
               (result.stdout + result.stderr)[-1500:])
 
@@ -101,6 +107,26 @@ def main(argv=None) -> int:
             stash.rename(center_path)
         check("交接协议已复制", (agents / "intake" / "intake.md").is_file())
         check("安装清单已写", (agents / ".ai-workspace-kit.json").is_file())
+
+        # AWK-113：不带开关的沙箱安装一个用户级文件都不写。真装到临时目录试一下
+        # 是最常发生的事，它不该在用户目录里留下 center.json、技能或 intake。
+        sandbox = base / "sandbox"
+        sandbox_ws, sandbox_agents = sandbox / "ws", sandbox / "agents"
+        result = run([sys.executable, str(ROOT / "install.py"),
+                      "--workspace", str(sandbox_ws), "--agents-home", str(sandbox_agents),
+                      "--no-git"], ROOT, timeout=300)
+        written = [name for name in ("center.json", "skills", "intake", ".ai-workspace-kit.json")
+                   if (sandbox_agents / name).exists()]
+        check("沙箱默认安装不写用户级配置",
+              result.returncode == 0 and not written
+              and (sandbox_ws / ".data" / "task-center.sqlite3").is_file(),
+              f"退出码 {result.returncode}；被写：{', '.join(written) or '（无）'}；"
+              + (result.stdout + result.stderr)[-800:])
+
+        # 真实现场：真实 ~/.agents 装前装后一个字节都不该变（只读比对，不先写再恢复）。
+        changed = install_guard.diff_tree(real_before, install_guard.tree_digest(real_agents))
+        check("真实 ~/.agents 未被写（装前装后快照一致）", not changed,
+              f"变动路径：{', '.join(changed[:5])}" if changed else "")
 
         # 浮窗面板：装到 <工作区>/panel，且占位符真的换成了这台机器上的路径。
         # 两条分开报：「有没有装」与「装出来的是不是指对地方」是两件事——.mjs / .cjs / .html

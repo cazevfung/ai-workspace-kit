@@ -183,7 +183,16 @@ python install.py --dry-run                   # print the plan, touch nothing
 python install.py --overwrite-skills          # overwrite same-named skills
 python install.py --no-skills                 # workspace only
 python install.py --link-agents               # link skills into ~/.claude and ~/.codex
+python install.py --allow-user-config         # allow writing user-level config (sandbox trial installs, or repointing an existing center.json)
 ```
+
+**Trying it in a throwaway directory is safe by default.** When `--agents-home` is not this machine's
+real user directory, the installer writes no user-level config at all (`center.json`, `skills/`,
+`intake/`, install manifest); and when `--agents-home` *is* the real directory but its
+`center.json` already points at a **different** database, it refuses, prints the original file and
+stops before copying anything. Both cases need an explicit `--allow-user-config`. That is the
+2026-11-23 incident: a default install repointed the real `center.json` at a sandbox database, and
+every gate on the machine started reporting "0 tickets in flight".
 
 Wrapper scripts: `bash scripts/install.sh` (macOS / Linux), `powershell -ExecutionPolicy Bypass -File scripts/install.ps1` (Windows).
 
@@ -196,7 +205,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 613 = 967, 0 failures
+python tools/run_tests.py            # should pass: tests/ 354 + tools/ 630 = 984, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -210,13 +219,13 @@ python tools/add_project.py D:/my-project      # writes .agents/ticket-config.js
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 967 (`tests/` 354, `tools/` 613) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 984 (`tests/` 354, `tools/` 630) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
 DRILL=/tmp/awk104-drill
-python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
-cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 967 tests
+python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 984 tests
 python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
 ```
 
@@ -365,7 +374,7 @@ python uninstall.py --skills                            # remove only this kit's
 ```bash
 python maintainer/sync_from_origin.py        # 1. sync, absolute paths become {{WORKSPACE}}
 python maintainer/redact_for_public.py       # 2. strip usernames, session IDs, upstream names
-python verify/verify_install.py              # 3. install into a temp dir; all 14 checks pass
+python verify/verify_install.py              # 3. install into a temp dir; all 23 checks pass
 ```
 
 Step 2 is not optional: `kit/tests/fixtures` is copied verbatim, so the sync brings real usernames and session IDs along; `redact_for_public.py --check` runs the same scan alone. `README`, `install.py`, `uninstall.py`, `kit/AGENTS.md`, `kit/PRD/`, `docs/*.md` are hand-maintained and never overwritten. Bump `VERSION` and update `CHANGELOG.md` on release.

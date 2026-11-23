@@ -101,6 +101,7 @@
 
 - **第 4 步指丢就到此为止。** 指针写着 `agents_home`，而那份 `center.json` 不在（被挪走、被删掉、装到别的盘又换了机器）时，报 `DB_NOT_FOUND` 并说出缺的是哪个文件。**不回落到 `~/.agents`**：那正是这个单的病根，静默读到另一套库比报错贵得多。同理，也不许为了让它跑起来新建一个空库。
 - **默认档不变。** 不传 `--agents-home` 时装的是 `~/.agents`，指针也指它，所以第 4 步读到的就是第 6 步那一份。老安装（没有指针）直接走第 6 步。两种情况下 `work_gate.py --list` 的输出与以前一模一样。
+- **沙箱安装默认没有指针（AWK-113）。** `--agents-home` 不是本机真实用户目录、又没给 `--allow-user-config` 时，安装器不写用户级 `center.json`，也不写工作区指针——否则第 4 步会指到一个不存在的文件、当成「指丢」报 `DB_NOT_FOUND`。没有指针就走到第 5 步，读的是本工作区 `.data` 那份库，装出来的工作区照常可用。
 - **工作树里回到主检出。** `.agents/center.json` 与 `.data/` 都不进版本库（`kit/.gitignore` 忽略了它们），`.worktrees/<工单号>/` 里自己那份往往不存在；第 4、5 步按 git 公共目录找到主检出再看一遍——它问的仍是同一个工作区。
 
 改了发现逻辑就得改这里，反之亦然：`tools/test_work_gate.py` 的 `CenterDiscoveryTest` 与 `tools/test_auto_merge.py` 的 `CenterDiscoveryTest` 逐条锁住上面七步、指丢时的报错、以及「默认档仍然读 `~/.agents`」。
