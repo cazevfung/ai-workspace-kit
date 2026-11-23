@@ -10,12 +10,14 @@
 """
 import hashlib
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from task_center import Center
+from task_center.db import SCHEMA_VERSION
 
 # 冻结的 schema 4：与 v5 的差别只有 merges 表。既然是历史形状，就不要跟着
 # task_center.db.SCHEMA 一起改。
@@ -168,7 +170,8 @@ class MergeTest(unittest.TestCase):
         self.ids[ticket_id] = created["id"]
         return created
 
-    def done(self, ticket_id="t1", project_id="p1", executor="executor-1", reviewer="reviewer-1"):
+    def done(self, ticket_id="t1", project_id="p1", executor="executor-1", reviewer="reviewer-1",
+             head_sha=HEAD_SHA):
         """走完整流程把一张工单做到 done：领取、绑定、提交、独立验收。"""
         self.ticket(ticket_id, project_id)
         scope = {"project_id": project_id, "ticket_id": ticket_id}
@@ -180,7 +183,7 @@ class MergeTest(unittest.TestCase):
         submission = self.ok("submit_result", {
             **scope, "attempt_id": claim["attempt_id"], "session_id": executor,
             "artifacts": [f"{ticket_id}-result.md"], "summary": "清单已完成",
-            "evidence": ["人工检查条目"], "risks": [], "head_sha": HEAD_SHA,
+            "evidence": ["人工检查条目"], "risks": [], "head_sha": head_sha,
             "base_sha": "89abcdef0123456789abcdef0123456789abcdef",
         })
         return self.ok("review_result", {
@@ -341,6 +344,147 @@ class MergeTest(unittest.TestCase):
             self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha=bad))
         self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
 
+    # --- AW-116：合并记录是当时记的还是后来补的 -----------------------------
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.project), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def git_repo(self):
+        subprocess.run(["git", "init", "-b", "master", "-q"], cwd=str(self.project),
+                       capture_output=True, check=True)
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "test")
+        (self.project / "a.txt").write_text("a\n", encoding="utf-8")
+        self.git("add", "a.txt")
+        self.git("commit", "-q", "-m", "base")
+
+    def landed_sha(self):
+        """在 master 上提交一次：它的 sha 可以直接被 merge-base 认成「已在地面」。"""
+        (self.project / "b.txt").write_text("b\n", encoding="utf-8")
+        self.git("add", "b.txt")
+        self.git("commit", "-q", "-m", "landed")
+        return self.git("rev-parse", "HEAD")
+
+    def side_sha(self):
+        """在另一条分支上提交：它不在 master 里，用来造「确实未落地」的反例。"""
+        self.git("switch", "-q", "-c", "side")
+        (self.project / "c.txt").write_text("c\n", encoding="utf-8")
+        self.git("add", "c.txt")
+        self.git("commit", "-q", "-m", "side")
+        sha = self.git("rev-parse", "HEAD")
+        self.git("switch", "-q", "master")
+        return sha
+
+    def project_root(self, project_id="p1"):
+        items = self.ok("list_projects")["items"]
+        return [item["root"] for item in items if item["project_id"] == project_id][0]
+
+    def test_merge_ticket_marks_its_own_records_as_auto_merge(self):
+        """C4 的正向：普通合并写 source=auto_merge 与 verified_at，verified_by / note 留 NULL。"""
+        self.done()
+        self.notice()
+        receipt = self.ok("merge_ticket", self.merge_payload())
+        merge = self.ok("get_ticket", self.scope())["merges"][0]
+        self.assertEqual("auto_merge", merge["source"])
+        self.assertEqual("auto_merge", receipt["source"])
+        self.assertIsNotNone(merge["verified_at"])
+        self.assertIsNotNone(receipt["verified_at"])
+        # 没有跑过 git 核对就不许写一个命令；补记原因只在补记档出现。
+        self.assertIsNone(merge["verified_by"])
+        self.assertIsNone(merge["note"])
+
+    def test_backfill_merge_refuses_a_tree_that_is_not_in_master(self):
+        """C3：确实未落地的拒绝并点名，一行不写。"""
+        self.git_repo()
+        side = self.side_sha()
+        self.done(head_sha=side)
+        self.notice(status="failed")
+        result = self.call("merge_ticket", self.merge_payload(
+            reviewed_sha=side, commit=side, source="backfill", note="补记：历史合并记录"))
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("NOT_LANDED", result["error"]["code"], result)
+        self.assertIn(self.tid("t1"), result["error"]["message"])
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
+    def test_backfill_merge_records_the_command_it_really_ran(self):
+        """C4 / C5：verified_by 是工具当场跑过的命令，不是调用方抄来的一句描述。"""
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        note = "补记于 2026-11-22：合并发生在合并记录机制之前"
+        receipt = self.ok("merge_ticket", self.merge_payload(
+            commit=sha, reviewed_sha=sha, source="backfill", note=note), "backfill-landed")
+        merge = self.ok("get_ticket", self.scope())["merges"][0]
+        expected = f"git -C {self.project_root().replace(chr(92), '/')} merge-base --is-ancestor {sha} master"
+        self.assertEqual("backfill", merge["source"])
+        self.assertEqual(expected, merge["verified_by"])
+        self.assertEqual(expected, receipt["verified_by"])
+        self.assertIsNotNone(merge["verified_at"])
+        self.assertEqual(note, merge["note"])
+
+    def test_backfill_merge_rejects_caller_supplied_verified_by(self):
+        """调用方不能自己写「我核对过了」：verified_by 由工具生成。"""
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            reviewed_sha=sha, source="backfill", note="补记", verified_by="git merge-base --is-ancestor x master"))
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(
+            reviewed_sha=sha, source="backfill"))  # 补记档必须写原因
+        self.error("INVALID_INPUT", "merge_ticket", self.merge_payload(reviewed_sha=sha, source="guess"))
+        self.assertEqual([], self.ok("get_ticket", self.scope())["merges"])
+
+    def test_repair_backfill_command_only_normalises_the_path_spelling(self):
+        """C5 的前置：存量值只能“同一命令、另一种路径写法”，否则拒。"""
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        self.ok("merge_ticket", self.merge_payload(
+            reviewed_sha=sha, commit=sha, source="backfill", note="补记"), "backfill-repair")
+        canonical = self.ok("get_ticket", self.scope())["merges"][0]["verified_by"]
+        legacy = canonical.replace("/", "\\")
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("UPDATE merges SET verified_by=?", (legacy,))
+            conn.commit()
+        finally:
+            conn.close()
+        repaired = self.ok("repair_backfill_command", self.scope())
+        self.assertTrue(repaired["changed"])
+        self.assertEqual(canonical, repaired["verified_by"])
+        # 再跑一次没有可改的：幂等。
+        again = self.ok("repair_backfill_command", self.scope())
+        self.assertFalse(again["changed"])
+        self.assertEqual(canonical, self.ok("get_ticket", self.scope())["merges"][0]["verified_by"])
+
+    def test_repair_backfill_command_refuses_a_different_command(self):
+        """反例：不相等的命令不许被“顺手改掉”，先让人读那一行。"""
+        self.git_repo()
+        sha = self.landed_sha()
+        self.done(head_sha=sha)
+        self.notice(status="failed")
+        self.ok("merge_ticket", self.merge_payload(
+            reviewed_sha=sha, commit=sha, source="backfill", note="补记"), "backfill-repair-bad")
+        conn = sqlite3.connect(self.db)
+        try:
+            conn.execute("UPDATE merges SET verified_by=?", ("git -C /elsewhere merge-base --is-ancestor deadbeef master",))
+            conn.commit()
+        finally:
+            conn.close()
+        self.error("COMMAND_MISMATCH", "repair_backfill_command", self.scope())
+        self.assertEqual("git -C /elsewhere merge-base --is-ancestor deadbeef master",
+                         self.ok("get_ticket", self.scope())["merges"][0]["verified_by"])
+
+    def test_repair_backfill_command_refuses_an_auto_merge_record(self):
+        self.done()
+        self.notice()
+        self.ok("merge_ticket", self.merge_payload(), "auto-for-repair")
+        self.error("INVALID_STATE", "repair_backfill_command", self.scope())
+
     # --- list_unmerged 读取 -------------------------------------------------
 
     def test_list_unmerged_lists_done_tickets_without_a_merge_record(self):
@@ -422,9 +566,10 @@ class MergeTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         receipt = result["result"]
         self.assertEqual(4, receipt["from_version"])
-        self.assertEqual(13, receipt["schema_version"])
+        self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
-        self.assertEqual(13, user_version(legacy))
+        self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("merges", table_names(legacy))
         self.assertEqual(before, counts(legacy))
         center = Center(legacy)
