@@ -20,6 +20,7 @@
   2. 项目内技能 → <工作区>/.agents/skills
   3. 全部 25 个技能 → <agents-home>/skills（已存在的默认跳过，不覆盖）
   4. <agents-home>/center.json（指向本工作区唯一的中心库）
+     与 <工作区>/.agents/center.json（记住这次装的是哪个 agents-home，闸门按它找库）
   5. <agents-home>/intake/（交接协议，供别的项目的会话读取）
   6. 中心库初始化 + 登记本工作区项目
   7. git 仓库 + 提交闸门（先做首次提交，再启用钩子，避免自己拦自己）
@@ -311,12 +312,23 @@ def main(argv=None) -> int:
 
     step("4/7 写用户级指针与交接协议")
     if dry:
-        say("   预演：写 center.json、intake/、安装清单")
+        say("   预演：写 center.json、工作区指针、intake/、安装清单")
     else:
         agents_home.mkdir(parents=True, exist_ok=True)
         (agents_home / "center.json").write_text(
             json.dumps({"db": str(workspace / ".data" / "task-center.sqlite3")}, ensure_ascii=False),
             encoding="utf-8")
+        # 工作区自己也要记住「这次安装用的是哪个用户级目录」（AWK-105）。
+        # 只记 agents_home，不记 db：库的位置由 <agents_home>/center.json 说了算，
+        # 只留一处真相；换了 agents-home 重装一次，这里跟着换。
+        # 没有这个文件，闸门只能去读 ~/.agents，--agents-home 装出来的工作区就会
+        # 读到另一套库（实测报 SCHEMA_MISMATCH）。
+        pointer = workspace / ".agents" / "center.json"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(
+            json.dumps({"agents_home": str(agents_home)}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        say(f"   工作区指针：{pointer} → {agents_home}")
         intake = agents_home / "intake"
         if intake.exists():
             backup = intake.with_name(f"intake.bak-{os.getpid()}")

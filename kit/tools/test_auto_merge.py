@@ -1109,6 +1109,44 @@ class CenterBridgeTest(unittest.TestCase):
         self.assertIn("ALREADY_MERGED", caught.exception.reason)
 
 
+class CenterDiscoveryTest(unittest.TestCase):
+    """合并也要按 install 时的 --agents-home 找库（AWK-105 C1/C2）。
+
+    合并读错库比闸门读错库更贵：它会把一张单的合并记录写进另一套库。
+    所以这里锁两件事：指针说哪个 agents-home 就读哪个；指针指丢时报 DB_NOT_FOUND，
+    既不回落 ~/.agents，也不新建库。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.ws = base / "ws"
+        (self.ws / ".agents").mkdir(parents=True)
+        self.agents_home = base / "agents"
+        self.agents_home.mkdir()
+        self.db = base / "custom" / "center.sqlite3"
+        self.db.parent.mkdir(parents=True)
+        self.db.write_bytes(b"")  # 发现只看文件在不在，打开是后面的事
+        (self.agents_home / "center.json").write_text(
+            json.dumps({"db": str(self.db)}, ensure_ascii=False), encoding="utf-8")
+        (self.ws / ".agents" / "center.json").write_text(
+            json.dumps({"agents_home": str(self.agents_home)}, ensure_ascii=False), encoding="utf-8")
+
+    def test_open_center_follows_the_workspace_pointer(self):
+        center, db = auto_merge.open_center(repo=self.ws)
+        self.assertEqual(self.db.resolve(), Path(db).resolve())
+
+    def test_open_center_reports_db_not_found_without_falling_back(self):
+        (self.agents_home / "center.json").unlink()
+        with self.assertRaises(auto_merge.Fail) as caught:
+            auto_merge.open_center(repo=self.ws)
+        failure = caught.exception
+        self.assertEqual(auto_merge.STEP_TICKET, failure.step)
+        self.assertIn("DB_NOT_FOUND", failure.reason)
+        self.assertIn(str(self.agents_home / "center.json"), failure.reason)
+        self.assertIn("不回落到 ~/.agents", failure.fix)
+
 class ListUnmergedTest(unittest.TestCase):
     def test_lists_done_but_unmerged(self):
         center = FakeCenter({"list_unmerged": {"ok": True, "result": {"items": [

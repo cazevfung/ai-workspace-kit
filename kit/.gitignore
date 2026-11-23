@@ -4,3 +4,6 @@ __pycache__/
 .data/
 _sandbox/
 tasks/demo-output.jsonl
+# 安装时写的工作区指针：记的是这台机器上的 --agents-home，属于本机状态，不进版本库。
+# 工作树里没有它也没关系：发现逻辑会按 git 公共目录回到主检出那一份。
+.agents/center.json

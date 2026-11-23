@@ -56,14 +56,14 @@ import datetime
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
-# 用户级指针：装好的工作区把中心库位置写在这里（与 work_gate / idle_watch 读的是同一份）。
-CONFIG = Path.home() / ".agents" / "center.json"
+# 中心库怎么发现只有一处：`tools/center_config.py`（三个闸门与两个巡检工具都从它取）。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import center_config  # noqa: E402
 
 # 阈值只在模块常量里写一次，旁边标出处；测试与方法文档都打到这里，不各写一份。
 # 4 小时：PRD-010 §4.3 S3「待验收超时」。
@@ -96,43 +96,19 @@ KIND_LABELS = {
 
 
 def default_ticket_db() -> Path:
-    """默认工单库：本检出的 `.data/task-center.sqlite3`。
+    """默认工单库：与三个闸门同一处发现（`tools/center_config.py`）。
 
-    在 `.worktrees/<工单号>/` 里跑时，脚本所在的树没有 `.data`（不入库），直接按
-    `ROOT/.data` 取会报 `DB_NOT_FOUND`——那不是「没有待办」，是找错了库。所以先看
-    本树，没有就按 git 的公共目录找到主检出，读主检出那份库（全仓只有一份）。
-    两条都不成立时返回本树路径，让 `read_only` 照常报 `DB_NOT_FOUND`。
+    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 本检出的
+    `.data/task-center.sqlite3` → 主检出（工作树里）→ `~/.agents/center.json`。
+    在 `.worktrees/<工单号>/` 里跑时脚本所在的树没有 `.data`（不入库），所以最后一步
+    要按 git 公共目录回到主检出；套件仓库里（`kit/` 下没有任何库）再靠用户级指针找到
+    同一个唯一真相。巡检读错库报出来的「没有待办」比报不出来更坏，所以不新建、不猜。
+    一条都不中时返回本树路径，让 `read_only` 照常报 `DB_NOT_FOUND`。
     """
-    local = ROOT / ".data" / "task-center.sqlite3"
-    if local.is_file():
-        return local
     try:
-        found = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-        )
-        output = (found.stdout or "").strip()
-        if found.returncode == 0 and output:
-            common = Path(output)
-            if not common.is_absolute():
-                common = (ROOT / common).resolve()
-            candidate = common.parent / ".data" / "task-center.sqlite3"
-            if candidate.is_file():
-                return candidate
-    except (OSError, subprocess.SubprocessError):
-        pass
-    # 套件仓库里（`kit/` 下没有任何库）前两条都不成立，但用户级指针 `~/.agents/center.json`
-    # 指的那份库是同一个唯一真相（与 work_gate 读的是同一份），所以照它读，不另建一个：
-    # 巡检读错库报出来的「没有待办」比报不出来更坏。
-    try:
-        config = json.loads(CONFIG.read_text(encoding="utf-8"))
-        configured = Path(str(config.get("db") or "")).expanduser()
-        if configured.is_file():
-            return configured
-    except (OSError, ValueError):
-        pass
-    return local
+        return center_config.resolve(repo=ROOT).db
+    except center_config.DiscoveryError:
+        return ROOT / ".data" / "task-center.sqlite3"
 
 
 class AuditError(RuntimeError):

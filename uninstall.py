@@ -111,6 +111,13 @@ def main(argv=None) -> int:
             if not args.dry_run:
                 shutil.rmtree(intake)
             say("  已删 intake/")
+        # 安装时写在工作区里的那份指针（记着这次用的是哪个 agents-home）：
+        # 用户级配置都删了，留着它只会让闸门报一个已经不该存在的目录。
+        pointer = workspace / ".agents" / "center.json"
+        if pointer.is_file():
+            if not args.dry_run:
+                pointer.unlink()
+            say(f"  已删工作区指针 {pointer}")
 
     if manifest_path.is_file() and not args.dry_run:
         manifest_path.unlink()

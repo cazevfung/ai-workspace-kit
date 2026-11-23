@@ -16,7 +16,7 @@
 | 运行时 | Python 3.10+（核心只用标准库） | 用户机器 |
 | 文件系统 | 工作区目录、`.data/task-center.sqlite3`、`tasks/`、`PRD/` | 用户机器 |
 | 版本控制 | git 仓库、`.worktrees/<工单号>` 工作树、commit 钩子 | 用户机器 |
-| 本地配置 | `~/.agents/center.json`（中心库指针）、`~/.agents/skills/` | 用户机器 |
+| 本地配置 | `~/.agents/center.json`（中心库指针）、`~/.agents/skills/`、`<工作区>/.agents/center.json`（本机装的是哪个 agents-home） | 用户机器 |
 | 技能 | 26 个 `SKILL.md`（纯 Markdown + 少量脚本） | 本套件 |
 | 宿主能力 | 创建会话、`send_to_session`、`get_current_session_id`（派发环节） | Cindy 等宿主 |
 
