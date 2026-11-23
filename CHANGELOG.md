@@ -1,5 +1,15 @@
 # 更新记录
 
+## 未发布（AWK-104：装完 run_tests 必须真绿）
+
+修掉「陌生人装完跑 `python tools/run_tests.py` 出 10 个 FAIL」：README 写着「应全绿」，装出来的现场却红。两处都是用例假设了源码布局，不是套件内容缺东西。
+
+- `install.py`：新增一步把 `verify/verify_receipt.py` 装到 `<工作区>/verify/`（模板占位照旧替换）。只装这一个——`verify_install.py` / `verify_onboard.py` 要调仓库根的 `install.py` / `uninstall.py`，那是源码树才有的，装进别人的工作区等于发一份跑不起来的壳。缺脚本时在开工前就退出 2，不把失败留到装完才发现。
+- `kit/tools/test_verify_receipt.py`：`SCRIPT` 改成 `find_script()`——先认 `<ROOT>/verify/`（装出来的工作区），再退到 `<ROOT>/../verify/`（源码树里的仓库根）；两处都没有就抛错，让这组用例整体报错，不静默跳过。新增 `ScriptLocationTest` 钉住解析方向（只装壳、路径取错都会红）。
+- `kit/tools/test_idle_watch.py`：`DefaultWorkdirTest` 改成两种布局都成立——默认目录要么是占位，要么**就是本文件所在的工作区**（`Path(item).resolve() == ROOT.resolve()`）。占位符字面量改成拼接（`"{{" "WORKSPACE" "}}"`），否则 `install.py` 会把这行一起替换掉，装出来的工作区里根本没有占位符可测。断言没有放宽：写死另一台机器的绝对路径仍然当场红。
+- `README.md` / `README.en.md`：用例数 724 → 725（`tests/` 303 + `tools/` 422），并把「应全绿」写成实测过的现场命令（临时工作区 + `--agents-home`，装完再跑 `run_tests.py` 与 `verify_receipt.py`）。
+- 验证：在全新 HOME + 全新工作区里真装一遍再跑，`汇总：tests/ 303 OK；tools/ 422 OK  | 合计 725 项` / `结果：全部通过`（装前同一现场是 `tools/ 421 FAIL(10)`）。
+
 ## 未发布（AWK-103：引擎同步到 schema 16）
 
 把 `kit/task_center` 从 schema 13 推到工作区（`D:/AI工作区`）当前的 16：套件自带脚本读同一个中心库不再报 `SCHEMA_MISMATCH`。只同步引擎与配套文档，不改业务判断规则，也不动工作区的库与历史数据（`D:/AI工作区` 一直是只读对象）。
