@@ -69,6 +69,30 @@
 
 以前这里是两份：`close_gate` 只有四个状态，钩子那边六个，于是同一件事两个答案——`--check` 说可以收、提交被连拒三次，而 `--list` 一声不响。现在三处读同一个常量，`tools/test_close_gate.py` 里有一条用例直接断言两边是同一个对象。
 
+## 中心库怎么被发现（一处定义）
+
+三个闸门（`work_gate`、`auto_merge`、`close_gate`）与两个巡检工具（`idle_watch`、`wait_audit`）读哪一份中心库，只由 `tools/center_config.py` 一个文件回答。以前每一处自己写一句 `Path.home() / ".agents" / "center.json"`，于是 `install.py --agents-home <目录>` 装完的工作区里，闸门照样去读 `~/.agents`——那是**另一套库**，实测读到 `D:/AI工作区` 的中心库并报 `SCHEMA_MISMATCH`。库没坏，是找错了，而同一件事写在几个文件里就必然有几个答案。
+
+顺序就下面这七步，前一条不成立才看下一条：
+
+| # | 位置 | 谁写的 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `--db` | 人当场给的 | 最高优先，脚本与钩子都认 |
+| 2 | `TASK_CENTER_DB` | 环境变量 | 钩子、CI、测试用它 |
+| 3 | `TASK_CENTER_AGENTS_HOME` | 环境变量 | 一台机器上有多份安装时显式指定用户级目录 |
+| 4 | `<工作区>/.agents/center.json` 的 `agents_home` → `<agents_home>/center.json` 的 `db` | `install.py` | 安装时的 `--agents-home` 落在工作区里（不进版本库），闸门按它找库 |
+| 5 | `<工作区>/.data/task-center.sqlite3` | `install.py` 初始化 | 工作区自带的库；老安装没有指针，靠这一条 |
+| 6 | `~/.agents/center.json` | 老安装 / 默认安装 | 默认档（不传 `--agents-home`）走这一条，与以前逐字相同 |
+| 7 | 都没有 | — | 报 `DB_NOT_FOUND`，非零退出，**不新建库** |
+
+三条要记住的后果：
+
+- **第 4 步指丢就到此为止。** 指针写着 `agents_home`，而那份 `center.json` 不在（被挪走、被删掉、装到别的盘又换了机器）时，报 `DB_NOT_FOUND` 并说出缺的是哪个文件。**不回落到 `~/.agents`**：那正是这个单的病根，静默读到另一套库比报错贵得多。同理，也不许为了让它跑起来新建一个空库。
+- **默认档不变。** 不传 `--agents-home` 时装的是 `~/.agents`，指针也指它，所以第 4 步读到的就是第 6 步那一份。老安装（没有指针）直接走第 6 步。两种情况下 `work_gate.py --list` 的输出与以前一模一样。
+- **工作树里回到主检出。** `.agents/center.json` 与 `.data/` 都不进版本库（`kit/.gitignore` 忽略了它们），`.worktrees/<工单号>/` 里自己那份往往不存在；第 4、5 步按 git 公共目录找到主检出再看一遍——它问的仍是同一个工作区。
+
+改了发现逻辑就得改这里，反之亦然：`tools/test_work_gate.py` 的 `CenterDiscoveryTest` 与 `tools/test_auto_merge.py` 的 `CenterDiscoveryTest` 逐条锁住上面七步、指丢时的报错、以及「默认档仍然读 `~/.agents`」。
+
 ## 判据与拒收
 
 ```bash

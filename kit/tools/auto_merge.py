@@ -104,6 +104,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 # 与 work_gate 共用「中心库只能被发现、不能被新建」的口径，避免两套规则。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import center_config  # noqa: E402
 import work_gate  # noqa: E402
 
 STEP_LOCK = "第 0 步 · 合并互斥锁"
@@ -315,14 +316,23 @@ def load_project_config(repo) -> dict:
     }
 
 
-def open_center(db_path=None, step=STEP_TICKET):
-    """发现并打开中心库；不新建。"""
-    db = db_path or work_gate.find_db()
+def open_center(db_path=None, step=STEP_TICKET, repo=None):
+    """发现并打开中心库；不新建。发现顺序只有 `tools/center_config.py` 一处。
+
+    `repo` 只给用例指定「问的是哪个工作区」；生产调用方不传，默认就是这份工具所在的工作区。
+    """
+    if db_path:
+        db = Path(db_path)
+    else:
+        try:
+            db = work_gate.discover_db(repo=repo or work_gate.REPO).db
+        except center_config.DiscoveryError as error:
+            raise Fail(step, f"{error.code}：{error.message}", error.fix) from error
     if db is None or not Path(db).is_file():
         raise Fail(
             step,
-            "中心库没找到。",
-            "检查 ~/.agents/center.json 的 db 字段指向的库是否存在；不要为了让合并跑起来新建一个库。",
+            f"中心库没找到（DB_NOT_FOUND：{db}）。",
+            center_config.ORDER_HINT,
         )
     try:
         center = work_gate.load_center()(db)
@@ -1866,7 +1876,7 @@ def main(argv, out=None):
     )
     parser.add_argument("--list", action="store_true", help="列出已验收但未合并的工单")
     parser.add_argument("--repo", default=str(REPO))
-    parser.add_argument("--db", default=None, help="中心库路径，默认按 center.json 发现")
+    parser.add_argument("--db", default=None, help="中心库路径，默认按 tools/center_config.py 的顺序发现")
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).resolve()

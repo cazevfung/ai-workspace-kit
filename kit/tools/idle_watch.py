@@ -65,7 +65,6 @@ import datetime
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -77,8 +76,9 @@ DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
 # （不是错，是没指定要扫哪儿）——要看别的目录就重复传 --workdir。
 # 以前这里硬编码了两台本机目录，换成别人 clone 下来一个都扫不到。
 DEFAULT_WORKDIRS = ("{{WORKSPACE}}",)
-# 用户级指针：装好的工作区把中心库位置写在这里（与 work_gate 读的是同一份）。
-CONFIG = Path.home() / ".agents" / "center.json"
+# 中心库怎么发现只有一处：`tools/center_config.py`（三个闸门与两个巡检工具都从它取）。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import center_config  # noqa: E402
 
 # 问句识别：末尾的问号，或下面这些「我在等你表态」的说法。
 # 放成模块常量，测试能直接打到（不靠复述一份正则）。
@@ -229,38 +229,18 @@ def read_only(path) -> sqlite3.Connection:
 
 
 def default_ticket_db() -> Path:
-    """默认工单库：本检出的 `.data/task-center.sqlite3` → 用户级指针 → 主检出。
+    """默认工单库：与三个闸门同一处发现（`tools/center_config.py`）。
 
-    装好的工作区里第一项就命中。在套件仓库里（`kit/` 下没有任何库）时第一项不存在，
-    但 `~/.agents/center.json` 指的那份库是同一个唯一真相，所以照它读，不另建一个：
-    巡检读错库报出来的「没有待办」比报不出来更坏。工作树里按 git 公共目录回到主检出。
+    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 本检出的
+    `.data/task-center.sqlite3` → 主检出（工作树里，按 git 公共目录）→
+    `~/.agents/center.json`（默认安装走这一条，与以前逐字相同）。
+    巡检读错库报出来的「没有待办」比报不出来更坏，所以不新建、不猜；
+    一条都不中时返回本检出的默认位置，让调用方照常报 `DB_NOT_FOUND`。
     """
-    if DEFAULT_DB.is_file():
+    try:
+        return center_config.resolve(repo=ROOT).db
+    except center_config.DiscoveryError:
         return DEFAULT_DB
-    try:
-        found = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-        )
-        output = (found.stdout or "").strip()
-        if found.returncode == 0 and output:
-            common = Path(output)
-            if not common.is_absolute():
-                common = (ROOT / common).resolve()
-            candidate = common.parent / ".data" / "task-center.sqlite3"
-            if candidate.is_file():
-                return candidate
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        config = json.loads(CONFIG.read_text(encoding="utf-8"))
-        configured = Path(str(config.get("db") or "")).expanduser()
-        if configured.is_file():
-            return configured
-    except (OSError, ValueError):
-        pass
-    return DEFAULT_DB
 
 
 def placeholder_workdirs(workdirs) -> list[str]:

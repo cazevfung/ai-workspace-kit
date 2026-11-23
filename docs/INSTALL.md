@@ -40,6 +40,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1   # Windows
 1. 复制 `kit/` 到工作区，并把 `{{WORKSPACE}}` 替换成真实路径；
 2. 把 26 个技能复制到 `~/.agents/skills`（已存在的默认跳过）；
 3. 写 `~/.agents/center.json`（中心库指针）与 `~/.agents/intake/`（交接协议）；
+   同时写 `<工作区>/.agents/center.json`，记住这次安装用的是哪个用户级目录
+   （`--agents-home` 装到别处时，闸门按它找库，不去读 `~/.agents`）；
 4. 初始化 `.data/task-center.sqlite3` 并登记项目 `ai-workspace`；
 5. `git init` 并做首次提交（**在启用钩子之前**，否则钩子会拦住这次提交）；
 6. 配置 `core.hooksPath = .githooks`。
@@ -76,8 +78,13 @@ python uninstall.py --purge-data     # 连 .data/ 进度库一起删
 
 ## 常见问题
 
-**`work_gate.py` 报读不了库。** 先确认 `~/.agents/center.json` 指向的库存在，
-且是 `task_center init` 建出来的；不要另建一个备用库。
+**`work_gate.py` 报读不了库。** 它报的码是 `DB_NOT_FOUND`，并且会打出**它读的是哪个
+文件**。发现顺序写在 `docs/closing.md` 的「中心库怎么被发现」：`--db` →
+`TASK_CENTER_DB` → `TASK_CENTER_AGENTS_HOME` → 工作区指针 `.agents/center.json` 记的
+`agents-home` → 本工作区 `.data/task-center.sqlite3` → `~/.agents/center.json`。
+用 `--agents-home` 装过、而 `<工作区>/.agents/center.json` 里记的那个目录已经被挪走或
+删掉时，它不会偷偷回落到 `~/.agents`（那是另一套库）：重新跑一次 `install.py --force`，
+或显式 `--db` / `TASK_CENTER_DB` 指过去。不要另建一个备用库。
 
 **`git commit` 被拒。** 这是提交闸门在工作。先 `python tools/work_gate.py --list`
 看有没有活跃尝试；没有就开工单。确实要提交无工单的改动，用 `--no-verify`，

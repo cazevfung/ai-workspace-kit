@@ -4,6 +4,7 @@
 绑在别的项目上的情况，而不只是打印一句提醒。
 """
 import json
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import center_config
 import work_gate
 
 
@@ -1090,6 +1092,142 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertFalse(payload["ok"], f"退出 1 时 ok 必须为 false：{payload}")
         self.assertIn("stalled", payload["result"].get("reason", ""), f"要点名停住：{payload}")
 
+
+
+class CenterDiscoveryTest(unittest.TestCase):
+    """中心库怎么发现：只有一处，且要认安装时的 --agents-home（AWK-105 C1/C2/C4）。
+
+    这一组的现场按真实布局摆：`<工作区>/.agents/center.json` 是指针（install.py 写的），
+    `<agents-home>/center.json` 说的是库在哪，`~/.agents/center.json` 是默认档。
+    所有用例都把 `home` / `env` / `roots` 显式传进去，一个真实用户目录都不读。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        self.ws = base / "ws"
+        (self.ws / ".agents").mkdir(parents=True)
+        self.home = base / "home"
+        self.agents_home = base / "agents"
+        self.agents_home.mkdir()
+        self.pointer = self.ws / ".agents" / "center.json"
+        self.commanded_db = base / "custom" / "center.sqlite3"
+        self.default_db = base / "default" / "center.sqlite3"
+        self.own_db = self.ws / ".data" / "task-center.sqlite3"
+        self.write_center(self.agents_home, self.commanded_db)
+        self.write_center(self.home / ".agents", self.default_db)
+
+    def write_center(self, agents_home, db):
+        agents_home.mkdir(parents=True, exist_ok=True)
+        (agents_home / "center.json").write_text(
+            json.dumps({"db": str(db)}, ensure_ascii=False), encoding="utf-8")
+
+    def write_pointer(self, agents_home):
+        self.pointer.write_text(json.dumps({"agents_home": str(agents_home)}, ensure_ascii=False),
+                                encoding="utf-8")
+
+    def resolve(self, **kwargs):
+        payload = {"repo": self.ws, "env": {}, "home": self.home}
+        payload.update(kwargs)
+        return work_gate.discover_db(**payload)
+
+    def test_custom_agents_home_wins_over_default(self):
+        """C1：--agents-home 装出来的工作区，读到的是 <agents-home>/center.json 的库。"""
+        self.write_pointer(self.agents_home)
+        found = self.resolve()
+        self.assertEqual(self.commanded_db, found.db)
+        self.assertIn("工作区指针", found.source)
+        self.assertEqual(self.agents_home, found.agents_home)
+
+    def test_missing_agents_home_config_is_fatal_and_does_not_fall_back(self):
+        """C2：指针指到的 center.json 不在，就报 DB_NOT_FOUND，不回落 ~/.agents。"""
+        self.write_pointer(self.agents_home)
+        (self.agents_home / "center.json").unlink()
+        with self.assertRaises(center_config.DiscoveryError) as caught:
+            self.resolve()
+        error = caught.exception
+        self.assertEqual("DB_NOT_FOUND", error.code)
+        # 说得出「缺的是哪一个」：不接受一句「没找到库」。
+        self.assertIn(str(self.agents_home / "center.json"), error.message)
+        self.assertIn("不回落到 ~/.agents", error.fix)
+        # 而且确实没有偷偷返回默认档那份库。
+        with self.assertRaises(center_config.DiscoveryError):
+            self.resolve()
+
+    def test_default_install_still_reads_user_agents(self):
+        """C4：默认安装（不传 --agents-home）仍读 ~/.agents，行为不变。"""
+        self.write_pointer(self.home / ".agents")
+        found = self.resolve()
+        self.assertEqual(self.default_db, found.db)
+
+    def test_install_without_pointer_falls_back_to_user_agents(self):
+        """老安装没有工作区指针：照旧读 ~/.agents。"""
+        found = self.resolve()
+        self.assertEqual(self.default_db, found.db)
+
+    def test_workspace_own_database_wins_over_user_agents(self):
+        """工作区自带库（install 初始化的那一份）优先于 ~/.agents。"""
+        self.own_db.parent.mkdir(parents=True)
+        self.own_db.write_bytes(b"")
+        found = self.resolve()
+        # Windows 的临时目录会回 8.3 短路径（202108~1），比较前先归一。
+        self.assertEqual(self.own_db.resolve(), found.db.resolve())
+
+    def test_explicit_paths_beat_the_pointer(self):
+        """--db 与 TASK_CENTER_DB 是人当场说的，优先级最高。"""
+        self.write_pointer(self.agents_home)
+        explicit = self.ws.parent / "explicit.sqlite3"
+        self.assertEqual(explicit, self.resolve(explicit=str(explicit)).db)
+        env_db = self.ws.parent / "env.sqlite3"
+        self.assertEqual(env_db, self.resolve(env={"TASK_CENTER_DB": str(env_db)}).db)
+
+    def test_explicit_agents_home_env(self):
+        """TASK_CENTER_AGENTS_HOME：多份安装共用一台机器时显式指定。"""
+        other = self.ws.parent / "other-agents"
+        self.write_center(other, self.ws.parent / "other.sqlite3")
+        found = self.resolve(env={"TASK_CENTER_AGENTS_HOME": str(other)})
+        self.assertEqual(self.ws.parent / "other.sqlite3", found.db)
+
+    def test_worktree_finds_pointer_in_main_checkout(self):
+        """工作树里没有指针（`.agents/center.json` 不进版本库）就回主检出找那一份。"""
+        if shutil.which("git") is None:
+            self.skipTest("没有 git")
+        base = self.ws.parent / "gitrepo"
+        base.mkdir()
+        (base / ".data").mkdir()
+        self.assertTrue(self.git(base, "init", "-b", "master")[0] == 0)
+        (base / "README.md").write_text("x", encoding="utf-8")
+        self.git(base, "add", "-A")
+        self.git(base, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "init")
+        worktree = self.ws.parent / "wt"
+        code, _out, err = self.git(base, "worktree", "add", "-q", str(worktree), "-b", "t-wt")
+        self.assertEqual(0, code, err)
+        pointer = base / ".agents" / "center.json"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(json.dumps({"agents_home": str(self.agents_home)}, ensure_ascii=False),
+                           encoding="utf-8")
+        found = work_gate.discover_db(repo=worktree, env={}, home=self.home)
+        self.assertEqual(self.commanded_db, found.db)
+        self.assertFalse((worktree / ".agents" / "center.json").exists())
+
+    def git(self, repo, *args):
+        result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                                text=True, encoding="utf-8", errors="replace", timeout=120)
+        return result.returncode, result.stdout, result.stderr
+
+    def test_list_command_exits_non_zero_with_db_not_found(self):
+        """C2 的命令形态：库里找不到就非零退出，并打出 DB_NOT_FOUND 与缺的那个文件。"""
+        self.write_pointer(self.agents_home)
+        (self.agents_home / "center.json").unlink()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = work_gate.main(["work_gate.py", "--list", "--repo", str(self.ws)])
+        self.assertEqual(1, code, out.getvalue() + err.getvalue())
+        self.assertIn("DB_NOT_FOUND", err.getvalue())
+        self.assertIn(str(self.agents_home / "center.json"), err.getvalue())
+        # 不许「新建一个空库」：现场一个文件都没多出来。
+        self.assertFalse(self.own_db.exists())
 
 if __name__ == "__main__":
     unittest.main()

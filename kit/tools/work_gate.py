@@ -24,8 +24,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import center_config
+
 REPO = Path(__file__).resolve().parent.parent
-CONFIG = Path.home() / ".agents" / "center.json"
 # 停住阈值默认 45 分钟（PRD-013 R4）。不传 --stalled-minutes 时这个值只用来算
 # 「其中 M 张最后落库超过 45 分钟」那一句；要不要因此非零退出，见 main() 里的说明。
 DEFAULT_STALLED_MINUTES = 45
@@ -93,17 +94,25 @@ def load_center():
     raise SystemExit("找不到 task_center 代码目录；设 TASK_CENTER_CODE 指向它")
 
 
-def find_db(explicit=None):
-    """中心库只能被发现，不能被新建。"""
-    if explicit:
-        return Path(explicit)
-    if os.environ.get("TASK_CENTER_DB"):
-        return Path(os.environ["TASK_CENTER_DB"])
-    if CONFIG.is_file():
-        data = json.loads(CONFIG.read_text(encoding="utf-8"))
-        if data.get("db"):
-            return Path(data["db"])
-    return None
+def discover_db(explicit=None, repo=REPO, **kwargs):
+    """按 `center_config` 的顺序发现中心库，返回 `Resolution`；找不到抛 `DiscoveryError`。
+
+    发现逻辑只有 `tools/center_config.py` 一处：这里、`auto_merge`、`close_gate`
+    （以及巡检那两个工具）都从它取，不再各写一遍 `~/.agents/center.json`。
+    """
+    return center_config.resolve(repo=repo, explicit=explicit, **kwargs)
+
+
+def find_db(explicit=None, repo=REPO, **kwargs):
+    """中心库只能被发现，不能被新建。
+
+    保留为 `discover_db(...).db` 的薄封装：老调方拿到 `None` 就知道「没找到」，
+    要错误码与那句「凭什么」的用 `discover_db`。两处都不自己解顺序。
+    """
+    try:
+        return discover_db(explicit, repo=repo, **kwargs).db
+    except center_config.DiscoveryError:
+        return None
 
 
 def same_root(left, right):
@@ -189,8 +198,7 @@ def verify(db_path, ticket_id, project=None, repo=REPO, in_merge=None):
     if db_path is None or not Path(db_path).is_file():
         return False, {
             "error": "DB_NOT_FOUND",
-            "fix": "中心库没找到。检查 ~/.agents/center.json 的 db 字段指向的库是否存在；"
-                   "不要为了让闸门通过而新建一个库。",
+            "fix": f"中心库没找到（{db_path}）。" + center_config.ORDER_HINT,
         }
     center = load_center()(db_path)
     # 项目归属一律从仓库路径反查，不接受调用方指定另一个项目。
@@ -495,8 +503,8 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
 
     if center_path is None or not Path(center_path).is_file():
         return {"verdict": "reject", "round": round_no,
-                "detail": ("读不了中心库：不知道本项目还有没有在途工单，就不放行。"
-                           "检查 ~/.agents/center.json 的 db 字段，不要为了让闸门通过新建一个库。")}
+                "detail": (f"读不了中心库（DB_NOT_FOUND：{center_path}）：不知道本项目还有没有"
+                           f"在途工单，就不放行。{center_config.ORDER_HINT}")}
     try:
         found, tickets = project_tickets(center_path, repo)
     except CenterUnreadable as error:
@@ -618,11 +626,26 @@ def main(argv):
         print("--stalled-minutes 必须是正整数（分钟）；不传就只统计不判红。", file=sys.stderr)
         return 1
 
-    db_path = find_db(args.db)
+    # 发现只做一次：报错也带回来，--list 和工单判定用同一句为什么。
+    db_error = None
+    resolution = None
+    try:
+        resolution = discover_db(args.db, repo=args.repo)
+        db_path = resolution.db
+    except center_config.DiscoveryError as error:
+        db_path, db_error = None, error
     if args.list:
         if db_path is None or not Path(db_path).is_file():
-            print("中心库没找到：检查 ~/.agents/center.json 的 db 字段", file=sys.stderr)
+            code = db_error.code if db_error is not None else "DB_NOT_FOUND"
+            detail = db_error.message if db_error is not None else f"库文件不存在：{db_path}"
+            print(f"中心库没找到：{code}", file=sys.stderr)
+            print(f"  {detail}", file=sys.stderr)
+            print(f"  {center_config.ORDER_HINT}", file=sys.stderr)
             return 1
+        if resolution is not None:
+            # 凭什么读到这一份：发现顺序有多长，这一行就有多必要。
+            config = f"；配置 {resolution.config}" if resolution.config is not None else ""
+            print(f"中心库：{db_path}（{resolution.source}{config}）", file=sys.stderr)
         try:
             items = active(db_path)
         except CenterUnreadable as error:

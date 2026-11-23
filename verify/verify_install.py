@@ -64,6 +64,41 @@ def main(argv=None) -> int:
             except Exception:  # noqa: BLE001
                 center_ok = False
         check("center.json 指向本工作区", center_ok, str(center_path))
+        # AWK-105：工作区自己也要记住这次装的是哪个 agents-home，否则闸门只会
+        # 去读 ~/.agents，--agents-home 装出来的工作区就闭门读到另一套库。
+        pointer_path = ws / ".agents" / "center.json"
+        pointer_ok = False
+        if pointer_path.is_file():
+            try:
+                import json
+                pointer_ok = Path(json.loads(pointer_path.read_text(encoding="utf-8"))
+                                  .get("agents_home", "")).resolve() == agents.resolve()
+            except Exception:  # noqa: BLE001
+                pointer_ok = False
+        check("工作区指针记下了 --agents-home", pointer_ok, str(pointer_path))
+
+        # 真实现场：装完之后闸门读到的是这一份库（不是用户真实 ~/.agents 那一份）。
+        created_db = (ws / ".data" / "task-center.sqlite3").resolve()
+        result = run([sys.executable, "tools/work_gate.py", "--list"], ws, timeout=120)
+        gate_output = result.stdout + result.stderr
+        gate_ok = (result.returncode == 0 and "SCHEMA_MISMATCH" not in gate_output
+                   and str(created_db) in gate_output)
+        check("work_gate --list 读的是本工作区的库", gate_ok, gate_output[-800:])
+
+        # 把 <agents-home>/center.json 临时改名：必须报 DB_NOT_FOUND 且非零退出，
+        # 不许静默回落到 ~/.agents，也不许新建一个空库（一个文件都不许多）。
+        before = sorted(p.name for p in (ws / ".data").iterdir())
+        stash = center_path.with_name("center.json.moved")
+        center_path.rename(stash)
+        try:
+            result = run([sys.executable, "tools/work_gate.py", "--list"], ws, timeout=120)
+            output = result.stdout + result.stderr
+            after = sorted(p.name for p in (ws / ".data").iterdir())
+            check("agents-home 配置缺失时 DB_NOT_FOUND 非零退出",
+                  result.returncode != 0 and "DB_NOT_FOUND" in output and after == before,
+                  output[-800:])
+        finally:
+            stash.rename(center_path)
         check("交接协议已复制", (agents / "intake" / "intake.md").is_file())
         check("安装清单已写", (agents / ".ai-workspace-kit.json").is_file())
 

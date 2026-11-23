@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # 写一份四个状态的元组，钩子那边六个——同一件事两个答案，于是 AW-094 留在 `ready`
 # 时 close_gate --check 说可以收、收尾提交被连拒三次（PRD-014 R1 / docs/closing.md）。
 from work_gate import CLOSING_BLOCKING_STATES
+import center_config
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
@@ -216,40 +217,22 @@ def check(root, package=None):
     return problems + package_problems
 
 
-def main_checkout(root):
-    """工作树里跑时，找出它对应的主检出根（中心库在主检出那边）。
+def default_db(root):
+    """中心库的默认落点：与 `work_gate` / `auto_merge` 同一处发现（`tools/center_config.py`）。
 
-    `git rev-parse --git-common-dir` 在主检出里回答 `<根>/.git`，在工作树里也回答
-    主检出那个 `.git`——工作树的 `.git` 只是一个文本指针。所以「它的父目录」就是
-    主检出，中心库在主检出的 `.data/` 下。找不到就返回 None，不猜。
+    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 这个检出（工作树里退回
+    主检出）的 `.data/task-center.sqlite3`。本闸门不单独看 `~/.agents`：它判的是
+    「这一份检出的活干完没」，落点默认就是自己那个库，与以前的行为一致。
+    什么都没有时返回第一个候选，让调用方报「库不存在」而不是静默跑别的库。
     """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    common = Path(result.stdout.strip())
-    return common.parent if common.name == ".git" else common
-
-
-def default_db(root):
-    """中心库的默认落点：先看这个检出，再看主检出；都没有就报第一个候选。"""
-    candidates = [Path(root) / ".data" / "task-center.sqlite3"]
-    main = main_checkout(root)
-    if main is not None:
-        candidates.append(main / ".data" / "task-center.sqlite3")
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return candidates[0]
+        return center_config.resolve(repo=root, include_user_config=False).db
+    except center_config.DiscoveryError as error:
+        if error.config is not None:
+            # 指到了一个说得出名字的位置却没读到：这不是「还没建库」，是「指错了」，
+            # 当场报出来，不要拿本地候选蒙过去。
+            raise GateError(f"{error.code}：{error.message}。{error.fix}") from error
+        return Path(root) / ".data" / "task-center.sqlite3"
 
 
 def read_only(path):
@@ -351,7 +334,8 @@ def main(argv=None):
     parser.add_argument(
         "--db",
         default=None,
-        help=f"中心库（默认本检出的 {DEFAULT_DB}，工作树里退回主检出的 .data/）",
+        help=f"中心库（默认按 tools/center_config.py 的顺序发现：工作区指针 → 本检出 "
+             f"{DEFAULT_DB}，工作树里退回主检出；与 work_gate / auto_merge 同一处）",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help=f"项目标识（默认 {DEFAULT_PROJECT}）")
     parser.add_argument("--check", action="store_true", help="再加三条现场事实：工作区、在途工单、状态与结论")
