@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工单进度</title>
+<style>
+*{box-sizing:border-box}
+/* PRD §4.23：与鸿蒙客户端共用同一套语义 token，桌面不再自带色板、也不再分亮暗两套 */
+:root{color-scheme:dark;--bg:#121212;--card:#1E1E1E;--line:#383838;--ink:#EDEDED;--dim:#BDBDBD;--weak:#999999;
+--running:#EA6B17;--waiting:#F3A115;--review:#93C5FD;--link:#93C5FD;--rework:#D91F37;--bad:#D91F37;--unmerged:#2AAE5B;--queued:#999999}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow-wrap:anywhere}
+.wrap{max-width:1040px;margin:0 auto;padding:16px 16px 40px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:14px}
+h1{font-size:20px;margin:0}
+button.refresh{font:inherit;font-size:14px;padding:4px 10px;border-radius:7px;border:1px solid var(--line);background:transparent;color:var(--link);cursor:pointer}
+/* PRD §4.24 / 0.10：顶部只剩一行「最后更新 · 延迟 · N 项 · N 在跑 · N 等你」；
+   两个库路径与读取时刻搬到底部 footer，顶部不再挂两行小字 */
+.topline{font-size:14px;color:var(--dim);margin:8px 0 0;font-variant-numeric:tabular-nums}
+.live.down{color:var(--waiting);font-weight:600}
+.counts{color:var(--ink)}
+/* 浏览器里才有这枚分隔号：测试读 textContent 时不掺进伪元素内容 */
+.counts::before{content:" · "}
+.counts[hidden]{display:none}
+.counts b,.foot-counts b{display:inline-block;font-weight:700;font-variant-numeric:tabular-nums}
+/* PRD §4.25：顶栏数字变化时上下滑动 0.2s，不直接跳变 */
+.counts b.slide,.foot-counts b.slide{animation:slide-number .2s ease}
+@keyframes slide-number{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+.issues{font-size:14px;color:var(--bad);margin:8px 0 0}
+/* PRD §4.24：条目是列表行，不是卡片——没有圆角、没有描边、没有左侧彩条、没有投影；
+   相邻条目之间一条 1px 分隔线，条目上下各 14px 留白；背景全用 --bg，不分卡片与页面。
+   PRD §4.14：列数只有三种写法——基础 auto-fill、窄屏两列、760px 起三列；
+   容器最宽 1040px，再宽也不加第四列（原来那条四列规则永远命中不了） */
+.board,.sgrid{display:grid;column-gap:20px;row-gap:0;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+.board{margin-top:14px}
+.card{background:var(--bg);border-top:1px solid var(--line);padding:14px 0;min-width:0}
+/* PRD §4.22：状态点在最左与单号同行，标题独占下一行，两个入口在右上角；卡底不再有按钮行 */
+.head{display:flex;align-items:center;gap:6px}
+.dotwrap{position:relative;flex:0 0 auto;display:inline-flex;margin-right:6px}
+/* PRD §4.24：状态只用行首一个 4px 实心点，不再用彩色边框，也不再单独放文字徽章 */
+.dot{display:block;width:4px;height:4px;border-radius:50%;background:var(--queued)}
+/* PRD §4.25：在跑的点 2 秒呼吸；等你说的点更亮（--waiting #F3A115），靠亮度与呼吸区分 */
+.card[data-bucket=waiting] .dot{background:var(--waiting);animation:dot-breathe-waiting 4s ease-in-out infinite}
+.card[data-bucket=review] .dot{background:var(--review)}
+.card[data-bucket=rework] .dot{background:var(--rework)}
+.card[data-bucket=running] .dot{background:var(--running);animation:dot-breathe-running 2s ease-in-out infinite}
+.card[data-bucket=unmerged] .dot{background:var(--unmerged)}
+@keyframes dot-breathe-running{0%,100%{opacity:.45;box-shadow:0 0 0 0 rgba(234,107,23,0)}50%{opacity:1;box-shadow:0 0 0 3px rgba(234,107,23,.25)}}
+@keyframes dot-breathe-waiting{0%,100%{opacity:.45;box-shadow:0 0 0 0 rgba(243,161,21,0)}50%{opacity:1;box-shadow:0 0 0 3px rgba(243,161,21,.22)}}
+/* PRD §4.20：返工次数是状态点右上角的小圆标，不另起一行 */
+/* 返工小圆标放在状态点的右上角，不盖住那个 4px 点；有它时单号让开 18px */
+.rew{position:absolute;left:5px;top:-6px;min-width:14px;height:14px;padding:0 3px;border-radius:999px;background:var(--rework);color:#fff;font-size:10px;font-weight:700;line-height:14px;text-align:center}
+.card.has-rework .dotwrap{margin-right:18px}
+.rew[hidden]{display:none}
+.tid{font-size:11px;color:var(--weak);font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:.02em}
+/* 右上角两个入口：16px 图标、只有 aria-label 与 data-tip，不写文字；悬停 .1s 出自绘 tooltip */
+.acts{margin-left:auto;display:inline-flex;align-items:center;gap:2px}
+.acts a{position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;color:var(--dim);text-decoration:none}
+.acts a:hover{color:var(--ink)}
+.acts a:focus-visible{color:var(--ink);outline:2px solid var(--link);outline-offset:1px}
+.acts a.off{color:var(--weak);cursor:default}
+.acts a[hidden]{display:none}
+.acts a::after{content:attr(data-tip);position:absolute;top:100%;right:0;margin-top:2px;padding:1px 6px;border:1px solid var(--line);background:var(--card);color:var(--ink);font-size:11px;line-height:1.4;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .1s ease;z-index:2}
+.acts a:hover::after,.acts a:focus-visible::after{opacity:1}
+.acts svg,.node svg{display:block;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.ttl{font-size:15px;font-weight:700;margin:3px 0 0;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+/* PRD §4.25：五步从五个等宽圆点改成一条 1px 轨道加节点；已完成那段亮、宽度过渡 .3s，
+   当前节点 6px 带光晕，未到的段暗。图标沿用 §4.20 的五个 Lucide，不写步骤名 */
+.tl{position:relative;display:flex;align-items:flex-start;justify-content:space-between;height:24px;margin:12px 0 0}
+.rail{position:absolute;left:8px;right:8px;top:20px;height:1px;background:var(--line)}
+.fill{display:block;height:1px;width:0;background:var(--running);transition:width .3s ease}
+/* 节点分成两截：图标在上，落在轨道上的小点在下；点才是 §4.25 说的「节点」 */
+.node{position:relative;z-index:1;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:0 0 auto;color:var(--weak);line-height:0}
+.node::after{content:"";position:absolute;left:50%;bottom:-6px;width:4px;height:4px;margin-left:-2px;border-radius:50%;background:var(--line)}
+.node[data-step=done]{color:var(--running)}
+.node[data-step=done]::after{background:var(--running)}
+.node[data-step=current]{color:var(--ink)}
+.node[data-step=pending]{opacity:.55}
+/* 当前节点：6px 实心点带光晕，2 秒呼吸（与在跑的状态点同节奏） */
+.node[data-step=current]::after{width:6px;height:6px;margin-left:-3px;bottom:-7px;background:var(--running);animation:node-glow 2s ease-in-out infinite}
+@keyframes node-glow{0%,100%{box-shadow:0 0 0 0 rgba(234,107,23,0)}50%{box-shadow:0 0 0 3px rgba(234,107,23,.3)}}
+/* PRD §4.19：第三层——按状态只给一句话 */
+.say{font-size:13px;color:var(--dim);margin:8px 0 0}
+.say[hidden]{display:none}
+.card[data-bucket=waiting] .say{color:var(--waiting);font-weight:600}
+.card[data-bucket=rework] .say{color:var(--rework);font-weight:600}
+.card[data-bucket=unmerged] .say{color:var(--unmerged);font-weight:600}
+.mis{font-size:13px;margin:6px 0 0;color:var(--bad);font-weight:600}
+/* `.clamp` 的 display:-webkit-box 是作者样式，会盖过浏览器对 [hidden] 的 display:none；
+   不补这一条，错位行 hidden 了也渲染，全页会多出一排没有 href 的死链接 */
+.mis[hidden]{display:none}
+/* 错位行只在它指向的会话与「看现场」不同源时出现，图标不写文字，避免又造一个同义入口 */
+.mis a{display:inline-flex;align-items:center;color:var(--bad);text-decoration:none;border:1px solid currentColor;border-radius:6px;padding:0 3px;margin-left:4px;vertical-align:-3px}
+.mis a[hidden]{display:none}
+.mis svg{display:block;width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+/* PRD §4.25 / AC26：新条目进场 fade + slide（0.15s，按 index 错开 20ms）。
+   data-enter 只在新建节点时挂一次，轮询里已存在的条目不会被重新淡入 */
+.card[data-enter],.scard[data-enter]{animation:enter .15s ease both}
+@keyframes enter{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
+.empty{font-size:14px;color:var(--dim);margin:10px 0}
+.done{margin-top:16px}
+.done summary{cursor:pointer;font-size:14px;color:var(--dim)}
+.done-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:2px}
+.done-row{font-size:14px;color:var(--dim);font-variant-numeric:tabular-nums;padding:2px 0;border-bottom:1px dotted var(--line)}
+/* PRD §4.16：阻断原因、错位警告、最后一句最多两行；超出截断，全文放 title 属性。
+   不加这条时 CUT-004 那种 60 字原因会把一张卡撑到四行，三列网格里相邻两张卡上下错位 */
+.clamp{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;text-overflow:ellipsis;white-space:normal;overflow-wrap:anywhere}
+.sessions{margin-top:18px;border-top:1px solid var(--line);padding-top:10px}
+.sessions[hidden]{display:none}
+.sessions-head{font-size:13px;color:var(--dim);margin:0 0 6px;font-weight:600}
+/* PRD §4.21 / §4.24：会话卡只留两行，整张卡可点；同样是列表行，不是卡片 */
+.scard{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;align-items:center;background:var(--bg);border-top:1px solid var(--line);padding:14px 0;min-width:0;color:inherit;text-decoration:none}
+/* PRD §4.15 / §4.24：等你的会话点更亮、4 秒呼吸；在跑的点 2 秒呼吸 */
+.scard[data-kind=running] .sdot{background:var(--running);animation:dot-breathe-running 2s ease-in-out infinite}
+.scard[data-kind=waiting] .sdot{background:var(--waiting);animation:dot-breathe-waiting 4s ease-in-out infinite}
+.scard[data-kind=suspect] .sdot{background:var(--waiting)}
+.sdot{display:block;width:4px;height:4px;border-radius:50%;background:var(--queued)}
+.stitle{font-size:15px;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.smeta{grid-column:1/-1;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scard.off{cursor:default;opacity:.75}
+/* 底部：库路径与读取时刻、待验收与今天完成——原来挤在顶部，两行小字压得人喘不过气 */
+.foot{margin-top:22px;border-top:1px solid var(--line);padding-top:10px}
+.foot-counts{font-size:13px;color:var(--dim);margin:0;font-variant-numeric:tabular-nums}
+.foot-counts[hidden]{display:none}
+.foot-counts .sep{color:var(--weak)}
+.src{font-size:12px;color:var(--weak);margin:6px 0 0;line-height:1.5}
+/* PRD §4.25 / AC26：reduced-motion 时四个动效全部降级为无动画。
+   四条各管一处，别只关 animation：tooltip 与 fill 走的是 transition，漏一条就还在淡入/滑动 */
+@media (prefers-reduced-motion:reduce){
+.card,.scard,.dot,.sdot,.node,.node::after,.card[data-enter],.scard[data-enter],
+.counts b,.foot-counts b{animation:none!important}
+.fill,.acts a::after{transition:none!important}
+}
+#gate{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:9}
+#gate[hidden]{display:none}
+.gatecard{background:var(--card);border-radius:12px;padding:18px;max-width:440px;width:100%}
+.gatecard h2{font-size:16px;margin:0 0 6px}
+.gatecard p{font-size:14px;color:var(--dim);margin:0 0 12px}
+.gatecard input{width:100%;font:inherit;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit}
+.gatecard button{margin-top:10px;width:100%;font:inherit;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:inherit;cursor:pointer}
+#gate-error{color:var(--bad);font-size:14px;margin:8px 0 0;min-height:20px}
+@media (max-width:620px){
+.wrap{padding:12px}
+}
+/* PRD §4.14：窄于 420px 时两列，不显示第三层那句话 */
+@media (max-width:420px){
+.board,.sgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.say{display:none}
+}
+/* 320–360px 仍要两列：轨道上的节点与右上角入口整体缩一档，否则 timeline 比卡片内宽还宽 */
+@media (max-width:360px){
+.node svg{width:12px;height:12px}
+.node[data-step=current]::after{width:5px;height:5px;margin-left:-2.5px;bottom:-7.5px}
+.acts{gap:1px}
+.acts a{width:20px;height:20px}
+.dotwrap{margin-right:4px}
+.tid{font-size:10px;letter-spacing:0}
+}
+/* PRD §4.14：760px 起三列；1040px 以上仍是三列，只是卡片密度到顶 */
+@media (min-width:760px){
+.board,.sgrid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>工单进度</h1>
+  <button class="refresh" id="refresh" type="button">立刻刷新</button>
+</header>
+<p class="topline">
+  <span class="live" id="live">等待数据…</span>
+  <span class="counts" id="counts" hidden><span class="metric" aria-label="在途" title="在途工单数"><b data-f="c-inflight">0</b> 项</span><span class="sep"> · </span><span class="metric"><b data-f="c-running">0</b> 在跑</span><span class="sep"> · </span><span class="metric"><b data-f="c-waiting">0</b> 等你</span></span>
+</p>
+<p class="issues" id="issues" hidden></p>
+<div class="board" id="board"></div>
+<p class="empty" id="empty" hidden>现在没有在途工单。</p>
+<section class="sessions" id="session-box" hidden>
+  <p class="sessions-head" id="session-head">会话 · 在跑与等你的（等你的在前）</p>
+  <div class="sgrid" id="session-grid"></div>
+</section>
+<section class="sessions" id="suspect-box" hidden>
+  <p class="sessions-head" id="suspect-head">状态可疑（字段说有活轮，但判据不过，不当成在跑）</p>
+  <div class="sgrid" id="suspect"></div>
+</section>
+<details class="done" id="done-box">
+  <summary id="done-summary">已完成</summary>
+  <ul class="done-list" id="done"></ul>
+</details>
+<footer class="foot">
+  <p class="foot-counts" id="foot-counts" hidden><span class="metric">待验收 <b data-f="f-review">0</b></span><span class="sep"> · </span><span class="metric">今天完成 <b data-f="f-done">0</b></span><span class="metric" data-f="f-suspect-wrap" hidden><span class="sep"> · </span>状态可疑 <b data-f="f-suspect">0</b></span></p>
+  <p class="src" id="sources"></p>
+</footer>
+</div>
+
+<template id="card-template">
+  <article class="card" data-bucket="queued">
+    <div class="head">
+      <span class="dotwrap"><span class="dot" data-f="dot"></span><span class="rew" data-f="rework" hidden></span></span>
+      <span class="tid" data-f="ticket_id"></span>
+      <span class="acts">
+        <a data-f="watch" aria-label="看现场" data-tip="看现场"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="terminal"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></a>
+        <a data-f="pm" aria-label="找 PM" data-tip="找 PM"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="message-square"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></a>
+      </span>
+    </div>
+    <h2 class="ttl" data-f="title"></h2>
+    <div class="tl">
+      <span class="rail"><span class="fill" data-f="fill"></span></span>
+      <span class="node" data-step="pending" data-f="step0"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="send"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg></span>
+      <span class="node" data-step="pending" data-f="step1"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="play"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span>
+      <span class="node" data-step="pending" data-f="step2"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="upload"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg></span>
+      <span class="node" data-step="pending" data-f="step3"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="circle-check"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg></span>
+      <span class="node" data-step="pending" data-f="step4"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" data-lucide="git-merge"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg></span>
+    </div>
+    <p class="say clamp" data-f="sentence" hidden></p>
+    <p class="mis clamp" data-f="mismatch" hidden><span data-f="mismatch-text"></span><a data-f="mismatch-link" aria-label="打开跑着的会话" title="打开跑着的会话" hidden><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false" data-lucide="terminal"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></a></p>
+  </article>
+</template>
+
+<template id="done-template">
+  <li class="done-row"><span data-f="done-text"></span></li>
+</template>
+
+<template id="session-template">
+  <a class="scard" data-kind="running">
+    <span class="sdot" data-f="s-dot"></span>
+    <span class="stitle" data-f="s-title"></span>
+    <span class="smeta"><span data-f="s-state"></span> · <span data-f="s-dir"></span> · <span data-f="s-elapsed-label">已跑</span> <span data-f="s-elapsed"></span></span>
+  </a>
+</template>
+
+<div id="gate" hidden>
+  <form class="gatecard" id="gate-form">
+    <h2>输入服务端打印的 token</h2>
+    <p>token 在启动服务的终端里。它只用于本机请求，存在浏览器 localStorage，不写进地址栏。</p>
+    <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 token">
+    <button type="submit">连接</button>
+    <p id="gate-error"></p>
+  </form>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var POLL_MS = 2000;
+  var TOKEN_KEY = 'dashboard.token';
+  var STEPS = 5;
+  var board = document.getElementById('board');
+  var live = document.getElementById('live');
+  var counts = document.getElementById('counts');
+  var footCounts = document.getElementById('foot-counts');
+  var sources = document.getElementById('sources');
+  var issues = document.getElementById('issues');
+  var empty = document.getElementById('empty');
+  var doneBox = document.getElementById('done-box');
+  var doneSummary = document.getElementById('done-summary');
+  var doneList = document.getElementById('done');
+  var sessionBox = document.getElementById('session-box');
+  var sessionHead = document.getElementById('session-head');
+  var sessionList = document.getElementById('session-grid');
+  var suspectBox = document.getElementById('suspect-box');
+  var suspectHead = document.getElementById('suspect-head');
+  var suspectList = document.getElementById('suspect');
+  var gate = document.getElementById('gate');
+  var gateForm = document.getElementById('gate-form');
+  var gateInput = document.getElementById('token');
+  var gateError = document.getElementById('gate-error');
+  var cardTemplate = document.getElementById('card-template');
+  var doneTemplate = document.getElementById('done-template');
+  var sessionTemplate = document.getElementById('session-template');
+  var cards = Object.create(null);
+  var doneRows = Object.create(null);
+  var sessionRows = Object.create(null);
+  var suspectRows = Object.create(null);
+  var token = '';
+  var lastUpdate = null;
+  var lastBytes = '';
+  var timer = null;
+
+  function two(value) { return value < 10 ? '0' + value : '' + value; }
+  function clock(date) {
+    return two(date.getHours()) + ':' + two(date.getMinutes()) + ':' + two(date.getSeconds());
+  }
+  function latency(ms) {
+    return ms < 1000 ? Math.round(ms) + 'ms' : (ms / 1000).toFixed(1) + 's';
+  }
+  function setLive(ok, milliseconds) {
+    live.classList.toggle('down', !ok);
+    if (!ok) {
+      live.textContent = '连接断开，最后更新 ' + (lastUpdate ? clock(lastUpdate) : '--:--:--');
+      return;
+    }
+    lastUpdate = new Date();
+    live.textContent = '最后更新 ' + clock(lastUpdate) + ' · 延迟 ' + latency(milliseconds);
+  }
+  // PRD §4.25：数字变化时上下滑动 0.2s，不直接跳变；同一个节点只在数值真的变了时才重播
+  function setNumber(node, value) {
+    if (!node) { return; }
+    var next = String(value);
+    if (node.textContent === next) { return; }
+    node.textContent = next;
+    node.classList.remove('slide');
+    void node.offsetWidth;  // 读一次宽度强制回流，下一次变化才会重新播动画
+    node.classList.add('slide');
+  }
+  // PRD §4.24：顶部只剩一行「最后更新 · 延迟 · N 项 · N 在跑 · N 等你」；
+  // 待验收、今天完成与两个库路径都搬到底部 footer
+  function setCounts(summary) {
+    counts.hidden = false;
+    setNumber(counts.querySelector('[data-f="c-inflight"]'), summary.inflight);
+    setNumber(counts.querySelector('[data-f="c-running"]'), summary.running);
+    setNumber(counts.querySelector('[data-f="c-waiting"]'), summary.waiting);
+    footCounts.hidden = false;
+    setNumber(footCounts.querySelector('[data-f="f-review"]'), summary.review);
+    setNumber(footCounts.querySelector('[data-f="f-done"]'), summary.done_today);
+    // 状态可疑不算在跑，但要让人看见：字段说有活轮、判据却不接受的会话有几个
+    var suspect = summary.suspect || 0;
+    footCounts.querySelector('[data-f="f-suspect-wrap"]').hidden = !suspect;
+    setNumber(footCounts.querySelector('[data-f="f-suspect"]'), suspect);
+  }
+  function showGate(message) {
+    gate.hidden = false;
+    gateError.textContent = message || '';
+    gateInput.focus();
+  }
+  function hideGate() {
+    gate.hidden = true;
+    gateError.textContent = '';
+  }
+  // PRD §4.25 / AC26：进场 fade + slide 只挂在新节点上，按 index 错开 20ms；
+  // 轮询只 patch 已经存在的节点，所以不会整页重新淡入。动画放完就摘掉标记，
+  // 之后即使节点被 insertBefore 挪位置也不会再淡一次
+  function markEntering(node, index) {
+    node.setAttribute('data-enter', '1');
+    if (node.style) { node.style.animationDelay = (index * 20) + 'ms'; }
+    function settle(event) {
+      if (event && event.target && event.target !== node) { return; }
+      node.removeAttribute('data-enter');
+    }
+    node.addEventListener('animationend', settle);
+    // 兜底：reduced-motion（animation:none）、后台标签页都没事件可等，
+    // 标记不许长期挂着——400ms 是入场动画的 0.15s 加上最长错开量还留了余量
+    setTimeout(settle, 400 + index * 20);
+  }
+  function makeCard(id, index) {
+    var node = cardTemplate.content.firstElementChild.cloneNode(true);
+    node.setAttribute('data-id', id);
+    markEntering(node, index);
+    cards[id] = { node: node, signature: null };
+    return cards[id];
+  }
+  // PRD §4.16：截成两行的文案把全文放 title，鼠标悬停能看完整的一段
+  function setTitle(node, text) {
+    if (text) { node.setAttribute('title', text); } else { node.removeAttribute('title'); }
+  }
+  function setLink(node, field, sessionId) {
+    var link = node.querySelector('[data-f="' + field + '"]');
+    var label = field === 'watch' ? '看现场' : '找 PM';
+    // PRD §4.22 / §4.25：入口只有图标，没有可见文字；名字放在 aria-label 与 tooltip 的 data-tip 里
+    var name = sessionId ? label : label + ' · 未记录';
+    link.setAttribute('aria-label', name);
+    link.setAttribute('data-tip', name);
+    if (sessionId) {
+      link.setAttribute('href', 'cindy://session/' + sessionId);
+      link.classList.remove('off');
+      link.removeAttribute('aria-disabled');
+    } else {
+      link.removeAttribute('href');
+      link.classList.add('off');
+      link.setAttribute('aria-disabled', 'true');
+    }
+  }
+  // PRD §4.20 / §4.25：一条 1px 轨道加五个 Lucide 节点，已完成那段亮、宽度 .3s 过渡；
+  // 当前节点 6px 带光晕（用 ::before 画在图标中心），未到的段暗
+  function setTimeline(node, steps) {
+    var index;
+    var reached = 0;
+    var signature = [];
+    for (index = 0; index < STEPS; index += 1) {
+      var cell = node.querySelector('[data-f="step' + index + '"]');
+      var step = (steps && steps[index]) || { state: 'pending' };
+      cell.setAttribute('data-step', step.state);
+      signature.push(step.state);
+      if (step.state === 'done' || step.state === 'current') { reached = index; }
+    }
+    var fill = node.querySelector('[data-f="fill"]');
+    fill.style.width = (reached / (STEPS - 1) * 100) + '%';
+    return signature.join(',');
+  }
+  function signatureOf(card) {
+    var note = card.note || {};
+    var mismatch = card.session_mismatch || {};
+    var sentence = card.sentence || '';
+    return [card.bucket, card.ticket_id, card.title, sentence, card.rework_count || 0, note.title || '', card.watch_session || '', card.pm_session || '',
+      [mismatch.text || '', mismatch.session_id || ''].join('/'),
+      JSON.stringify((card.steps || []).map(function (step) { return step.state; }))].join('\u0001');
+  }
+  function patchMismatch(node, card) {
+    var mismatch = card.session_mismatch || null;
+    var line = node.querySelector('[data-f="mismatch"]');
+    var link = node.querySelector('[data-f="mismatch-link"]');
+    line.hidden = !mismatch;
+    setTitle(line, mismatch ? mismatch.text : '');
+    if (!mismatch) {
+      link.removeAttribute('href');
+      return;
+    }
+    node.querySelector('[data-f="mismatch-text"]').textContent = mismatch.text || '';
+    // PRD §4.13：错位行只在它指向的会话与「看现场」不同源时才给链接；
+    // 同一个会话给两个入口，等于把去掉的那个按钮换个名字留回来
+    if (mismatch.session_id && mismatch.session_id !== card.watch_session) {
+      link.setAttribute('href', 'cindy://session/' + mismatch.session_id);
+      link.hidden = false;
+    } else {
+      link.hidden = true;
+      link.removeAttribute('href');
+    }
+  }
+  function patchCard(entry, card) {
+    var node = entry.node;
+    var note = card.note || {};
+    var sentence = card.sentence || '';
+    node.setAttribute('data-bucket', card.bucket);
+    node.setAttribute('data-bucket-label', card.bucket_label);
+    // 第一层：状态点（悬停才说状态名）+ 单号 + 右上角两个入口；标题下一行，项目名不再画
+    node.querySelector('[data-f="dot"]').setAttribute('title', card.bucket_label);
+    node.querySelector('[data-f="ticket_id"]').textContent = card.ticket_id;
+    node.querySelector('[data-f="title"]').textContent = card.title;
+    // 第二层：五步轨道与返工小圆标
+    setTimeline(node, card.steps);
+    var rework = node.querySelector('[data-f="rework"]');
+    var reworkCount = card.rework_count || 0;
+    rework.hidden = reworkCount < 1;
+    rework.textContent = reworkCount > 9 ? '9+' : String(reworkCount);
+    // 有返工时单号让开 18px，小圆标才不会压住行首的状态点
+    node.classList.toggle('has-rework', reworkCount > 0);
+    // 第三层：一句话；全文进 title（原因在 Python 侧已经不截断）
+    var sayNode = node.querySelector('[data-f="sentence"]');
+    sayNode.textContent = sentence;
+    sayNode.hidden = !sentence;
+    setTitle(sayNode, note.title || sentence);
+    patchMismatch(node, card);
+    setLink(node, 'watch', card.watch_session || null);
+    // PRD §4.22 / AC23：两个入口指向同一个会话时只留一个，同一个 session 链接全页只出现一次
+    var pmSession = card.pm_session || null;
+    var pmNode = node.querySelector('[data-f="pm"]');
+    var pmSameAsWatch = !!pmSession && pmSession === card.watch_session;
+    pmNode.hidden = pmSameAsWatch;
+    setLink(node, 'pm', pmSameAsWatch ? null : pmSession);
+  }
+  function applyCards(list) {
+    var seen = Object.create(null);
+    var order = [];
+    var index;
+    for (index = 0; index < list.length; index += 1) {
+      var card = list[index];
+      seen[card.id] = true;
+      order.push(card.id);
+      var entry = cards[card.id] || makeCard(card.id, index);
+      var signature = signatureOf(card);
+      if (entry.signature === signature) { continue; }
+      patchCard(entry, card);
+      entry.signature = signature;
+    }
+    Object.keys(cards).forEach(function (id) {
+      if (!seen[id]) {
+        cards[id].node.remove();
+        delete cards[id];
+      }
+    });
+    // 只挪位置不对的节点：挪已有节点不会重建，滚动位置与展开状态都不丢
+    for (index = 0; index < order.length; index += 1) {
+      var node = cards[order[index]].node;
+      if (board.children[index] !== node) {
+        board.insertBefore(node, board.children[index] || null);
+      }
+    }
+    empty.hidden = order.length > 0;
+  }
+  function applyDone(rows, total) {
+    var seen = Object.create(null);
+    var order = [];
+    var index;
+    for (index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      seen[row.id] = true;
+      order.push(row.id);
+      var entry = doneRows[row.id];
+      if (!entry) {
+        entry = { node: doneTemplate.content.firstElementChild.cloneNode(true), signature: null };
+        entry.node.setAttribute('data-id', row.id);
+        doneRows[row.id] = entry;
+      }
+      if (entry.signature === row.text) { continue; }
+      entry.node.querySelector('[data-f="done-text"]').textContent = row.text;
+      entry.signature = row.text;
+    }
+    Object.keys(doneRows).forEach(function (id) {
+      if (!seen[id]) {
+        doneRows[id].node.remove();
+        delete doneRows[id];
+      }
+    });
+    for (index = 0; index < order.length; index += 1) {
+      var node = doneRows[order[index]].node;
+      if (doneList.children[index] !== node) {
+        doneList.insertBefore(node, doneList.children[index] || null);
+      }
+    }
+    doneSummary.textContent = total > rows.length
+      ? '已完成 ' + total + ' 张 · 这里是最新的 ' + rows.length + ' 张'
+      : '已完成 ' + total + ' 张';
+  }
+  // PRD §4.12 / §4.15：会话小卡只补变化的节点，不整块重建（滚动位置与展开状态不丢）
+  function applySessions(store, list, box, headNode, headText, rows, total) {
+    var seen = Object.create(null);
+    var order = [];
+    var index;
+    for (index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      seen[row.id] = true;
+      order.push(row.id);
+      var entry = store[row.id];
+      if (!entry) {
+        entry = { node: sessionTemplate.content.firstElementChild.cloneNode(true), signature: null };
+        entry.node.setAttribute('data-id', row.id);
+        // 新会话卡也走同一套进场：只在新节点上挂一次，轮询不重播
+        markEntering(entry.node, index);
+        store[row.id] = entry;
+      }
+      var signature = [row.state || '', row.state_label || '', row.kind, row.kind_label, row.title,
+        row.dir_tail || row.working_dir || '', row.elapsed_text || '', row.reason || '',
+        row.session_id || '', row.id].join('\u0001');
+      if (entry.signature === signature) { continue; }
+      // PRD §4.21：会话卡只留两行——状态点+标题；状态名+目录最后一段+已等/已跑；整张卡可点
+      entry.node.setAttribute('data-kind', row.state || (row.running ? 'running' : 'suspect'));
+      entry.node.querySelector('[data-f="s-title"]').textContent = row.title;
+      // 同一区域里既有在跑也有等你的，每张卡自己写清是哪一种
+      entry.node.querySelector('[data-f="s-state"]').textContent = row.state_label || '';
+      entry.node.querySelector('[data-f="s-dir"]').textContent =
+        row.dir_tail || row.working_dir || '未记录目录';
+      entry.node.querySelector('[data-f="s-elapsed-label"]').textContent =
+        row.state === 'waiting' ? '已等' : '已跑';
+      entry.node.querySelector('[data-f="s-elapsed"]').textContent = row.elapsed_text || '未知';
+      // 悬停才说角色与原因（推断）；可见文字只有两行
+      var hover = [row.kind_label, row.reason].filter(function (part) { return !!part; }).join(' · ');
+      setTitle(entry.node, hover);
+      setTitle(entry.node.querySelector('[data-f="s-title"]'), row.title);
+      if (row.session_id) {
+        entry.node.setAttribute('href', 'cindy://session/' + row.session_id);
+        entry.node.classList.remove('off');
+      } else {
+        entry.node.removeAttribute('href');
+        entry.node.classList.add('off');
+      }
+      entry.signature = signature;
+    }
+    Object.keys(store).forEach(function (id) {
+      if (!seen[id]) {
+        store[id].node.remove();
+        delete store[id];
+      }
+    });
+    for (index = 0; index < order.length; index += 1) {
+      var node = store[order[index]].node;
+      if (list.children[index] !== node) {
+        list.insertBefore(node, list.children[index] || null);
+      }
+    }
+    box.hidden = order.length === 0;
+    if (order.length > 0) {
+      // PRD §4.15：会话区的标题要让人一眼看出「等你说几个、在跑几个」
+      var waiting = 0;
+      var running = 0;
+      for (index = 0; index < rows.length; index += 1) {
+        if (rows[index].state === 'waiting') { waiting += 1; }
+        else if (rows[index].state === 'running') { running += 1; }
+      }
+      var detail = [];
+      if (waiting) { detail.push('等你说 ' + waiting); }
+      if (running) { detail.push('在跑 ' + running); }
+      headNode.textContent = headText + ' · ' + order.length + ' 个'
+        + (detail.length ? '（' + detail.join(' · ') + '）' : '')
+        + (total && total > order.length ? '（共 ' + total + ' 个）' : '');
+    }
+  }
+  function applyOverview(data) {
+    var text = JSON.stringify(data);
+    if (text === lastBytes) { return data; }
+    lastBytes = text;
+    var center = data.sources.center;
+    var cindy = data.sources.cindy;
+    sources.textContent = '中心库 ' + center.path
+      + (center.ok ? '' : '（读不到：' + center.error + '）')
+      + (center.schema === null || center.schema === undefined ? '' : '（schema ' + center.schema + '）')
+      + ' · 读取于 ' + center.read_clock
+      + ' ｜ Cindy 主库 ' + (cindy.name || '未找到 cindy-*.db')
+      + ' · mtime ' + cindy.mtime_text
+      + (cindy.ok ? '' : ' · 读不到：' + cindy.error)
+      + ' ｜ 生成于 ' + data.generated_clock;
+    issues.hidden = data.issues.length === 0;
+    issues.textContent = data.issues.join('；');
+    setCounts(data.summary);
+    applyCards(data.tickets);
+    applyDone(data.done, data.done_total);
+    // PRD §4.15：会话区只有一块，等你的与在跑的同一网格；不再有页脚那段「像卡住了」
+    applySessions(sessionRows, sessionList, sessionBox, sessionHead,
+      '会话 · 在跑与等你的（等你的在前；悬着的是推断，不是结论）',
+      data.orphan_sessions || []);
+    applySessions(suspectRows, suspectList, suspectBox, suspectHead,
+      '状态可疑（字段说有活轮，但判据不过，不当成在跑）', data.suspect_sessions || [],
+      data.suspect_total || 0);
+    return data;
+  }
+  function schedule() {
+    timer = setTimeout(poll, POLL_MS);
+  }
+  function poll() {
+    clearTimeout(timer);
+    if (!token) { return; }
+    var started = performance.now();
+    fetch('/api/overview', { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } })
+      .then(function (response) {
+        if (response.status === 401) { throw { unauthorized: true }; }
+        if (!response.ok) { throw new Error('HTTP ' + response.status); }
+        return response.json();
+      })
+      .then(function (data) {
+        hideGate();
+        applyOverview(data);
+        setLive(true, performance.now() - started);
+        schedule();
+      })
+      .catch(function (error) {
+        if (error && error.unauthorized) {
+          token = '';
+          try { localStorage.removeItem(TOKEN_KEY); } catch (ignored) {}
+          showGate('token 不对，请重新粘贴');
+        }
+        // 失败时不清空、不重建：旧数据留在 DOM 里，顶部只说连接断开
+        setLive(false);
+        schedule();
+      });
+  }
+  gateForm.addEventListener('submit', function (event) {
+    event.preventDefault();
+    token = gateInput.value.trim();
+    if (!token) {
+      gateError.textContent = 'token 不能为空';
+      return;
+    }
+    try { localStorage.setItem(TOKEN_KEY, token); } catch (ignored) {}
+    hideGate();
+    poll();
+  });
+  document.getElementById('refresh').addEventListener('click', function () {
+    if (token) { poll(); } else { showGate(''); }
+  });
+  try { token = localStorage.getItem(TOKEN_KEY) || ''; } catch (ignored) { token = ''; }
+  if (token) { poll(); } else { showGate(''); }
+  // 无浏览器的测试从这里驱动：轮询、应用数据与状态行都是同一个函数
+  window.__live = { poll: poll, applyOverview: applyOverview, setLive: setLive, cards: cards };
+})();
+</script>
+</body>
+</html>

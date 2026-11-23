@@ -1,6 +1,23 @@
 # 更新记录
 
-## 未发布（AWK-104：装完 run_tests 必须真绿）
+## 0.5.0（2026-11-23）
+
+2026-11-23 发布。把 Windows 常驻浮窗面板并进套件（`panel/`），连同此前累计四段还没发出去的成果一起发出去；闸门判定、工单核心的状态机与面板的判据一行未改。
+
+### 浮窗面板并入套件（Windows 常驻浮窗，420×700）
+
+把已经在 `cindy-dashboard` 里跑起来的桌面浮窗搬进套件，作为 `panel/` 的一部分；判据、配色、版式与用例期望一行未改，只把本机路径换成占位符、把安装与自检接上。
+
+- 新增 `panel/`：`app/`（`main` / `feed` / `resolve` / `host` / `sessions` / `hit` / `window-math` / `probe` 八个 `.mjs` 加 `preload.cjs`、清单与 `package-lock.json`、`tray.png`、七个 `node:test` 用例）、`tools/`（只读取数层、只读服务、导出、留白探针与两个 `verify-*.mjs`）、`docs/样张/`（`sample.html`、`对照.md`、四张 420×700 PNG）、`tests/fixtures/`（黄金对照的两份夹具）与**改写过的** `README.md`。不带 `node_modules/`、`dashboard.html`（生成物）、`docs/evidence/`、`docs/CD-*.md`，也不带面板仓库自己的 Python 用例。
+- 本机绝对路径一律换占位符：导出物默认落 `<工作区>/.data/progress-export.json`、样张里的样例项目根写成 `<工作区>/panel`、会话库默认目录改成读 `APPDATA`（不写死某台机器的用户名）。`app/test/` 里那几条路径断言改成拿同一个常量比对，源码树（占位符还在）与装出来的工作区（已换成真实路径）两种布局下都成立——期望值一个没动。
+- `install.py`：`TEXT_SUFFIXES` 补 `.mjs` / `.cjs` / `.html`——不补的话，装完的 `main.mjs` 会拿着一串没替换的占位符去读导出物，样张里也全是占位符；新增 `copy_panel()` 与「附：把浮窗面板装到 `<工作区>/panel`」一步（编号不动，接在 `7/7` 之后，与「附：为其他 agent 建技能链接」同一个写法）。center DB 发现那一段一行未动。
+- `verify/verify_install.py`：新增两项检查——`panel 已装到工作区`、`panel 占位已换成真实路径`（后者既要没有残留占位符，也要 `main.mjs` 里真的有那个临时工作区的路径，不能只证明「没留下什么」）。顺手把两处长期没跟着技能增减改的计数从 6 / 26 改成 7 / 27：这两条在 master 上本来就是红的，红的原因不是这次改动。
+- 新增 `tools/pack_plugin.py`：宿主没有「打 `.cindy`」的现成能力，所以补一条可重复的打包命令——条目按名字排序、时间戳固定（同一份源码两次打出来的字节相同），写完立刻重新拆开读一遍（包根有清单、入口非空、图标是真 PNG），验过才删旧包，失败时 `dist/` 里留着的仍是上一个能装的包。
+- 面板的跑法多一个入口：node v24 把 `--test` 的目录形参当模块解析（`node --test app/test` 直接 `Cannot find module`，退出 1）。新增 `app/run-tests.mjs` 与 `app/test/package.json`（`main` 指向它）让目录形参有落点；入口放在 `app/` 而不是 `app/test/`，否则默认发现规则会把它当第八个测试文件、把七份跑成两份。77 项用例照旧。
+- `README.md` / `README.en.md` / `plugin/README.md` 同步版本、用例数与包名，并各加一节「浮窗面板」（写明要 Node 18+ 与 `npm install electron` 才能跑）；`kit/PRD/PRD-010` 头部把「实施在外部目录」改成套件内的 `panel/`（版本 0.2）；新增 `kit/PRD/PRD-016-Windows常驻浮窗.md`，把面板仓库那份浮窗规格按套件视角模板化（版本 0.1）。
+- `maintainer/redact_for_public.py`：发布前脱敏这条在 master 上本来就是红的（3 个文件残留），原因不是真漏了本机信息——它把夹具里的**人造** UUID（`aaaaaaaa-1111-4111-8111-…`）也当成真实会话 id 替换，而 `kit/tools/test_idle_watch.py` 的夹具同时造三条会话，全换成 `<session-id>` 就撞 `sessions.id` 的唯一约束、整组用例直接 ERROR（这单真跑过一次）；另一处命中的是没被解析的环境变量 `%USERPROFILE%`，不是某一台机器的用户名。改两条判据：夹具模块（`tests/test_*.py`、`tools/test_*.py`）跳过 UUID 那条规则，真名那条（`C:/Users/` 下带用户名的路径）一个字没放宽；`%USERPROFILE%` 不再算残留。`kit/tools/` 下的文件一个没动，现在 `--check` 无残留。
+
+### 装完 run_tests 必须真绿（AWK-104）
 
 修掉「陌生人装完跑 `python tools/run_tests.py` 出 10 个 FAIL」：README 写着「应全绿」，装出来的现场却红。两处都是用例假设了源码布局，不是套件内容缺东西。
 
@@ -10,7 +27,7 @@
 - `README.md` / `README.en.md`：用例数 724 → 725（`tests/` 303 + `tools/` 422），并把「应全绿」写成实测过的现场命令（临时工作区 + `--agents-home`，装完再跑 `run_tests.py` 与 `verify_receipt.py`）。
 - 验证：在全新 HOME + 全新工作区里真装一遍再跑，`汇总：tests/ 303 OK；tools/ 422 OK  | 合计 725 项` / `结果：全部通过`（装前同一现场是 `tools/ 421 FAIL(10)`）。
 
-## 未发布（AWK-103：引擎同步到 schema 16）
+### 引擎同步到 schema 16（AWK-103）
 
 把 `kit/task_center` 从 schema 13 推到工作区（`D:/AI工作区`）当前的 16：套件自带脚本读同一个中心库不再报 `SCHEMA_MISMATCH`。只同步引擎与配套文档，不改业务判断规则，也不动工作区的库与历史数据（`D:/AI工作区` 一直是只读对象）。
 
@@ -26,7 +43,7 @@
 - `D:/AI工作区/.data/task-center.sqlite3` 全程只读：`python kit/tools/work_gate.py --list --db <那个库>` 退出 0、不报 `SCHEMA_MISMATCH`，跑前跑后文件 `md5` 不变，也没有做快照。
 - 已知差异：`MIGRATIONS` 的键位与工作区差一格（见上），以后逐级同步时先看 `migration_step()` 的注释，别按工作区的键号直接抄。
 
-## 未发布（AWK-102：文档与工具剩余增量）
+### 文档与工具剩余增量（AWK-102）
 
 把工作区剩下的文档与工具搬进套件，并修掉两处「该报警却没报」的盲点。判据一律以工作区为准，搬过来时把本机路径换成 `{{WORKSPACE}}`，没有反过来改工作区。
 
@@ -39,7 +56,7 @@
 - 用例：`tools/test_idle_watch.py`（34）、`tools/test_project_doctor.py`（6）、`tools/test_wait_audit.py`（30，含新的 `AwaitingReceiptTest` 与退出码用例）、`tools/test_auto_merge.py` 的 `SchemaGateTest`（13）。两处合计 590 → 673 项（`tests/` 252 + `tools/` 421）。新增行为都先写过会失败的用例：`wait_audit` 的十条一次跑红，schema 闸门的十三条在改前的 `auto_merge.py` 上全部报错。
 - 技能的比对口径（判据 v2）：把工作区那份里的 `/d/AI工作区` 与 `D:/AI工作区` 同样替换成 `{{WORKSPACE}}` 之后，四个 `SKILL.md` 的 `sha256` 与套件逐条相同（`/d/AI工作区` 那种形态也一起替换，所以四份都是 SAME）。未替换时 `ticket-dispatch/SKILL.md` 只差第 23 行那一处路径，其余三份本来就逐字节相同。`skills/workspace/skill-routing/scripts/check_routing.py` 在本机退出 1，报的三条都是本机 `~/.agents/skills` 里后装、本单未处置的 skill（`cangjie-skill` / `impeccable` / `reverse-engineer-anything`）——同一个脚本在 `D:/AI工作区` 上退出码与报错完全相同。分得清的判据是「输出里不出现 `missing-skill` / `unknown-skill` / `missing-owner` / `unknown-node` / N0x 缺号」：实测 0 条。
 
-## 未发布（AWK-101：引擎同步到 schema 13）
+### 引擎同步到 schema 13（AWK-101）
 
 把 `kit/task_center` 与 `kit/tools` 同步到工作区（`D:/AI工作区`）当前状态。本单只同步引擎，不改业务判断规则：两边不一致时一律改套件去就工作区的判据，一处也没有反过来改工作区。
 

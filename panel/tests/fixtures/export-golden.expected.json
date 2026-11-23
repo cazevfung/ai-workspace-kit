@@ -1,0 +1,423 @@
+{
+  "generatedAt": "2026-11-20T20:00:00+08:00",
+  "generatedClock": "20:00:00",
+  "schemaVersion": 3,
+  "projects": [
+    {
+      "name": "项目甲",
+      "total": 7,
+      "review": 2,
+      "needsYou": 1,
+      "root": "D:/redacted/项目甲",
+      "tasks": [
+        {
+          "key": "s-rv",
+          "name": "任务甲二",
+          "tickets": [
+            {
+              "id": "R-1",
+              "title": "R-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "current",
+                "next"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-rv",
+              "note": "",
+              "show": true
+            },
+            {
+              "id": "R-2",
+              "title": "R-2 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "current",
+                "next"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-rv",
+              "note": "",
+              "show": true
+            }
+          ],
+          "shown": 2
+        },
+        {
+          "key": "s-ny",
+          "name": "任务甲一",
+          "tickets": [
+            {
+              "id": "N-1",
+              "title": "N-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "current",
+                "todo",
+                "todo"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-ny",
+              "note": "",
+              "show": true
+            }
+          ],
+          "shown": 1
+        },
+        {
+          "key": "s-run",
+          "name": "任务甲三",
+          "tickets": [
+            {
+              "id": "U-1",
+              "title": "U-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "current",
+                "todo",
+                "todo"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-run",
+              "note": "",
+              "show": true
+            },
+            {
+              "id": "U-2",
+              "title": "U-2 的标题",
+              "steps": [
+                "done",
+                "done",
+                "current",
+                "todo",
+                "todo"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-run",
+              "note": "",
+              "show": true
+            }
+          ],
+          "shown": 2
+        }
+      ],
+      "shownTasks": 3,
+      "pool": [
+        {
+          "id": "P-1",
+          "title": "P-1 的标题",
+          "steps": [
+            "current",
+            "todo",
+            "todo",
+            "todo",
+            "todo"
+          ],
+          "resolve": true,
+          "arrow": false,
+          "sessionId": "",
+          "note": ""
+        },
+        {
+          "id": "P-3",
+          "title": "P-3 的标题",
+          "steps": [
+            "current",
+            "todo",
+            "todo",
+            "todo",
+            "todo"
+          ],
+          "resolve": true,
+          "arrow": false,
+          "sessionId": "",
+          "note": ""
+        }
+      ],
+      "shownPool": 2
+    },
+    {
+      "name": "项目乙",
+      "total": 3,
+      "review": 0,
+      "needsYou": 0,
+      "root": "",
+      "tasks": [
+        {
+          "key": "s-um",
+          "name": "任务乙二",
+          "tickets": [
+            {
+              "id": "M-1",
+              "title": "M-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "current"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-um",
+              "note": "",
+              "show": true
+            }
+          ],
+          "shown": 1
+        },
+        {
+          "key": "s-q",
+          "name": "任务乙一",
+          "tickets": [
+            {
+              "id": "Q-1",
+              "title": "Q-1 的标题",
+              "steps": [
+                "current",
+                "todo",
+                "todo",
+                "todo",
+                "todo"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-q",
+              "note": "",
+              "show": true
+            }
+          ],
+          "shown": 1
+        }
+      ],
+      "shownTasks": 2,
+      "pool": [
+        {
+          "id": "P-2",
+          "title": "P-2 的标题",
+          "steps": [
+            "current",
+            "todo",
+            "todo",
+            "todo",
+            "todo"
+          ],
+          "resolve": true,
+          "arrow": true,
+          "sessionId": "s-p2",
+          "note": ""
+        }
+      ],
+      "shownPool": 1
+    },
+    {
+      "name": "项目丙",
+      "total": 7,
+      "review": 0,
+      "needsYou": 0,
+      "root": "",
+      "tasks": [
+        {
+          "key": "s-mu",
+          "name": "任务丙一",
+          "tickets": [
+            {
+              "id": "L-1",
+              "title": "L-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "unlanded"
+              ],
+              "resolve": true,
+              "arrow": true,
+              "sessionId": "s-mu",
+              "note": "库里记了合并，但那个提交不在 master 里",
+              "show": true
+            }
+          ],
+          "shown": 1
+        },
+        {
+          "key": "s-md",
+          "name": "任务丙二",
+          "tickets": [
+            {
+              "id": "K-1",
+              "title": "K-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "landed"
+              ],
+              "resolve": false,
+              "arrow": true,
+              "sessionId": "s-md",
+              "note": "已在 master 里，但库里没有合并记录",
+              "show": true
+            },
+            {
+              "id": "K-2",
+              "title": "K-2 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "landed"
+              ],
+              "resolve": false,
+              "arrow": true,
+              "sessionId": "s-md",
+              "note": "已在 master 里，但库里没有合并记录",
+              "show": false
+            }
+          ],
+          "shown": 1
+        },
+        {
+          "key": "task-2",
+          "name": "",
+          "tickets": [
+            {
+              "id": "H-4",
+              "title": "H-4 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "done"
+              ],
+              "resolve": false,
+              "arrow": false,
+              "sessionId": "",
+              "note": "",
+              "show": true
+            },
+            {
+              "id": "H-1",
+              "title": "H-1 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "done"
+              ],
+              "resolve": false,
+              "arrow": false,
+              "sessionId": "",
+              "note": "",
+              "show": false
+            },
+            {
+              "id": "H-2",
+              "title": "H-2 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "done"
+              ],
+              "resolve": false,
+              "arrow": false,
+              "sessionId": "",
+              "note": "",
+              "show": false
+            },
+            {
+              "id": "H-3",
+              "title": "H-3 的标题",
+              "steps": [
+                "done",
+                "done",
+                "done",
+                "done",
+                "done"
+              ],
+              "resolve": false,
+              "arrow": false,
+              "sessionId": "",
+              "note": "",
+              "show": false
+            }
+          ],
+          "shown": 1
+        }
+      ],
+      "shownTasks": 3,
+      "pool": [],
+      "shownPool": 0
+    }
+  ],
+  "cancelled": [
+    {
+      "id": "X-1",
+      "title": "取消掉的单甲",
+      "project": "项目甲",
+      "cancelledAt": "2026-11-20T12:00:00+08:00",
+      "steps": [
+        "todo",
+        "todo",
+        "todo",
+        "todo",
+        "todo"
+      ],
+      "resolve": false,
+      "arrow": true,
+      "sessionId": "s-x1",
+      "note": "项目甲 · 取消 11-20"
+    },
+    {
+      "id": "X-2",
+      "title": "取消掉的单乙",
+      "project": "",
+      "cancelledAt": "",
+      "steps": [
+        "todo",
+        "todo",
+        "todo",
+        "todo",
+        "todo"
+      ],
+      "resolve": false,
+      "arrow": false,
+      "sessionId": "",
+      "note": ""
+    },
+    {
+      "id": "X-3",
+      "title": "取消掉的单丙",
+      "project": "项目乙",
+      "cancelledAt": "2026-11-19T08:30:00+08:00",
+      "steps": [
+        "todo",
+        "todo",
+        "todo",
+        "todo",
+        "todo"
+      ],
+      "resolve": false,
+      "arrow": false,
+      "sessionId": "",
+      "note": "项目乙 · 取消 11-19"
+    }
+  ]
+}

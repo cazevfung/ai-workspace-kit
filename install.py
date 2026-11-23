@@ -24,6 +24,7 @@
   5. <agents-home>/intake/（交接协议，供别的项目的会话读取）
   6. 中心库初始化 + 登记本工作区项目
   7. git 仓库 + 提交闸门（先做首次提交，再启用钩子，避免自己拦自己）
+  8. 浮窗面板 → <工作区>/panel（正文里的占位符换成真实路径；要 Node 18+ 与 npm install electron 才能跑）
 
 退出码：0 成功；1 有步骤失败；2 用法或环境不满足。
 """
@@ -43,7 +44,10 @@ SKILLS = HERE / "skills"
 VERSION = (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").is_file() else "0.0.0"
 PROJECT_ID = "ai-workspace"
 PROJECT_NAME = "AI 工作区"
-TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
+# `.mjs` / `.cjs` / `.html` 是浮窗面板的正文后缀：它们里面有工作区占位符，
+# 不在这张表里就会被原样复制，装出来的 main.mjs 读不到导出物、样张里全是占位符。
+TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml", ".cfg", ".ini",
+                 ".yml", ".yaml", ".mjs", ".cjs", ".html"}
 
 # 装进工作区 verify/ 的校验脚本：只装「拿一个工作区路径当参数就能跑」的那一个。
 # `verify_install.py` / `verify_onboard.py` 要调仓库根的 install.py / uninstall.py，
@@ -51,6 +55,8 @@ TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml"
 # 脚本——装了个跑不起来的壳，比没装更难查。所以只复制 RECEIPT 这一个。
 VERIFY = HERE / "verify"
 WORKSPACE_VERIFIERS = ("verify_receipt.py",)
+# 浮窗面板：整棵子树原样装到 <工作区>/panel，正文里的占位符按工作区替换。
+PANEL = HERE / "panel"
 
 WORKSPACE_SKILLS = sorted(p.name for p in (SKILLS / "workspace").iterdir() if (p / "SKILL.md").is_file())
 GENERIC_SKILLS = sorted(p.name for p in (SKILLS / "generic").iterdir() if (p / "SKILL.md").is_file())
@@ -215,6 +221,22 @@ def copy_workspace_verifiers(workspace: Path, workspace_str: str, dry: bool) -> 
     return installed
 
 
+def copy_panel(workspace: Path, workspace_str: str, dry: bool) -> int:
+    """把浮窗面板装到 <工作区>/panel，返回复制的文件数。
+
+    `copy_tree` 已经会跳过 `__pycache__` / `.pyc` 并替换文本里的占位符——面板的
+    `.mjs` / `.cjs` / `.html` 靠 `TEXT_SUFFIXES` 那三个后缀进这条路径，否则装出来
+    的 `main.mjs` 会拿着一串没替换的占位符去读导出物。
+
+    面板不在 `kit/` 里：它是独立的 Electron 子树（`app/` + `tools/` + 样张），装进
+    工作区后仍保持同一层结构，`app/main.mjs` 才能按相对位置找到 `docs/样张/sample.html`。
+    """
+    if not PANEL.is_dir():
+        return 0
+    return copy_tree(PANEL, workspace / "panel", workspace_str, dry)
+
+
+
 def init_center(workspace: Path, dry: bool) -> bool:
     db = workspace / ".data" / "task-center.sqlite3"
     if dry:
@@ -376,6 +398,16 @@ def main(argv=None) -> int:
         subprocess.run(["git", "-C", str(workspace), "config", "core.hooksPath", ".githooks"],
                        capture_output=True, check=False)
         say("   已启用：没工单的改动无法提交（这是默认安全路径，可显式关闭）")
+
+    step("附：把浮窗面板装到 <工作区>/panel")
+    if dry:
+        say("   预演：复制 panel/（占位符换成真实路径）")
+    else:
+        panel_files = copy_panel(workspace, workspace_str, dry)
+        if panel_files:
+            say(f"   已复制 {panel_files} 个文件：panel/（浮窗要 Node 18+ 与 npm install electron）")
+        else:
+            warn("没有找到 panel/；跳过浮窗面板（其余部分照常可用）")
 
     if args.link_agents and not args.no_skills:
         step("附：为其他 agent 建技能链接")

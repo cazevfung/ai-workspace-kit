@@ -2,7 +2,7 @@
 
 `draft/` 是一份可安装的 Cindy 插件源码：`ghost.json` 是 `schemaVersion: 3`，`main.js` 暴露两个工具，
 `locales/` 提供中英文案，`assets/icon.png` 是 1024×1024 的方形图标（由 Cindy 的图片能力生成一次，
-不是占位色块）。打好的包在仓库根的 `dist/ai-workspace-kit-0.4.0.cindy`。
+不是占位色块）。打好的包在仓库根的 `dist/ai-workspace-kit-0.5.0.cindy`。
 
 它仍然**不是主渠道**——插件运行在沙箱里，改不了用户主目录、`git config core.hooksPath` 与
 `~/.agents/skills`，完整工作区只能由仓库里的 `install.py` 装。
@@ -23,7 +23,7 @@
 
 ## 装插件 → 启动 → 它报出五步计划
 
-1. **装。** 在 Cindy 侧边栏「插件」里导入本地包，选中 `dist/ai-workspace-kit-0.4.0.cindy`，确认权限清单。
+1. **装。** 在 Cindy 侧边栏「插件」里导入本地包，选中 `dist/ai-workspace-kit-0.5.0.cindy`，确认权限清单。
    **这一步必须由人在客户端点确认**：导入会写进用户插件目录并启用，Agent 不代点，也不该在你没看权限
    清单时替你点。装上是本地开发副本（`namespace: local`），不经过市场审核。
 2. **启动。** 在任意会话里敲 `$ai-workspace <工作区绝对路径>`，或者直接说「把这条路径加成项目、开一个
