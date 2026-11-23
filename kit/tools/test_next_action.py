@@ -22,6 +22,7 @@ import datetime
 import io
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -546,6 +547,278 @@ class MergeTest(Fixture):
         result = json.loads(out)
         self.assertEqual(result["reason_code"], "needs_human")
         self.assertIn("AW-934", " ".join(result["stop"]))
+
+
+class MergeCriteriaTest(Fixture):
+    """AWK-114：合并候选与 `auto_merge --list` 用同一套口径。
+
+    工单说的矛盾现场是：单已经 `done`、`merges` 里没有行，`auto_merge --list` 把它
+    列进「真待合并」，而 `next_action` 照旧报 `dispatch_execute`。根因不是顺序，是
+    判据少了一层——`next_action` 只认 `submissions.head_sha` 这一个事实，既没读
+    历史豁免清单，也没看 `ticket/<单号>` 分支在不在。
+
+    所以这里的用例按「事实」造，不按实现造：有分支头的、有分支没分支头的、
+    在豁免清单里的、真历史直做的，各一条。最后一条把两个工具的输出直接对一遍。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.exemptions = self.root / "docs" / "unmerged-exemptions.json"
+
+    # ---- 临时仓库与豁免清单
+
+    def git(self, *args):
+        proc = subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def init_repo(self):
+        """把项目根做成一个真仓库：分支在不在这件事只能问 git，造不出来就判不了。"""
+        self.git("init", "-q", "-b", "master")
+        self.git("-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "commit", "-q", "--allow-empty", "-m", "base")
+
+    def merged_ticket_branch(self, ticket_id):
+        """建一条已经合进 master 的 `ticket/<单号>` 分支，返回它的 tip。
+
+        这就是 C2 的「分支已合入」现场：合并发生了，`merges` 里没有行。
+        """
+        branch = f"ticket/{ticket_id}"
+        self.git("checkout", "-q", "-b", branch)
+        self.git("-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "commit", "-q", "--allow-empty", "-m", f"{ticket_id} 的成果")
+        tip = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "master")
+        self.git("-c", "user.email=t@example.com", "-c", "user.name=t",
+                 "merge", "-q", "--no-ff", branch, "-m", f"Merge {branch}")
+        return tip
+
+    def write_exemptions(self, ticket_ids):
+        """照 `tools/backfill_merges.py --apply` 写出来的形状写一份清单。"""
+        self.exemptions.parent.mkdir(parents=True, exist_ok=True)
+        self.exemptions.write_text(json.dumps({
+            "generated_at": "2026-11-23T00:00:00+00:00",
+            "target_branch": "master",
+            "entries": [{"ticket_id": ticket_id, "project_id": PROJECT,
+                         "reason": "no_head_sha", "reason_text": "最新提交没有 head_sha"}
+                        for ticket_id in ticket_ids],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def done_ticket(self, ticket_id, head_sha=SHA, created_day=19):
+        self.add_ticket(ticket_id, state="done", created_day=created_day)
+        self.add_attempt(ticket_id, f"a-{ticket_id}", state="accepted")
+        self.add_submission(f"a-{ticket_id}", f"sub-{ticket_id}",
+                            head_sha=head_sha, created_day=created_day)
+        self.add_notice(ticket_id)
+
+    # ---- C2 / C3：命中就报 merge，补上记录就不再报
+
+    def test_done_without_merge_record_is_merge_not_dispatch_execute(self):
+        """C2：分支已合入、`merges` 里没有行，池子里另有可领单时也不许派新单。"""
+        self.init_repo()
+        tip = self.merged_ticket_branch("AW-961")
+        self.done_ticket("AW-961", head_sha=tip)
+        self.add_ticket("AW-962", state="planned", created_day=20)
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.MERGE)
+        self.assertEqual(result["reason_code"], "done_not_merged")
+        self.assertEqual(result["dispatch"]["ticket_id"], "AW-961")
+        self.assertEqual(result["candidates"][next_action.MERGE], ["AW-961"])
+        self.assertIn("AW-961", result["human"])
+        self.assertEqual(result["candidates"][next_action.DISPATCH_EXECUTE], ["AW-962"])
+
+    def test_merge_record_clears_the_candidate(self):
+        """C3：补上 `merges` 行之后不再报 merge，池子里的单这才该派出去。"""
+        self.init_repo()
+        tip = self.merged_ticket_branch("AW-963")
+        self.done_ticket("AW-963", head_sha=tip)
+        self.add_ticket("AW-964", state="planned", created_day=20)
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(json.loads(out)["action"], next_action.MERGE)
+
+        self.add_merge("AW-963")
+        code, out, _ = self.run_main("--json")
+        result = json.loads(out)
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["action"], next_action.DISPATCH_EXECUTE)
+        self.assertEqual(result["candidates"][next_action.MERGE], [])
+        self.assertNotIn("AW-963", result["human"])
+
+    # ---- 与 auto_merge --list 对齐的两条边界
+
+    def test_ticket_branch_without_reviewed_sha_is_still_a_merge_candidate(self):
+        """提交里没有分支头、但 `ticket/<单号>` 分支还在：`auto_merge --list` 算真待合并。"""
+        self.init_repo()
+        self.done_ticket("AW-965", head_sha=None)
+        self.git("branch", "ticket/AW-965")
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.MERGE)
+        self.assertEqual(result["dispatch"]["ticket_id"], "AW-965")
+        self.assertIsNone(result["dispatch"]["head_sha"])
+        self.assertIn("unverified", " ".join(result["stop"]))
+
+    def test_historical_direct_ticket_is_not_a_merge_candidate(self):
+        """C4：done、无合并记录、提交没分支头、也没有 `ticket/<单号>` 分支 = 历史直做。"""
+        self.init_repo()
+        self.done_ticket("AW-966", head_sha=None)
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["candidates"][next_action.MERGE], [])
+        self.assertEqual(result["skipped"][0]["reason"], next_action.SKIP_NO_BRANCH_HEAD)
+        self.assertEqual(result["skipped"][0]["ticket_ids"], ["AW-966"])
+
+    def test_exempted_ticket_is_not_a_merge_candidate(self):
+        """C4：已在 `docs/unmerged-exemptions.json` 里 → 不算待合并（与分栏口径一致）。"""
+        self.init_repo()
+        self.done_ticket("AW-967", head_sha=None)
+        self.write_exemptions(["AW-967"])
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["candidates"][next_action.MERGE], [])
+        self.assertEqual(result["skipped"][0]["reason"], next_action.SKIP_EXEMPTED)
+        self.assertEqual(result["skipped"][0]["ticket_ids"], ["AW-967"])
+
+    def test_exempted_ticket_with_a_contributing_branch_is_still_exempt(self):
+        """清单先于分支：豁免单就算分支还躺着，`auto_merge --list` 也不把它算真待合并。"""
+        self.init_repo()
+        self.done_ticket("AW-968", head_sha=None)
+        self.git("branch", "ticket/AW-968")
+        self.write_exemptions(["AW-968"])
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["skipped"][0]["reason"], next_action.SKIP_EXEMPTED)
+
+    # ---- 交叉用例：两个工具对同一现场给同一份清单
+
+    def test_list_and_next_action_agree_on_real_pending(self):
+        """`auto_merge --list` 的「真待合并」与 `next_action` 的 `merge` 候选逐字相等。"""
+        import auto_merge
+
+        self.init_repo()
+        tip = self.merged_ticket_branch("AW-969")
+        self.done_ticket("AW-969", head_sha=tip)
+        self.done_ticket("AW-970", head_sha=None, created_day=18)
+        self.git("branch", "ticket/AW-970")
+        self.done_ticket("AW-971", head_sha=None, created_day=17)
+        self.write_exemptions(["AW-971"])
+        self.conn.commit()
+
+        real_column, exempt_column = _list_columns(
+            auto_merge, _FakeCenter(self.conn), self.exemptions)
+        result = next_action.scan(
+            self.conn, PROJECT, pause_path=self.pause, cwd=self.root
+        )
+        self.assertEqual(sorted(real_column), ["AW-969", "AW-970"])
+        # 连顺序也要一样：两张待合并的单按 `created_at` 排，两件工具各排一次就会分歧。
+        self.assertEqual(result["candidates"][next_action.MERGE], real_column)
+        self.assertEqual(exempt_column, ["AW-971"])
+        self.assertEqual(result["skipped"][0]["reason"], next_action.SKIP_EXEMPTED)
+        self.assertEqual(result["skipped"][0]["ticket_ids"], exempt_column)
+
+    def test_unexempted_ticket_without_branch_names_the_stale_snapshot(self):
+        """清单快照旧了的那一档：`auto_merge` 仍把它列进真待合并，`next_action`
+        不派动作，但把「快照该刷新了」写在 `skipped` 里——两边都不隐去它。"""
+        import auto_merge
+
+        self.init_repo()
+        self.done_ticket("AW-972", head_sha=None)
+        self.write_exemptions([])
+        self.conn.commit()
+
+        real_column, _ = _list_columns(
+            auto_merge, _FakeCenter(self.conn), self.exemptions)
+        self.assertEqual(real_column, ["AW-972"])
+
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["candidates"][next_action.MERGE], [])
+        skipped = result["skipped"][0]
+        self.assertEqual(skipped["reason"], next_action.SKIP_NO_BRANCH_HEAD)
+        self.assertEqual(skipped["ticket_ids"], ["AW-972"])
+        self.assertIn("backfill_merges", skipped["detail"])
+
+
+def _list_columns(auto_merge, center, exemptions_path):
+    """从 `auto_merge --list` 的原文里抽出「真待合并」与「历史豁免」两栏。
+
+    不调内部函数取集合，而是读它真打印的那几行：这张清单是给人看的，口径变了
+    首先要变的就是这几行，用例跟着它走才拦得住「实现改了输出没改」。
+    """
+    lines = []
+    auto_merge.list_unmerged_rows(center, lines.append, str(exemptions_path))
+    real, exempt = [], []
+    section = None
+    for line in lines:
+        if line.startswith("真待合并"):
+            section = "real"
+            continue
+        if line.startswith("历史豁免"):
+            section ="exempt"
+            continue
+        if not line.strip():
+            continue
+        if line.startswith("  （没有）"):
+            continue
+        if section == "real" and line.startswith("  ") and "\t" in line:
+            real.append(line.strip().split("\t")[0])
+        elif section == "exempt" and line.startswith("  ") and "\t" in line:
+            exempt.append(line.strip().split("\t")[0])
+    return real, exempt
+
+
+class _FakeCenter:
+    """只给 `auto_merge.list_unmerged_rows` 用：按 `task_center` 的回执形状喂库里的行。
+
+    这是这条交叉用例唯一的替身：它把 `list_unmerged` / `get_ticket` 两个只读查询
+    翻译成这份临时库上的 SQL。两个工具的分栏口径因此可以对着同一份库掰一次。
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, operation, payload=None):
+        if operation == "list_unmerged":
+            rows = self.conn.execute(
+                "SELECT t.id, t.project_id, t.title, t.state, t.revision, t.created_at"
+                " FROM tickets t LEFT JOIN merges m ON m.ticket_id=t.id"
+                " WHERE t.state='done' AND m.id IS NULL"
+                " ORDER BY t.created_at, t.id"
+            ).fetchall()
+            items = [{"id": row[0], "project_id": row[1], "title": row[2],
+                      "state": row[3], "revision": row[4], "created_at": row[5]}
+                     for row in rows]
+            return {"ok": True, "result": {"items": items, "count": len(items)}}
+        if operation == "get_ticket":
+            rows = self.conn.execute(
+                "SELECT s.head_sha FROM submissions s JOIN attempts a ON a.id=s.attempt_id"
+                " WHERE a.ticket_id=? ORDER BY s.rowid", (payload["ticket_id"],)
+            ).fetchall()
+            return {"ok": True,
+                    "result": {"submissions": [{"head_sha": row[0]} for row in rows]}}
+        raise AssertionError(f"这条用例没有为 {operation} 准备替身")
+
 
 
 class ExclusivityTest(Fixture):

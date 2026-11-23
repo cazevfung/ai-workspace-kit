@@ -50,11 +50,24 @@
 
 **合并候选的两条限制，都写在输出里，不悄悄丢掉。**
 
-- 只认「提交里记了分支头（`submissions.head_sha`）」的单。合并要合的是一棵树；
-  没记分支头的提交是合并流程建立之前直接做在 master 上的，库里没有任何可合的
-  东西（`AW-004`~`AW-022` 就是这一类，`docs/closing.md` 与 `AGENTS.md` 都写着
-  不要替它们补记录）。它们进 `skipped`，带条数与单号，人看得见要不要处理。
+- 只认「能拿出来合的东西」：最新提交记了分支头（`submissions.head_sha`），或者仓库里还有
+  `ticket/<单号>` 分支（分支不在、也没有分支头 → 库里与 git 里都没有可合的树）。
 - 已有 `merges` 行的单不算未合并。
+
+**「历史直做」这一层与 `tools/auto_merge.py --list` 同源，不在这里另判一套。**
+两件工具对同一现场给矛盾的下一步，是 2026-11-23 当晚真实发生过三次的事
+（`AW-139`、`AWK-113`、`AWK-106`：单已经 `done`、`merges` 里没有行，`auto_merge --list`
+把它列进「真待合并」，本脚本却照旧报 `dispatch_execute` 去派新单，每次都要人或巡检
+把它抳回来）。根因不是顺位，是判据少了一层——本脚本只看了 `head_sha` 一个事实。
+所以豁免清单（`<项目根>/docs/unmerged-exemptions.json`，`tools/backfill_merges.py --apply`
+写的）的读法、`ticket/<单号>` 分支在不在的判法，全部直接调 `auto_merge` 那几个函数：
+重写一遍就等于给同一现场留两个答案。两类不算待合并的单进 `skipped` 并带单号：
+
+    exempted       已在豁免清单里（backfill 判过它们没有可核对的证据）
+    no_branch_head 没有分支头、也没有 ticket/<单号> 分支（清单里也没有它 → 快照该刷新了）
+
+**这一个路径只读**：不 `claim`、不写库、不改工单状态、也不自动补合并记录——补记录
+只有 `tools/auto_merge.py --record-only` 一个入口（`PRD-013` R10）。
 
 **一个没有任何提交的 `done` 单不进 `skipped`，进 `stop`**：那是数据不自洽（验收
 必须基于一次提交），不是「历史遗留」，得当故障报出来。
@@ -93,6 +106,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+TOOLS = Path(__file__).resolve().parent
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
 from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
     ACTIVE_TICKET_STATES,
     CLAIMABLE_STATES,
@@ -101,6 +118,9 @@ from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
     pending_blockers,
 )
 from task_center.db import SCHEMA_VERSION  # noqa: E402
+# 合并口径的权威在 `auto_merge --list`：豁免清单怎么读、`ticket/<单号>` 分支在不在怎么判，
+# 都用它那一套函数。只调这两个函数、不改它一个字节——同一现场只能有一个答案（AWK-114）。
+import auto_merge  # noqa: E402
 
 # 四个结果的名字：人读输出、--json、退出码共用这一份，不另起别名。
 DISPATCH_EXECUTE = "dispatch_execute"
@@ -137,6 +157,13 @@ REQUIRED_TABLES = (
 # 「验收已经派出去了」这件事在 `events` 里的 operation 名，与 `task_center` 的那个写操作同名。
 # 同一个名字两种行都会出现：成功那次带 `result`，被拒那次带 `rejected`——只有前者算「已派」。
 REVIEW_DISPATCHED = "review_dispatched"
+
+# 「done 但没有合并记录」里那两类**不算待合并**的行，名字进 `skipped`，人读那一行也用它。
+SKIP_NO_BRANCH_HEAD = "no_branch_head"
+SKIP_EXEMPTED = "exempted"
+# 历史豁免清单位置：与 `auto_merge.py --list` 同一份文件，按项目根算（工具与项目可能不在
+# 同一个检出里，按工具自己的位置算就会读到别人的清单）。
+EXEMPTIONS_RELPATH = Path("docs") / "unmerged-exemptions.json"
 
 
 class PlannerError(RuntimeError):
@@ -476,15 +503,53 @@ def review_candidates(conn, project_id, stop, in_flight=None, now=None) -> list[
     return items
 
 
-def merge_candidates(conn, project_id, skipped, stop) -> list[dict]:
-    """已验收但库里没有合并记录的单。
+def default_exemptions_path(project_root) -> Path:
+    """历史豁免清单在哪：跟着**项目根**走。
 
-    只认提交里记了分支头的：合并要合的是一棵树，没记分支头的提交是合并流程之前
-    直接做在 master 上的，库里没有可合的东西。这一类进 `skipped` 并带条数，不悄悄
-    丢掉（`docs/无人值守派单.md`「merge 的前置与拒绝条件」）。
+    与 `auto_merge.py --list` 读的是同一份文件（`docs/unmerged-exemptions.json`，由
+    `tools/backfill_merges.py --apply` 写）。但那一份按工具自己的仓库根定位，本脚本按
+    `projects.root` 定位：一个工具可能被从套件检出里跑，判的却是另一个项目的单。
+    """
+    return Path(project_root) / EXEMPTIONS_RELPATH
+
+
+def ticket_branch_exists(project_root, ticket_id):
+    """`ticket/<单号>` 分支还在不在；**查不了返回 None**（不知道 ≠ 没有）。
+
+    为什么要问 git：`done` + 没有 `merges` 行 + 提交里没有分支头，依然可能是真待合并
+    ——只看库里这两列会把「分支还躺着、只差记录」的单当成历史单。反过来，库里永远
+    看不出「没有分支」，所以这条事实只能向 git 要。
+
+    判法与 `auto_merge` 完全一样（它的 `exists` 就是 `git rev-parse --verify --quiet`）：
+    git 不在、卡住、或目录不是仓库时它不返回 False 而是抛 `Fail`——那两件事分别是「没装」
+    与「不是仓库」，一律不当成「分支不在」；这里转成 None 交给调用方当故障报出来。
+    """
+    try:
+        return auto_merge.exists(Path(project_root), f"refs/heads/ticket/{ticket_id}")
+    except auto_merge.Fail:
+        return None
+
+
+def merge_candidates(conn, project_id, project_root, skipped, stop) -> list[dict]:
+    """已验收但库里没有合并记录的单，口径与 `auto_merge.py --list` 逐字同源。
+
+    三档判据，每一步都只用已经存在的事实（不在这里发明新规则）：
+
+    1. 最新提交记了 `head_sha` → 待合并。有没有分支头只有库知道，它是最好的一条证据。
+    2. 没有分支头、但单号在 `<项目根>/docs/unmerged-exemptions.json` 里 → 历史豁免。
+       清单是 `tools/backfill_merges.py --apply` 判出来的，本脚本不重判。
+    3. 没有分支头、清单里也没有它 → 问 git `ticket/<单号>` 分支还在不在：在 → 待合并
+       （分支还躺着，只差记录，`auto_merge --record-only` 就是为这种现场写的）；
+       不在 → 历史直做（库里与 git 里都没有可合的树）；查不了 → 当故障进 `stop`。
+
+    分不开的代价是具体的：2026-11-23 当晚 `AW-139` / `AWK-113` / `AWK-106` 三张已经验收
+    的单被当成「下张单可以派了」，每次都要人或巡检把合并这一步抳回来。
     """
     items = []
-    historical = []
+    historical, exempted = [], []
+    entries, exemptions_path, have_exemptions = auto_merge.load_exemptions(
+        default_exemptions_path(project_root)
+    )
     for row in project_tickets(conn, project_id, ("done",)):
         if has_merge(conn, row["id"]):
             continue
@@ -496,8 +561,20 @@ def merge_candidates(conn, project_id, skipped, stop) -> list[dict]:
             continue
         head = submission["head_sha"]
         if not head:
-            historical.append(row["id"])
-            continue
+            if row["id"] in entries:
+                exempted.append(row["id"])
+                continue
+            branch = ticket_branch_exists(project_root, row["id"])
+            if branch is None:
+                stop.append(
+                    f"{row['id']} 是 done、没有合并记录、提交里也没有分支头；"
+                    f"而且查不到 ticket/{row['id']} 分支在不在（git 不可用或超时）——"
+                    "分不出它是历史单还是待合并，需要人看"
+                )
+                continue
+            if not branch:
+                historical.append(row["id"])
+                continue
         items.append({
             "ticket_id": row["id"],
             "title": row["title"],
@@ -511,10 +588,21 @@ def merge_candidates(conn, project_id, skipped, stop) -> list[dict]:
         })
     if historical:
         skipped.append({
-            "reason": "no_branch_head",
-            "detail": "done 且无合并记录，但提交里没有分支头（合并流程之前的直接提交，"
-                      "库里没有可合的东西；要不要补记录由人决定）",
+            "reason": SKIP_NO_BRANCH_HEAD,
+            "detail": "done 且无合并记录，但提交里没有分支头、仓库里也没有 ticket/<单号> 分支"
+                      "（合并流程之前的直接提交，库里没有可合的东西）；清单里也没有它们，"
+                      "所以豁免快照该刷新了：跑 `python tools/backfill_merges.py --apply`。"
+                      "要不要补记录由人决定，本脚本不代做。",
             "ticket_ids": historical,
+        })
+    if exempted:
+        source = str(exemptions_path) if have_exemptions else f"{exemptions_path}（文件不存在）"
+        skipped.append({
+            "reason": SKIP_EXEMPTED,
+            "detail": f"done 且无合并记录，但已在历史豁免清单里（{source}）："
+                      "backfill 判过它们没有可核对的证据，补一条记录等于把没人记过写成已经合了。"
+                      "它们不是等待合并的单。",
+            "ticket_ids": exempted,
         })
     # 先验收的先合：同一份 master 上少积一层。排序按 created_at，与池子视图的
     # 「同层按 created_at」一个习惯，不按单号字符串比大小（AW-9 与 AW-10 会排反）。
@@ -639,7 +727,9 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
         return result
 
     reviews = review_candidates(conn, pid, stop, result["review_in_flight"], current)
-    merges = merge_candidates(conn, pid, skipped, stop)
+    # 合并候选先算、也先给：「done 但没合并」的单一旦被「池子里还有可领单」遮住，这一轮
+    # 就会去开下一张单，而上一张的成果还躺在分支上（AWK-114 的三次现场）。
+    merges = merge_candidates(conn, pid, project["root"], skipped, stop)
     executes = execute_candidates(conn, pid, skipped)
     result["candidates"] = {
         DISPATCH_REVIEW: [item["ticket_id"] for item in reviews],
@@ -684,10 +774,21 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
                 f"{pick['ticket_id']} 的 notices 为空：auto_merge 第 2 步会拒，"
                 "先由协调会话 record_notice 再合并"
             )
+        if not pick["head_sha"]:
+            # 没有分支头也是待合并（分支还躺着），但验收过的那棵树记不下来：
+            # auto_merge 第 2 步只警告不拦，记录按 `unverified` 落库。这句要说出来。
+            stop.append(
+                f"{pick['ticket_id']} 的提交里没有分支头：auto_merge 第 2 步只能警告，"
+                "合并记录会按 unverified 落库（被验收的那棵树无法核对）"
+            )
         result["human"] = (
             f"{MERGE}：合并 {pick['ticket_id']}"
             f"（已验收未合并，head {_short(pick['head_sha'])}）"
         )
+        if len(merges) > 1:
+            result["human"] += f"；另有 {len(merges) - 1} 张也已验收未合并：" + "、".join(
+                item["ticket_id"] for item in merges[1:]
+            )
         return _finish(result)
 
     if executes:
@@ -756,11 +857,18 @@ def _finish(result: dict) -> dict:
                 f"已等 {_waited_text(item['waited_seconds'])}），不再重复派"
             )
     for item in result.get("skipped") or []:
-        if item.get("reason") == "no_branch_head":
-            ids = item.get("ticket_ids") or []
+        ids = item.get("ticket_ids") or []
+        if not ids:
+            continue
+        if item.get("reason") == SKIP_NO_BRANCH_HEAD:
             notes.append(
-                f"另有 {len(ids)} 张 done 且无合并记录，但提交里没有分支头"
-                f"（合并流程之前的直接提交，见 skipped）：{'、'.join(ids)}"
+                f"另有 {len(ids)} 张 done 且无合并记录，但提交里没有分支头、仓库里也没有"
+                f"ticket/<单号> 分支（合并流程之前的直接提交，见 skipped）：{'、'.join(ids)}"
+            )
+        elif item.get("reason") == SKIP_EXEMPTED:
+            notes.append(
+                f"另有 {len(ids)} 张 done 且无合并记录，但已在历史豁免清单里"
+                f"（不是等待合并的单，见 skipped）：{'、'.join(ids)}"
             )
     if notes:
         result["human"] = result["human"] + "；" + "；".join(notes)
