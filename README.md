@@ -297,11 +297,11 @@ python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作�
 装出来的工作区里它在 `<工作区>/verify/`。`tools/test_verify_receipt.py` 两处都认，
 只装了一个跑不起来的壳就会当场报错，不会静静跳过。
 
-#### 与工作区（`D:/AI工作区`）的已知差异
+#### 与上游工作区的已知差异
 
 引擎与工具已经同步到工作区当前的状态（中心库 schema 16）：迁移 9–16、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version`、谁开的单（`tickets.requester_session_id`）与回执的消息 id（`notices.message_id`）、现在谁负责收尾（`tickets.owner_session_id`，配套 `take_over_ticket` / `report_notice_failure`）、合并记录的出处四列（`merges.source` / `verified_by` / `verified_at` / `note`，含 `manual` 与 `backfill` 两档当场核对祖先关系）、两个新操作 `archive_ticket`（第十个终态 `archived`）与 `rename_project`、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件，都跟工作区一致，`python kit/tools/auto_merge.py --list` 读同一个库不再报 `SCHEMA_MISMATCH`。工具的缺口也补齐了：`next_action`、`receipt_payload`、`handover_owner`、`coordinator_state`、`archive_legacy`、`backfill_merges` 与 `tools/merge-projects.json`（按项目配测试命令）都在，`work_gate` 有池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动的背书判据，`close_gate` 按「每条」判第 5 节的落点，`docs/无人值守派单.md`、`docs/schema-shift.md`、`docs/unmerged-exemptions.md`（与 `.json`）也随包，`docs/protocol.md` 整份是工作区那一份（操作表与表下面各节一起搬，只保留套件的 `{{WORKSPACE}}` 占位与 `INPUT_UNREADABLE` 那段）。下面五条是**刻意留着的不一致**：
 
-1. **PRD 正文只同步了一部分。** 包里现在有 `kit/PRD/PRD-001-工作区使用与工单体系.md` 与 `PRD-010`~`PRD-015` 六份正文（路径与示例已改成套件视角，`grep -rl "D:/AI工作区" kit/PRD/` 为空）。`PRD-002`~`PRD-009` 是这套工具自己的设计史，正文在 `design/PRD/` 下，不进 `kit/PRD/`；引擎注释里出现这些编号时指的是那一份。与工作区仍有一处差别：`PRD-015` 里两条复算命令原来指向工作区的历史轮次表与收尾包，套件不带这些文件，所以那两处写成了「原工作区的第 N 行」而不是可点的 `文件:行号`——否则 `ref_gate` 会把它们当成断链。
+1. **PRD 正文只同步了一部分。** 包里现在有 `kit/PRD/PRD-001-工作区使用与工单体系.md` 与 `PRD-010`~`PRD-015` 六份正文（路径与示例已改成套件视角，`kit/PRD/` 下搜不到上游那台机器的本机路径，逐行清单见 `CHANGELOG.md` 的「公开仓库里剩下的本机路径」）。`PRD-002`~`PRD-009` 是这套工具自己的设计史，正文在 `design/PRD/` 下，不进 `kit/PRD/`；引擎注释里出现这些编号时指的是那一份。与工作区仍有一处差别：`PRD-015` 里两条复算命令原来指向工作区的历史轮次表与收尾包，套件不带这些文件，所以那两处写成了「原工作区的第 N 行」而不是可点的 `文件:行号`——否则 `ref_gate` 会把它们当成断链。
 2. **`auto_merge.py` 的测试命令按三层解，比工作区多一层。** 顺序是 `tools/merge-projects.json`（工作区侧一张表）→ 目标仓库自己的 `.agents/ticket-config.json`（`tools/add_project.py` 写的那一份，套件保留了这个入口）→ 缺省的 `python tools/run_tests.py`；三层都没有才报 `NO_TEST_COMMAND`。工作区只有前两层里的第一层。写记录前那道 schema 闸门也在，且**认两个位置**——`task_center/db.py` 与 `kit/task_center/db.py` 都算，因为套件的引擎住在 `kit/` 下，只按仓库根找会让闸门在这个仓库上永远静默跳过（AWK-101 就是这样把 schema 从 9 推到 13 而闸门没响）。
 3. **占位符没有被换成固定路径。** `work_gate.py` / `close_gate.py` / `run_tests.py` / `intake_gate.py` 里的用法写的是 `{{WORKSPACE}}`，装的时候才替换成真实路径。
 4. **`doc_gate.py` 多认两处源码树里的技能路径**（`skills/workspace`、`skills/generic`），所以在没装过的源码仓库里直接跑测试也是绿的。
