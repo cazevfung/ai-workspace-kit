@@ -1,5 +1,38 @@
 # 更新记录
 
+## 0.5.2（2026-11-24）
+
+2026-11-24 发布。**这一版只修一件事：陌生人拿到源码包跑测试会看到红。**
+
+先说已经成了的那部分，它在 0.5.1 里验过有效、这一版一行没动：验收时从 Release 的 `source.zip`
+解压后，带 `--agents-home <临时目录>` 真装了一遍，真实 `~/.agents` 装前装后 3454 个文件逐个比对，
+新增 / 删除 / 改内容都是 **0**；不带 `--agents-home` 时它在写第一个字节之前就退出（码 2）
+并原样打印现有的 `center.json`。`install_guard.py` / `install.py` 的拦截逻辑这版不动。
+
+不通过的是另一条。在**解压出来的非 git 目录**里跑 `python tools/run_tests.py`：`tests/` 354 项全过，
+`tools/` 658 项里红 2 条，`test_work_gate` 与 `test_auto_merge` 各一条。这两条的判据要读
+`git diff --cached`（暂存区），非仓库目录里 git 自己就报错；同一份提交在仓库工作树里是 1012 项全绿。
+「在仓库里绿、在源码包里红」本身就是缺陷：发布出去的测试入口应该自己说清前提不成立，
+而不是把环境问题报成用例失败。
+
+### 修了什么（AWK-115 返工）
+
+- 那两条改成**在非 git 工作树里 skip**：先用 `project_doctor.is_repository()`（就是
+  `git rev-parse --is-inside-work-tree`）问一句，判不了就 `skipTest` 并写明原因与补法
+  （想真跑先在这个目录 `git init` 并提交一次）。**断言一条没删**，在仓库里照旧生效。
+- `README.md` 与 `README.en.md` 各加一段：从源码包跑测试前要知道那不是 git 目录，
+  那两条会 skip（skip 不等于失败，汇总行仍是「全部通过」）；想一条不落地跑完先 `git init`。
+- 新增一道发布前闸门（C11）：把 `git archive` 解到临时目录，在那里跑 `run_tests`
+  必须绿灯——允许 skip，不允许 fail。这一版是第一条按它检过的发布。
+- `VERSION` 与 `plugin/draft/ghost.json` → `0.5.2`；`dist/` 只留 `ai-workspace-kit-0.5.2.cindy`
+  （`0.5.1` 的旧包用 `git rm` 删掉）。打包口径不变：`python tools/pack_plugin.py`，
+  条目排序、时间戳固定，同一份源码两次打出来字节相同。
+- 源码包由 tag 点的树生成：`git archive --format=zip --prefix=ai-workspace-kit-0.5.2/ v0.5.2
+  -o dist/ai-workspace-kit-0.5.2-source.zip`；发布前在解压目录与仓库工作树里各跑一遍测试。
+- `v0.5.0`（`46ce67d`）与 `v0.5.1` 的 tag 与 Release 都没动：不 `push -f`、不 `tag -f`。
+
+用例总数仍是 1012 项（`tests/` 354、`tools/` 658）：改的是这两条的前提判断，不是用例数。
+
 ## 0.5.1（2026-11-23）
 
 2026-11-23 发布。**这是一版安全修复，取代同一天发出去的 `0.5.0`。** `v0.5.0`（`46ce67d`）的 `install.py` 会无条件重写 `<agents_home>/center.json`，而那个参数的默认值就是 `~/.agents`；任何人拿下载链接试装一次，都可能把自己机器上的 `center.json` 改指到别处，于是整台机器的工作区工具一起读到空库——2026-11-23 22:10 真发生过一次（现场见下面 AWK-113 那条）。master 上早已合入修掉它的安装闸门，这一版就是把闸门发出去。

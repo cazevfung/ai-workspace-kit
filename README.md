@@ -212,6 +212,12 @@ python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 658
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
+**从源码包跑测试要先知道一件事。** Release 里的 `*-source.zip` 解压出来**不是 git 工作树**，
+直接 `python tools/run_tests.py` 会看到两项 skip：`test_work_gate` 与 `test_auto_merge` 各有一条
+要读 `git diff --cached`（暂存区），非仓库目录里 git 自己就报错，所以它们跳过并写明原因。
+skip 不等于失败——汇总行仍是「全部通过」。想把 1012 项一条不落地跑完，先在这个目录
+`git init` 并提交一次，再跑同一条命令。
+
 装完还要把工作区接进宿主、把业务仓库接进工作区：
 
 ```bash

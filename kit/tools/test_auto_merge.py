@@ -61,6 +61,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import auto_merge  # noqa: E402
+import project_doctor  # noqa: E402
 
 REAL_RUN_TESTS = HERE / "run_tests.py"
 
@@ -1912,6 +1913,15 @@ raise SystemExit(bad)
     def test_no_test_reads_the_working_tree_closing_package(self):
         if os.environ.get(PIN_GUARD):
             self.skipTest("已在钉住用例的子进程里，跳过自己")
+        if not project_doctor.is_repository(HERE.parent):
+            # 这条用例的价值在于「拿各处用例真跑一遍」：它自己起子进程，把提到三个收尾包
+            # 文件的测试模块全都导一遍。源码包（Release 的 source.zip）解压出来的目录不是
+            # git 工作树，被它拉起来的那些模块里有靠 `git diff --cached` 的前提，在那里
+            # 只会跳过——跑出来的结论就不完整，不如直接说清这里判不了（AWK-115）。
+            self.skipTest(
+                f"不在 git 工作树里（{HERE.parent}）：被这条用例拉起来跑的各处用例里，"
+                "有的前提是暂存区，这里判不全。想看它真跑，先在这个目录 `git init` 并提交一次。"
+            )
         candidates = self.candidates()
         self.assertTrue(candidates, "至少该扫到几个提到收尾包的测试模块，否则这条用例什么也没查")
 

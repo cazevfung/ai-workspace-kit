@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import center_config
+import project_doctor
 import work_gate
 
 
@@ -112,6 +113,16 @@ class WorkGateTest(unittest.TestCase):
         self.assertIn("放行", result.stdout + result.stderr)
 
     def test_missing_ticket_id_is_rejected_before_touching_the_database(self):
+        # 这条要走完收尾提交判定才轮到「没有工单号」，而收尾判定是拿
+        # `git diff --cached` 读暂存区的。源码包（Release 的 source.zip）解压出来
+        # 的目录不是 git 工作树，git 在那里自己就报错，闸门会在更早一步拒掉——
+        # 那是环境不成立，不是行为变了。所以这里 skip 而不是把断言改成迁就环境：
+        # 断言本身留着，在真正的仓库里照旧生效（AWK-115）。
+        if not project_doctor.is_repository(work_gate.REPO):
+            self.skipTest(
+                f"不在 git 工作树里（{work_gate.REPO}）：收尾判定读不到暂存区，"
+                "这条用例的前提不成立。想看它真跑，先在这个目录 `git init` 并提交一次。"
+            )
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = work_gate.main(["work_gate.py", "--db", str(self.db)])

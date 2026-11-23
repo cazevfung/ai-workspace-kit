@@ -209,6 +209,13 @@ python tools/run_tests.py            # should pass: tests/ 354 + tools/ 658 = 10
 python tools/doc_gate.py --all       # should exit 0
 ```
 
+**One thing to know before running the tests from the source package.** The `*-source.zip` attached to
+a release extracts into a directory that is **not a git work tree**. Running `python tools/run_tests.py`
+there reports two skips: `test_work_gate` and `test_auto_merge` each have one case that reads
+`git diff --cached` (the staging area), and git itself errors in a plain directory — so they skip and
+say why. A skip is not a failure: the summary line still reads "all passed". To run all 1012 with nothing
+skipped, run `git init` in that directory, make one commit, then run the same command.
+
 Then connect the workspace to the host and a business repository:
 
 ```bash
