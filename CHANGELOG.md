@@ -1,5 +1,20 @@
 # 更新记录
 
+## 未发布
+
+### 沙箱安装不再改写真实的 `~/.agents`（AWK-113）
+
+2026-11-23 22:10 的真实事故：一个验收会话把工作区装到临时目录 `D:\awk109-verify\ws`，`--agents-home` 用了默认值（真实 `~/.agents`），安装器无条件写 `<agents_home>/center.json`，于是真实 `center.json` 被改指到沙箱的空库。后果不是「这次装错了」而是「所有工作区工具一起读到空库」——`work_gate` / `auto_merge` / 钩子全报 0 张在途，巡检据此发出错误指令。
+
+- 新增 `kit/tools/install_guard.py`：「这次安装允不允许写用户级配置」只有这一处判据，外加一个只读的 `tree_digest` / `diff_tree`（装前装后对同一棵树取快照，用来证明「一个字节没变」，不必先写进去再恢复）。
+- `install.py` 新增 `--allow-user-config`。两种默认行为改了：`--agents-home` 落在真实用户目录以外时**一个用户级文件都不写**（`center.json` / `skills/` / `intake/` / 安装清单）；`--agents-home` 就是真实目录而那里的 `center.json` 已指向**别的**库时**拒绝**，在复制第一个文件之前退出（码 2）并把原内容原样打印。首次安装与「同一个库再装一次」行为不变。
+- 跳过用户级配置时工作区指针 `<工作区>/.agents/center.json` 也不写：它记的是 `agents_home`，而那里没有 `center.json` 时闸门按「指针指丢」报 `DB_NOT_FOUND` 不回落；不写指针，闸门走「本工作区 `.data`」那一步，装出来的工作区照常可用。
+- `--dry-run` 预报这三类结果：会写哪些用户级文件、会跳过什么、会拒绝什么。
+- 用例：新增 `kit/tools/test_install_guard.py`（17 项）——沙箱默认不写（真跑安装，临时 `--agents-home`）、显式开关才写、首次安装与同库重装不变、真装重指默认拒绝且文件字节不变、`--dry-run` 三类预报、快照能认出「改一个字节」与「多一个文件」。端到端用例全部拒绝写真实 `~/.agents`：真装重指那条用假 HOME（`USERPROFILE` / `HOME`），并在跑之前先确认子进程的 `Path.home()` 真是它，不是就跳过。合计 967 → 984 项（`tests/` 354 + `tools/` 630）。
+- `verify/verify_install.py`：安装命令补开关，并加两项现场检查——不带开关的沙箱安装一个用户级文件都不写、真实 `~/.agents` 装前装后快照一致（只读比对）。现在 23 项全过。
+- `docs/INSTALL.md` / `README` / `README.en` / `bootstrap-skill/ai-workspace-setup`：写清默认跳过什么、怎么显式开、拒绝时怎么办；`kit/docs/closing.md` 的「中心库怎么被发现」补一句「沙箱默认安装不写指针，走第 5 步」。
+- 刻意没做的：不改 `task_center/`，不改 `center_config` 的发现顺序，不迁移历史安装，不自动备份或轮转旧 `center.json`，不升 `VERSION`、不打 tag、不推送。
+
 ## 0.5.0（2026-11-23）
 
 2026-11-23 发布。这一版把三件事凑齐发出去：Windows 常驻浮窗面板并入套件（`panel/`）、工单引擎与工具补齐到与工作区同功能、无人值守那两条调度做进套件（`automation/` 与 `tools/schedule_plan.py`），连同此前累计还没发出去的几段成果一起；闸门判定、工单核心的状态机与面板的判据一行未改。

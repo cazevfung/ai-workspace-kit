@@ -188,7 +188,14 @@ python install.py --dry-run                   # 只打印计划，不动任何�
 python install.py --overwrite-skills          # 用套件版本覆盖同名技能
 python install.py --no-skills                 # 只装工作区，不动技能目录
 python install.py --link-agents               # 顺带为 ~/.claude 与 ~/.codex 建技能链接
+python install.py --allow-user-config         # 允许写用户级配置（沙箱试装、或重指已有 center.json）
 ```
+
+**装到临时目录试一下是安全默认。** `--agents-home` 不是本机真实用户目录时，安装器默认一个
+字节都不写用户级配置（`center.json` / `skills/` / `intake/` / 安装清单）；而 `--agents-home`
+就是真实目录、那里的 `center.json` 已经指着**别的**库时，默认拒绝改写并把原内容打印出来。
+两种情况都要显式 `--allow-user-config` 才往下写——2026-11-23 那次真实事故就是默认安装把真
+`center.json` 改指到了沙箱空库，于是同一台机器上所有闸门一起报「0 张在途」。
 
 也可以用包装脚本：`bash scripts/install.sh`（macOS / Linux）、`powershell -ExecutionPolicy Bypass -File scripts/install.ps1`（Windows）。
 
@@ -201,7 +208,7 @@ python install.py --link-agents               # 顺带为 ~/.claude 与 ~/.codex
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 613 = 967 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 630 = 984 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -236,14 +243,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 967 项（`tests/` 354、`tools/` 613）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 984 项（`tests/` 354、`tools/` 630）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
-python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 967 项
+python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 984 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
@@ -423,7 +430,7 @@ python uninstall.py --skills                            # 只移除本套件的�
 ```bash
 python maintainer/sync_from_origin.py        # 1. 同步，把绝对路径换成 {{WORKSPACE}}
 python maintainer/redact_for_public.py       # 2. 清掉同步带进来的用户名、会话 id 与上游业务专名
-python verify/verify_install.py              # 3. 临时目录里真装一遍，14 项全过再发版
+python verify/verify_install.py              # 3. 临时目录里真装一遍，23 项全过再发版
 ```
 
 第 2 步不能省：`kit/tests/fixtures` 有意原样复制，同步会带入真实用户名与会话 id；`redact_for_public.py --check` 可单独做发布前检查。`README`、`install.py`、`uninstall.py`、`kit/AGENTS.md`、`kit/PRD/`、`docs/*.md` 是人工维护件，同步不会覆盖；发版时升 `VERSION` 并写 `CHANGELOG.md`。
