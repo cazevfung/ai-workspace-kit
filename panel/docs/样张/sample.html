@@ -1,0 +1,1586 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<script>
+  /* 首帧之前定三件事，避免闪一下再翻：
+       · 明暗：主题按钮没了，跟系统走（?theme=dark|light 只给截图/出图用）；
+       · 桌面壳：body 透明、卡片四周 12px 影子带；
+       · 折叠初值：主进程记着上次是展开还是收成一行。preload 在页面脚本之前执行。 */
+  (function () {
+    var root = document.documentElement;
+    var forced = new URLSearchParams(location.search).get('theme');
+    if (forced === 'dark' || forced === 'light') {
+      root.dataset.theme = forced;
+    } else {
+      root.dataset.theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    if (window.cindyWidget && typeof window.cindyWidget.feed === 'function') {
+      root.dataset.shell = 'electron';
+      if (window.cindyWidget.initialCollapsed) {
+        root.dataset.collapsed = '1';
+      }
+    }
+  })();
+</script>
+<meta name="viewport" content="width=420, initial-scale=1">
+<title>Windows 常驻浮窗样张 · 420×700</title>
+<!--
+  这是 PRD-002 的静态样张，不是产品代码。
+
+  形状：一个 420×700 的常驻浮窗（第四形态：不是浏览器页，也不是 Cindy 插件页——
+  插件只能在 Cindy 窗口里跑，浮不起来）。
+  内容：内联假数据（脚本里的 FEED），内联样式与内联 SVG，**零网络请求**：没有外链 CSS、
+        没有字体文件、没有 <img src>、没有 fetch。字体走系统 UI 栈。
+  主题：data-theme="light" / "dark"，右上角那枚开关只在样张里存在（?shot=1 时隐藏）。
+
+  几何（PRD-002 §3，与鸿蒙 ProgressFeedView 逐条对应）：
+    · 窗口 420×700；页侧留白 16；卡与卡 16；卡内四周 20；
+    · 行尾定宽 184 = 轨道 132 + 缝 8 + 图标组 44；左边文本是唯一弹性项；
+    · 轨道 132 = 5×20 圆 + 4×8 缝；圆里镂空图标 12；
+    · 图标组 44 = 20 + 4 + 20，高 44；resolve（bug-off）在左，进会话（右箭头）在右；
+    · 进行中的整圈按直径呼吸：800ms、scale 1.0↔1.18（本文件里 opacity 不参与任何动效）。
+-->
+<style>
+  :root {
+    --page-side: 16px;
+    --card-gap: 16px;
+    --card-inset: 20px;
+    --tail: 184px;      /* 轨道 132 + 缝 8 + 图标组 44 */
+    --rail: 132px;
+    --icons: 44px;
+    --circle: 20px;
+    --card-radius: 16px;
+  }
+
+  /* 浅色：页面底 / 卡片底 / 文字三档 / 链接 / 状态色，全部取鸿蒙 theme/Tokens.ets 的浅色板 */
+  :root[data-theme="light"] {
+    --bg: #F9F9F6;
+    --card: #E2E2DC;
+    --chip: #EAEAE6;
+    --text-primary: #0F0F0F;
+    --text-secondary: #4D4D4A;
+    --text-tertiary: #686864;
+    --divider: rgba(60, 60, 60, 0.14);
+    --link: #1D4ED8;
+    --success: #2AAE5B;
+    --warning: #F3A115;
+    --running: #EA6B17;
+    --walked: #999999;        /* 走完的那一截轨道线：中性色，不是橙 */
+    --todo-ink: #686864;      /* 还没到的那颗圆：实心中性色 */
+    --cut: #E2E2DC;           /* 镂空图标 = 卡片底色（看起来像从实心圆里挖出来） */
+  }
+
+  /* 深色：页面底 #121212，卡片再抬一档；其余与浅色板同名同义 */
+  :root[data-theme="dark"] {
+    --bg: #121212;
+    --card: #2E2E2E;
+    --chip: #2A2A2A;
+    --text-primary: #EDEDED;
+    --text-secondary: #BDBDBD;
+    --text-tertiary: #999999;
+    --divider: rgba(255, 255, 255, 0.12);
+    --link: #93C5FD;
+    --success: #2AAE5B;
+    --warning: #F3A115;
+    --running: #EA6B17;
+    --walked: #999999;
+    --todo-ink: #999999;
+    --cut: #2E2E2E;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    /* 文档本身永远不滚：滚动只发生在 .feed 里。桌面壳里内容正好一屏，
+       不加这一条时分数缩放的小数像素会让右边/下边冒出一条文档滚动条。 */
+    overflow: hidden;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI",
+      "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    color: var(--text-primary);
+  }
+
+  /* 常驻浮窗本体：固定 420×700，内容区自己滚 */
+  .win {
+    position: relative;
+    width: 420px;
+    height: 700px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+    /* 圆角在浏览器里也保留：页面底色与卡片底色同值，看不出来；壳里才看得见 */
+    border-radius: 12px;
+  }
+
+  /* 桌面壳：窗口是透明的，卡片四周各 12px 是影子带（窗口内容区 = 444×724）。
+     阴影必须画在这 12px 里，且不能超出——超出就被窗口边缘裁成硬边。 */
+  :root[data-shell="electron"],
+  :root[data-shell="electron"] body {
+    background: transparent;
+    height: 100%;
+  }
+
+  :root[data-shell="electron"] body {
+    /* 卡片居中：Windows 分数缩放下内容区会比 444×724 多 1–2px，多出来的平均分到四边 */
+    display: grid;
+    place-items: center;
+  }
+
+  :root[data-shell="electron"] .win {
+    box-shadow:
+      inset 0 0 0 1px var(--divider),
+      0 2px 10px rgba(0, 0, 0, 0.50);
+  }
+
+  /* 内容区滚到哪儿都看得见「下面还有」：一条 24px 的渐隐带压在最底（不吃点击） */
+  .feed-fade {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 24px;
+    pointer-events: none;
+    background: linear-gradient(to top, var(--bg), transparent);
+  }
+
+  /* 顶部一行：左边「更新于 时:分:秒」的小号文字（没有胶囊底、没有描边），
+     右边一个箭头按钮，点一下把整张卡收成一行。那一行的内容是「最近活动的那张单」。 */
+  .win-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px var(--page-side);
+    /* 桌面壳（Electron 无边框窗口）靠这一条拖动整个窗口；普通浏览器里这条声明不生效，
+       也不改变任何尺寸与颜色。按钮自己 no-drag，否则点不到。 */
+    -webkit-app-region: drag;
+  }
+
+  .win-head button {
+    -webkit-app-region: no-drag;
+  }
+
+  .stamp {
+    flex: none;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  /* 折叠后那唯一一行：最近活动的那张单，「单号 · 标题」，单行省略 */
+  .collapsed-label {
+    display: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 右上角唯一那颗按钮：展开态朝下（点了收起），折叠态朝上（点了展开） */
+  .collapse-toggle {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    margin-right: -6px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .collapse-toggle:hover {
+    color: var(--text-primary);
+    background: var(--chip);
+  }
+
+  .collapse-toggle svg { width: 18px; height: 18px; display: block; }
+
+  /* 方向就是动作方向：展开态朝下（点了收起），折叠态朝上（点了展开） */
+  .collapse-toggle .chevron-up { display: none; }
+  .win.is-collapsed .collapse-toggle .chevron-down { display: none; }
+  .win.is-collapsed .collapse-toggle .chevron-up { display: block; }
+
+  /* 收成一行：卡片高 48（窗口内容区 48 + 上下各 12 的透明留边 = 72） */
+  .win.is-collapsed { height: 48px; }
+
+  .win.is-collapsed .win-head { flex: 1 1 auto; }
+
+  .win.is-collapsed .stamp,
+  .win.is-collapsed .feed,
+  .win.is-collapsed .feed-fade,
+  .win.is-collapsed .notice {
+    display: none;
+  }
+
+  .win.is-collapsed .collapsed-label { display: block; }
+
+  .feed {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0 var(--page-side) 28px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--card-gap);
+    /* 滚动条不占位：占位会让内容区少一条宽度，轨道起点跟着少 10px（对齐就跟着动）。
+       滚动的提示交给底下那条 24px 渐隐带。 */
+    scrollbar-width: none;
+  }
+  .feed::-webkit-scrollbar { display: none; }
+
+  /* 一张卡 = 一个项目；卡标题就是项目名 */
+  .card {
+    flex: none;
+    background: var(--card);
+    border-radius: var(--card-radius);
+    padding: var(--card-inset);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+  }
+
+  .project {
+    margin: 0;
+    font-size: 16px;
+    line-height: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .card-meta {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+
+  /* 橙色 #EA6B17 的两处之一：「需要你出手 / 待验收」的状态点 */
+  .state-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--running);
+  }
+
+  /* 卡内一层：主任务（橙色粗体 + message 图标） */
+  .task {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .task-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 20px;
+  }
+
+  .task-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 700;
+    color: var(--running);
+  }
+
+  .task-icon {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    color: var(--running);
+  }
+
+  /* 卡内二、三层：工单行（单号 · 名称，最多两行）+ 这条单自己的五步轨道 */
+  .ticket {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 44px;
+  }
+
+  /* 左边文本是**唯一**弹性项：它变长变短，右边 184 的块一动都不动 */
+  .headline {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .ticket-id { color: var(--text-tertiary); }
+
+  /* 行尾定宽块：184 = 轨道 132 + 缝 8 + 图标组 44 */
+  .tail {
+    flex: 0 0 var(--tail);
+    width: var(--tail);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 五步轨道：五个实心圆串在一条 1px 发丝线上，线画在圆的中线上 */
+  .rail {
+    position: relative;
+    flex: none;
+    width: var(--rail);
+    height: var(--circle);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .rail-line,
+  .rail-walked {
+    position: absolute;
+    left: 10px;
+    height: 1px;
+    top: 9.5px;
+  }
+  .rail-line { right: 10px; background: var(--divider); }
+  .rail-walked { background: var(--walked); }  /* 走完的那一截是中性色，不是橙 */
+
+  .node {
+    position: relative;
+    flex: none;
+    width: var(--circle);
+    height: var(--circle);
+  }
+
+  .disc {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--todo-ink);
+    transform: scale(1);
+    transform-origin: center;
+  }
+
+  .disc svg { width: 12px; height: 12px; display: block; }
+
+  /* 圈里的图标是「镂空」的：拿卡片底色画，看起来像从实心圆里挖出来的线条 */
+  .disc svg path,
+  .disc svg circle,
+  .disc svg rect { fill: var(--cut); }
+
+  /* 走完：绿 */
+  .node.done .disc { background: var(--success); }
+
+  /* 进行中：橙 + 整圈按直径呼吸（动的是 scale，opacity 全程不参与） */
+  .node.current .disc { background: var(--running); }
+  .node.current .disc {
+    animation: breathe 800ms ease-in-out infinite alternate;
+    will-change: transform;
+  }
+
+  /* 待验收的「下一步」（合并）：它是在进行的下一步，与当前步同样橙、同样呼吸 */
+  .node.next .disc { background: var(--running); }
+  .node.next .disc {
+    animation: breathe 800ms ease-in-out infinite alternate;
+    will-change: transform;
+  }
+
+  @keyframes breathe {
+    from { transform: scale(1); }
+    to   { transform: scale(1.18); }
+  }
+
+  /* 合并四态：recorded 绿 / landed-unrecorded 中性 / recorded-unlanded 警告 / not-merged 橙 */
+  .node.recorded .disc { background: var(--success); }
+  .node.landed   .disc { background: var(--text-secondary); }
+  .node.unlanded .disc { background: var(--warning); }
+
+  /* 两枚图标：各 20 宽、缝 4、高 44。resolve（bug-off）在左，进会话（箭头）在右。
+     可点热区各 **44×44**，**向外不对称扩**：左枚向左扩 24（矩形 316–360），右枚向右扩 24（364–408）。
+     居中扩会让两块重叠 20px；向外扩的两块各 44 宽、互不重叠，视觉上仍是 20。 */
+  .actions {
+    flex: none;
+    width: var(--icons);
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .act {
+    position: relative;
+    flex: none;
+    width: 20px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-tertiary);
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+  }
+
+  .act::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    width: 44px;
+    height: 44px;
+  }
+
+  /* 左枚：热区从视觉槽左边缘继续向左 24px */
+  .act.resolve::before { left: -24px; }
+
+  /* 右枚：热区从视觉槽右边缘继续向右 24px */
+  .act.arrow::before { right: -24px; }
+
+  .act svg { width: 20px; height: 20px; display: block; position: relative; }
+
+  /* 没有目标时不留一枚点了没反应的图标：留一个同宽的空盒子，别的行才不会错位 */
+  .act.is-empty { cursor: default; pointer-events: none; }
+
+  /* 有图标但不接手势（取消单没有会话时那颗绿 circle-slash）：视觉在、点不动，也不抢别人的点击 */
+  .act.is-static { cursor: default; pointer-events: none; }
+
+  /* 取消单行尾那颗：绿 = 已经收尾了（与轨道上「走完」同一个 token），不是错误 */
+  .act.is-settled { color: var(--success); }
+
+  /* resolve 发出去之后的等待态（CD-019）：按钮不可再点，图标位置换成一只真的在转的圈。
+     它只在「那一次 promise 还没回来」时出现——不是假动效，回来就摘掉。 */
+  .act.is-waiting { cursor: progress; pointer-events: none; }
+  .act.is-waiting svg { opacity: 0; }
+  .act.is-waiting::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    margin: -7px 0 0 -7px;
+    border: 2px solid var(--text-secondary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 720ms linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .note {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-tertiary);
+  }
+
+  /* 取消单那一段（CD-019）：放在所有项目卡之后、「已完成项目汇总段」空位之前。
+     它不是一张项目卡，所以不该进卡流、也不该被增量更新当成卡来认。 */
+  .card-cancelled { padding: 20px; }
+
+  .cancelled-note {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--text-tertiary);
+  }
+
+  .cancelled-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 8px;
+  }
+
+  /* 取消行与卡内的工单行同一套几何（行尾 184、轨道 132），只是文字低一档、没有 resolve */
+  .card-cancelled .headline { color: var(--text-secondary); }
+
+  /* resolve 的结果（发到哪了 / 为什么没发出去）：安静的一行，与「这次没读到导出物」分开摆，
+     不互相覆盖；失败用正文色，成功用次一档。 */
+  .resolve-note {
+    padding: 0 var(--page-side) 8px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-secondary);
+  }
+  .resolve-note[hidden] { display: none; }
+  .resolve-note.is-error { color: var(--text-primary); font-weight: 600; }
+
+  /* 三处折叠都是这一行字：不改顺序，只把后面的收起来 */
+  .more {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--link);
+    cursor: pointer;
+  }
+
+  .pool-label {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--text-tertiary);
+  }
+
+  /* 未决 #2：「已完成项目」汇总段（CH-083 未落）。只留空位 + 一句占位说明，不自造版式 */
+  .placeholder {
+    flex: none;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px dashed var(--divider);
+    border-radius: var(--card-radius);
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-tertiary);
+    text-align: center;
+  }
+
+  /* 折叠视图（?view=folded）：一张卡只占一行，点开原地变回整卡。
+     视觉与整卡同一套 token；行里只有项目名、状态点与一句计数。 */
+  .card-folded { padding: 20px; }
+
+  .fold-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .fold-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 16px;
+    line-height: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 没有「需要你出手 / 待验收」的项目：点还在，但不涂橙（橙色只留给那两处） */
+  .state-dot.is-idle { background: var(--text-tertiary); }
+
+  /* 折叠视图里点开之后，卡头本身就是「收起」的入口 */
+  .card-head[data-close-project] { cursor: pointer; }
+  .fold-hint {
+    flex: none;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--link);
+  }
+
+  /* 读失败 / 读到半截时的提示：屏上仍留着上一份数据，这里只说这一轮没读到 */
+  .notice {
+    padding: 0 var(--page-side) 8px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--text-secondary);
+  }
+  .notice[hidden] { display: none; }
+
+  /* ?source=export 且还没拿到 token 时才出现；demo 与已授权时整块不显示 */
+  #gate {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: var(--bg);
+    z-index: 10;
+  }
+  #gate[hidden] { display: none; }
+  .gatecard {
+    width: 320px;
+    background: var(--card);
+    border-radius: var(--card-radius);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .gatecard h2 { margin: 0; font-size: 15px; line-height: 22px; color: var(--text-primary); }
+  .gatecard p { margin: 0; font-size: 12px; line-height: 18px; color: var(--text-secondary); }
+  .gatecard input {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--divider);
+    background: var(--chip);
+    color: var(--text-primary);
+  }
+  .gatecard button {
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 0;
+    background: var(--text-primary);
+    color: var(--bg);
+    cursor: pointer;
+  }
+  #gate-error { min-height: 18px; }
+
+  /* 减少动效：不构建那一层缩放，而不是把时长写成 0。
+     等待圈的旋转也一并停掉（它会停成一个静止的圈，仍然看得见「还在等」）。 */
+  @media (prefers-reduced-motion: reduce) {
+    .node.current .disc, .node.next .disc { animation: none; }
+    .act.is-waiting::after { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="win" id="win">
+    <div class="win-head">
+      <span class="stamp" id="stamp">更新于 --:--:--</span>
+      <span class="collapsed-label" id="collapsed-label"></span>
+      <button class="collapse-toggle" id="collapse-toggle" type="button" aria-label="折叠为一行" title="折叠为一行">
+        <svg class="chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        <svg class="chevron-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+      </button>
+    </div>
+    <div class="notice" id="notice" hidden></div>
+    <div class="resolve-note" id="resolve-note" hidden></div>
+    <main class="feed" id="feed" aria-label="项目进度"></main>
+    <div class="feed-fade" aria-hidden="true"></div>
+  </div>
+
+  <!-- 只有 ?source=export 且还没拿到 token 时才出现；demo 与已授权时整块 hidden -->
+  <div id="gate" hidden>
+    <form class="gatecard" id="gate-form">
+      <h2>输入服务端打印的 token</h2>
+      <p>token 在启动 <code>tools/serve.py</code> 的终端里。它只用于本机请求，存在浏览器 localStorage，不写进地址栏。</p>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 token">
+      <button type="submit">连接</button>
+      <p id="gate-error"></p>
+    </form>
+  </div>
+
+<script>
+  /* ------------------------------------------------------------------
+     两个数据源，同一套渲染：
+
+       ?source=demo（默认）——下面的 DEMO，内联假数据，file:// 直接打开就能看；
+       ?source=export      —— 每 3 秒问一次本地只读服务 /api/feed（带 token）。
+                             服务端按导出物的 mtime 判断变没变：没变只回一个 unchanged，
+                             页面一个节点都不动；变了才整棵模型回来，这里按项目卡做增量替换。
+
+     模型的形状（两种来源一模一样）：
+       { generatedClock, projects: [
+           { name, total, review, needsYou, root, shownTasks, shownPool,
+             tasks: [ { key, name, shown, tickets: [ { id, title, steps[5], resolve, arrow, sessionId, note, show } ] } ],
+             pool:  [ 同 ticket ] } ],
+         cancelled: [ { id, title, project, cancelledAt, steps[5], resolve, arrow, sessionId, note } ] }
+       steps 的取值：done / current / todo / next / recorded / landed / unlanded。
+       show=false 表示默认折起来（24 小时窗口算出来的），展开时全给、顺序不变。
+       cancelled 是取消单（CD-019）：五步全灰、没有 resolve、行尾一颗绿 circle-slash；
+       读不到那一段时它是空数组，页面上什么都不多。
+     ------------------------------------------------------------------ */
+
+  var params = new URLSearchParams(location.search);
+
+  /* 数据从哪来：
+       demo —— 内联假数据（浏览器默认；Electron 里只有显式 ?source=demo 才用）
+       ipc  —— 被桌面壳包着（window.cindyWidget.feed 在）：主进程读文件、经 IPC 交过来，不要 token
+       http —— 浏览器里显式 ?source=export：原来的 /api/feed + token 那条路，保留不删 */
+  var EMBEDDED = !!(window.cindyWidget && typeof window.cindyWidget.feed === 'function');
+  var WANTED = params.get('source');
+  var SOURCE = WANTED === 'demo' ? 'demo'
+    : WANTED === 'export' ? (EMBEDDED ? 'ipc' : 'http')
+      : (EMBEDDED ? 'ipc' : 'demo');
+  /* 视图：card = 整卡（默认，已验收过的那个 A）；folded = 一行一项目（B），点开原地展开 */
+  var VIEW = params.get('view') === 'folded' ? 'folded' : 'card';
+  var POLL_MS = 3000;
+  var TOKEN_KEY = 'dashboard.token';
+
+  var DEMO = {
+    generatedClock: '07:41:12',
+    generatedAt: '（样张假数据）',
+    projects: [
+      {
+        name: 'cindy-dashboard',
+        total: 11,
+        review: 1,
+        needsYou: 0,
+        root: '{{WORKSPACE}}/panel',
+        shownTasks: 3,
+        shownPool: 2,
+        tasks: [
+          {
+            key: 's-sample-03',
+            name: 'SAMPLE-03 浮窗第一版：窗口壳与只读巡检',
+            shown: 2,
+            tickets: [
+              { id: 'SAMPLE-07', title: '窗口壳与吸附边', steps: ['done', 'done', 'done', 'done', 'current'], resolve: true, arrow: true, sessionId: 's-sample-07', note: '', show: true },
+              { id: 'SAMPLE-01', title: '呼吸与卡片入场', steps: ['done', 'done', 'done', 'done', 'recorded'], resolve: false, arrow: true, sessionId: 's-sample-01', note: '', show: true },
+              { id: 'SAMPLE-08', title: '吸附边与多屏位置', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-sample-08', note: '已在 master 里，但库里没有合并记录', show: false },
+              { id: 'SAMPLE-09', title: '开机自启与托盘', steps: ['done', 'done', 'current', 'todo', 'todo'], resolve: true, arrow: true, sessionId: 's-sample-09', note: '', show: false }
+            ]
+          },
+          {
+            key: 's-sample-02',
+            name: 'SAMPLE-02 合并记录后补',
+            shown: 1,
+            tickets: [
+              { id: 'SAMPLE-02', title: '合并记录后补', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-sample-02', note: '已在 master 里，但库里没有合并记录', show: true }
+            ]
+          },
+          {
+            key: 's-sample-04',
+            name: 'SAMPLE-04 只读巡检与 2 秒刷新',
+            shown: 1,
+            tickets: [
+              { id: 'SAMPLE-04', title: '只读巡检与 2 秒刷新', steps: ['done', 'done', 'done', 'done', 'unlanded'], resolve: true, arrow: true, sessionId: 's-sample-04', note: '库里记了合并，但那个提交不在 master 里', show: true }
+            ]
+          },
+          {
+            key: 's-sample-10',
+            name: 'SAMPLE-10 历史回填',
+            shown: 1,
+            tickets: [
+              { id: 'SAMPLE-10', title: '历史直做的合并记录', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-sample-10', note: '已在 master 里，但库里没有合并记录', show: true }
+            ]
+          },
+          {
+            key: 's-sample-11',
+            name: 'SAMPLE-11 合并演练',
+            shown: 1,
+            tickets: [
+              { id: 'SAMPLE-11', title: '合并闸门的 dry-run', steps: ['done', 'done', 'done', 'done', 'recorded'], resolve: false, arrow: true, sessionId: 's-sample-11', note: '', show: true }
+            ]
+          }
+        ],
+        pool: [
+          { id: 'SAMPLE-05', title: '长标题示范：浮窗尺寸与折叠口径在 420×700 下的实测', steps: ['current', 'todo', 'todo', 'todo', 'todo'], resolve: true, arrow: false, sessionId: '', note: '', show: true },
+          { id: 'SAMPLE-06', title: '合并记录与 git 对不上时的两种说明', steps: ['done', 'todo', 'todo', 'todo', 'todo'], resolve: true, arrow: false, sessionId: '', note: '', show: true },
+          { id: 'SAMPLE-12', title: '池子里更早的那一条', steps: ['todo', 'todo', 'todo', 'todo', 'todo'], resolve: true, arrow: false, sessionId: '', note: '', show: false }
+        ]
+      },
+      {
+        name: 'Cindy鸿蒙客户端',
+        total: 9,
+        review: 0,
+        needsYou: 1,
+        root: 'D:/cindy-harmony-app',
+        shownTasks: 2,
+        shownPool: 0,
+        tasks: [
+          {
+            key: 's-ch-079',
+            name: 'CH-079 进度页五处细化',
+            shown: 2,
+            tickets: [
+              { id: 'CH-081', title: '两枚图标热区与行尾对齐', steps: ['done', 'done', 'current', 'todo', 'todo'], resolve: true, arrow: true, sessionId: 's-ch-081', note: '', show: true },
+              { id: 'CH-083', title: '已完成项目汇总段', steps: ['done', 'done', 'done', 'done', 'current'], resolve: true, arrow: true, sessionId: 's-ch-083', note: '', show: true },
+              { id: 'CH-084', title: '空块修复的回归用例', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-ch-084', note: '已在 master 里，但库里没有合并记录', show: false },
+              { id: 'CH-085', title: 'resolve 发送前等握手', steps: ['done', 'done', 'done', 'done', 'recorded'], resolve: false, arrow: true, sessionId: 's-ch-085', note: '', show: false },
+              { id: 'CH-086', title: 'resolve 等待态', steps: ['done', 'done', 'current', 'todo', 'todo'], resolve: true, arrow: true, sessionId: 's-ch-086', note: '', show: false }
+            ]
+          },
+          {
+            key: 's-ch-074',
+            name: 'CH-074 进度页 UI 统一',
+            shown: 1,
+            tickets: [
+              { id: 'CH-075', title: 'resolve 交回母会话', steps: ['done', 'done', 'done', 'done', 'recorded'], resolve: false, arrow: true, sessionId: 's-ch-075', note: '', show: true }
+            ]
+          }
+        ],
+        pool: []
+      },
+      {
+        name: 'AI工作区',
+        total: 6,
+        review: 0,
+        needsYou: 0,
+        root: '{{WORKSPACE}}',
+        shownTasks: 1,
+        shownPool: 0,
+        tasks: [
+          {
+            key: 's-aw-118',
+            name: 'AW-118 后落地者顺延 schema 编号',
+            shown: 1,
+            tickets: [
+              { id: 'AW-118', title: 'schema 顺延 15 与合并演练', steps: ['done', 'done', 'current', 'todo', 'todo'], resolve: true, arrow: true, sessionId: 's-aw-118', note: '', show: true },
+              { id: 'AW-119', title: '合并且检查 schema 窗口', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-aw-119', note: '已在 master 里，但库里没有合并记录', show: false }
+            ]
+          }
+        ],
+        pool: []
+      },
+      {
+        name: 'ai-workspace-kit',
+        total: 6,
+        review: 0,
+        needsYou: 0,
+        root: 'D:/ai-workspace-kit',
+        shownTasks: 1,
+        shownPool: 2,
+        tasks: [
+          {
+            key: 's-kit-023',
+            name: 'KIT-023 安装包与自检脚本',
+            shown: 1,
+            tickets: [
+              { id: 'SAMPLE-13', title: '安装包与自检脚本', steps: ['done', 'done', 'done', 'done', 'landed'], resolve: false, arrow: true, sessionId: 's-sample-13', note: '已在 master 里，但库里没有合并记录', show: true }
+            ]
+          }
+        ],
+        pool: [
+          { id: 'SAMPLE-14', title: '技能目录的索引词', steps: ['current', 'todo', 'todo', 'todo', 'todo'], resolve: true, arrow: false, sessionId: '', note: '', show: true },
+          { id: 'SAMPLE-15', title: '一键装到别人的机器上', steps: ['todo', 'todo', 'todo', 'todo', 'todo'], resolve: true, arrow: false, sessionId: '', note: '', show: true }
+        ]
+      },
+      {
+        name: '1205经营季前瞻',
+        total: 10,
+        review: 2,
+        needsYou: 0,
+        root: 'D:/heartopia-preview',
+        shownTasks: 1,
+        shownPool: 0,
+        tasks: [
+          {
+            key: 's-hy-041',
+            name: 'HY-041 前瞻长视频与配乐',
+            shown: 2,
+            tickets: [
+              { id: 'SAMPLE-16', title: '前瞻长视频配乐设计方法', steps: ['done', 'done', 'done', 'current', 'next'], resolve: true, arrow: true, sessionId: 's-sample-16', note: '', show: true },
+              { id: 'SAMPLE-17', title: '分镜与字幕对齐', steps: ['done', 'done', 'done', 'done', 'current'], resolve: true, arrow: true, sessionId: 's-sample-17', note: '', show: true }
+            ]
+          }
+        ],
+        pool: []
+      }
+    ],
+    /* 取消单（CD-019）：五步全灰、没有 resolve、行尾一颗绿 circle-slash。单独一段，不进任何项目卡。 */
+    cancelled: [
+      { id: 'SAMPLE-20', title: '取消掉的单：只留一个安静的终态', project: 'cindy-dashboard',
+        cancelledAt: '2026-11-22T14:20:00+08:00', steps: ['todo', 'todo', 'todo', 'todo', 'todo'],
+        resolve: false, arrow: true, sessionId: 's-sample-20', note: 'cindy-dashboard · 取消 11-22' },
+      { id: 'SAMPLE-21', title: '已经撤掉的一次改版', project: 'Cindy鸿蒙客户端',
+        cancelledAt: '2026-11-19T09:05:00+08:00', steps: ['todo', 'todo', 'todo', 'todo', 'todo'],
+        resolve: false, arrow: false, sessionId: '', note: 'Cindy鸿蒙客户端 · 取消 11-19' }
+    ]
+  };
+
+  /* 五步图标：实心字形（圈里是镂空效果），12×12，viewBox 24 */
+  var GLYPHS = {
+    send: '<path d="M21.2 2.8 2.6 10.2l6.9 2.5 2.5 6.9z"/>',
+    play: '<path d="M7.6 4.3v15.4L20.4 12z"/>',
+    upload: '<path d="M12 2.2 6.4 8.4h3.2V15h4.8V8.4h3.2z"/><path d="M4.2 17.8h15.6v3H4.2z"/>',
+    check: '<path d="m9.3 17.7-5.2-5.2 2.1-2.1 3.1 3.1 8.5-8.5 2.1 2.1z"/>',
+    merge: '<circle cx="5.4" cy="4.6" r="2.6"/><circle cx="18.6" cy="19.2" r="2.6"/><path d="M4.1 2h3.1v8.4A6.4 6.4 0 0 0 13.6 16.8h1.6v2.8h-1.6A9.2 9.2 0 0 1 4.1 10.4z"/>'
+  };
+
+  var STEP_NAMES = ['send', 'play', 'upload', 'check', 'merge'];
+
+  var ICONS = {
+    message: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+    bugOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="13.8" rx="4" ry="5"/><path d="M9.8 6.2 8 4.2M14.2 6.2 16 4.2"/><path d="M8.2 12.6H4.6M19.4 12.6h-3.6"/><path d="M9 16.6 6.2 18.6M15 16.6l2.8 2"/><path d="m3 3 18 18"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>',
+    // 取消单行尾那一颗（lucide circle-slash）：灰圈加一条斜线，颜色由 .is-settled 给绿
+    circleSlash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>'
+  };
+
+  var stampEl = document.getElementById('stamp');
+  var noticeEl = document.getElementById('notice');
+  var resolveNoteEl = document.getElementById('resolve-note');
+  var feedEl = document.getElementById('feed');
+  var gateEl = document.getElementById('gate');
+  var winEl = document.getElementById('win');
+  var collapseEl = document.getElementById('collapse-toggle');
+  var collapsedLabelEl = document.getElementById('collapsed-label');
+
+  /* 折叠态：整张卡只留一行，内容是「最近活动的那张单」。初值由 head 里那句从主进程拿到的
+     上次状态给（localStorage 不参与：窗口尺寸是主进程的事）。 */
+  var COLLAPSED = document.documentElement.dataset.collapsed === '1';
+  var latestTicket = null;
+
+  var expanded = Object.create(null);   // 展开状态：键 → true。刷新不清、也不因为换数据重置
+  var openedProjects = Object.create(null);  // 折叠视图里点开的那几张项目卡
+
+  /* 只为截图/出图：?open=cancelled 一进来就把「已取消」那一段铺开（正式用不带这个参数）。 */
+  if (params.get('open') === 'cancelled') {
+    expanded['C|cancelled'] = true;
+  }
+  var fingerprint = '';
+  var token = '';
+
+  function esc(text) {
+    return String(text).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  /* 轨道：五个圆 + 四段线；走完的那截线的长度按最后一格 done / current 算 */
+  function rail(steps) {
+    var reached = 0;
+    steps.forEach(function (state, i) { if (state === 'done' || state === 'current') reached = i; });
+    var walked = reached * 28;
+
+    var nodes = steps.map(function (state, i) {
+      return '<span class="node ' + state + '"><span class="disc">'
+        + '<svg viewBox="0 0 24 24" aria-hidden="true">' + GLYPHS[STEP_NAMES[i]] + '</svg>'
+        + '</span></span>';
+    }).join('');
+
+    return '<div class="rail" data-rail="132">'
+      + '<span class="rail-line"></span>'
+      + '<span class="rail-walked" style="width:' + walked + 'px"></span>'
+      + nodes
+      + '</div>';
+  }
+
+  /* 行尾两枚图标：resolve（bug-off）+ 进会话（右箭头）；没有目标时留同宽的空盒子。
+     · 两枚都是有真去处的元素（CD-019）：resolve 带 data-resolve（点了走 IPC 交回它的会话），
+       箭头是指向 cindy://session/<会话> 的链接（主进程接住它、交给宿主导航）。
+     · `ticket.resolve` 从哪来（CD-022）：只从 feed 层来（app/feed.mjs 的 hasResolve），
+       已合与「已在 master、库里没记录」都不出。页面不再拿 mergeState 重判一遍——
+       两处各判一次，早晚会说两套话。
+     · 少了箭头的那一行（池子单）仍然留一个同宽的空盒子：轨道起点才不会跑。 */
+  function actions(ticket) {
+    var resolve = ticket.resolve
+      ? '<button class="act resolve" type="button" data-resolve="' + esc(ticket.id) + '"'
+        + ' aria-label="把这张单交回它的主会话" title="交回主任务">' + ICONS.bugOff + '</button>'
+      : '<span class="act resolve is-empty" aria-hidden="true"></span>';
+
+    var arrow = ticket.arrow && ticket.sessionId
+      ? '<a class="act arrow" href="cindy://session/' + esc(ticket.sessionId) + '"'
+        + ' aria-label="打开这张单的会话" title="进会话">' + ICONS.chevron + '</a>'
+      : '<span class="act arrow is-empty" aria-hidden="true"></span>';
+
+    return '<div class="actions" data-actions="44">' + resolve + arrow + '</div>';
+  }
+
+  /* 取消单的行尾（CD-019）：左边那格留空（取消不需要再交给谁手去收口），右边一颗绿 circle-slash。
+     有会话就是一条指向它的链接（点了真的进得去），没有会话就只画图标、不接手势——
+     不摆一个「看上去能点但点了没反应」的按钮。 */
+  function cancelledTail(ticket) {
+    var emptyslot = '<span class="act resolve is-empty" aria-hidden="true"></span>';
+    var icon = ICONS.circleSlash;
+    var right = ticket.arrow && ticket.sessionId
+      ? '<a class="act arrow is-settled" href="cindy://session/' + esc(ticket.sessionId) + '"'
+        + ' aria-label="打开这张单取消前的会话" title="进会话">' + icon + '</a>'
+      : '<span class="act arrow is-static is-settled" aria-hidden="true">' + icon + '</span>';
+    return '<div class="actions" data-actions="44">' + emptyslot + right + '</div>';
+  }
+
+  function ticketRow(ticket) {
+    return '<div class="ticket">'
+      + '<div class="row" data-row="tail-184">'
+      +   '<div class="headline"><span class="ticket-id">' + esc(ticket.id) + '</span> · ' + esc(ticket.title) + '</div>'
+      +   '<div class="tail" data-tail="184">' + rail(ticket.steps) + actions(ticket) + '</div>'
+      + '</div>'
+      + (ticket.note ? '<div class="note">' + esc(ticket.note) + '</div>' : '')
+      + '</div>';
+  }
+
+  /* 一行取消单：左「单号 · 标题」、右五步全灰的轨道 + 绿 circle-slash；行下是「项目 · 取消 MM-DD」。 */
+  function cancelledRow(ticket) {
+    return '<div class="ticket">'
+      + '<div class="row" data-row="tail-184">'
+      +   '<div class="headline"><span class="ticket-id">' + esc(ticket.id) + '</span> · ' + esc(ticket.title) + '</div>'
+      +   '<div class="tail" data-tail="184">' + rail(ticket.steps) + cancelledTail(ticket) + '</div>'
+      + '</div>'
+      + (ticket.note ? '<div class="note">' + esc(ticket.note) + '</div>' : '')
+      + '</div>';
+  }
+
+  /* 「已取消」那一段：默认折着，抬头就把张数说出来（不是默默敷起来）；点一下才铺出那几行。
+     它不进任何项目卡、也不算进卡头两个计数：与卡流是两条不同的账。 */
+  function cancelledSection(feed) {
+    var items = (feed && feed.cancelled) || [];
+    if (!items.length) return '';
+    var key = 'C|cancelled';
+    var open = !!expanded[key];
+    var label = '已取消 · ' + items.length + ' 张，' + (open ? '收起' : '展开');
+    var body = open
+      ? '<div class="cancelled-note">这些单已经取消，不会再走下面那五步；行尾那颗图标能进它当时的会话</div>'
+        + '<div class="cancelled-rows">' + items.map(cancelledRow).join('') + '</div>'
+      : '';
+    return '<div class="more" data-toggle="' + key + '">' + esc(label) + '</div>' + body;
+  }
+
+  function foldRow(key, open, closedText, openText) {
+    return '<div class="more" data-toggle="' + esc(key) + '">' + esc(open ? openText : closedText) + '</div>';
+  }
+
+  function taskKey(project, task) {
+    return 'T|' + project.name + '|' + task.key;
+  }
+
+  function shownTickets(project, task) {
+    if (expanded[taskKey(project, task)]) return task.tickets;
+    return task.tickets.filter(function (t) { return t.show !== false; });
+  }
+
+  function hiddenTicketCount(task) {
+    var count = task.shown;
+    if (typeof count !== 'number') {
+      count = task.tickets.filter(function (t) { return t.show !== false; }).length;
+    }
+    return Math.max(0, task.tickets.length - count);
+  }
+
+  function taskBlock(project, task) {
+    var tickets = shownTickets(project, task);
+    var key = taskKey(project, task);
+    var open = !!expanded[key];
+    var rows = tickets.map(ticketRow).join('');
+    var hidden = hiddenTicketCount(task);
+    var more = hidden > 0 ? foldRow(key, open, '更早的 ' + hidden + ' 条，展开', '收起') : '';
+
+    return '<div class="task">'
+      + (task.name ? '<div class="task-head">'
+      +   '<h3 class="task-name">' + esc(task.name) + '</h3>'
+      +   '<span class="task-icon" aria-label="打开这张主任务的会话">' + ICONS.message + '</span>'
+      + '</div>' : '')
+      + rows
+      + more
+      + '</div>';
+  }
+
+  function poolBlock(project) {
+    if (!project.pool.length) return '';
+    var key = 'P|' + project.name + '|pool';
+    var open = !!expanded[key];
+    var shown = typeof project.shownPool === 'number' ? project.shownPool : project.pool.length;
+    var visible = open ? project.pool : project.pool.slice(0, shown);
+    var hidden = project.pool.length - shown;
+
+    return '<div class="task">'
+      + '<div class="pool-label">还没人认领</div>'
+      + visible.map(ticketRow).join('')
+      + (hidden > 0 ? foldRow(key, open, '展开其余 ' + hidden + ' 条', '收起') : '')
+      + '</div>';
+  }
+
+  /* 卡头那一句：两种视图共用，折叠行与整卡头不会说两套数。
+     有「待验收 / 需要你出手」时是那个数（点也涂橙），否则是这张卡的总张数。 */
+  function cardMeta(project, withDot) {
+    var attention = project.review > 0 || project.needsYou > 0;
+    var dot = withDot || attention ? '<i class="state-dot' + (attention ? '' : ' is-idle') + '"></i>' : '';
+    if (project.review > 0) {
+      return '<span class="card-meta">' + dot + '待验收 ' + project.review + '</span>';
+    }
+    if (project.needsYou > 0) {
+      return '<span class="card-meta">' + dot + '需要你出手 ' + project.needsYou + '</span>';
+    }
+    return '<span class="card-meta">' + dot + project.total + ' 张单</span>';
+  }
+
+  function foldedRow(project) {
+    return '<button class="fold-row" type="button" data-open-project="' + esc(project.name) + '"'
+      + ' aria-label="展开 ' + esc(project.name) + ' 这张卡">'
+      +   '<span class="fold-name">' + esc(project.name) + '</span>'
+      +   cardMeta(project, true)
+      + '</button>';
+  }
+
+  function cardInner(project) {
+    if (VIEW === 'folded' && !openedProjects[project.name]) {
+      return foldedRow(project);
+    }
+
+    var key = 'P|' + project.name + '|tasks';
+    var open = !!expanded[key];
+    var shownTasks = typeof project.shownTasks === 'number' ? project.shownTasks : project.tasks.length;
+    var visibleTasks = open ? project.tasks : project.tasks.slice(0, shownTasks);
+    var hiddenTasks = project.tasks.length - shownTasks;
+
+    var folded = VIEW === 'folded';
+    var head = folded
+      ? '<div class="card-head" data-close-project="' + esc(project.name) + '" title="收起这张卡">'
+      : '<div class="card-head">';
+    var hint = folded ? '<span class="fold-hint">收起</span>' : '';
+
+    return head
+      +   '<h2 class="project">' + esc(project.name) + '</h2>'
+      +   hint
+      +   cardMeta(project, false)
+      + '</div>'
+      + visibleTasks.map(function (task) { return taskBlock(project, task); }).join('')
+      + (hiddenTasks > 0 ? foldRow(key, open, '还有 ' + hiddenTasks + ' 个主任务，展开', '收起') : '')
+      + poolBlock(project);
+  }
+
+  function signatureOf(project) {
+    var flags = [];
+    Object.keys(expanded).forEach(function (key) {
+      if (expanded[key] && key.indexOf('|' + project.name + '|') > 0) flags.push(key);
+    });
+    return VIEW + '|' + (openedProjects[project.name] ? '1' : '0') + '|'
+      + JSON.stringify(project) + '|' + flags.sort().join(',');
+  }
+
+  /* 增量更新：一卡一个节点，内容指纹没变的卡一个字节都不动（滚动位置、展开状态、正在呼吸的圆都留着） */
+  function applyFeed(feed) {
+    stampEl.textContent = '更新于 ' + (feed.generatedClock || '--:--:--');
+    stampEl.title = feed.generatedAt || '';
+
+    var existing = {};
+    Array.prototype.forEach.call(feedEl.children, function (el) {
+      // 只认「项目卡」：取消单那一段也是 .card，但它不是一张项目卡，不能被当成卡来替换
+      if (el.classList && el.classList.contains('card') && el.dataset.project) {
+        existing[el.dataset.project] = el;
+      }
+    });
+
+    var placeholder = feedEl.querySelector('.placeholder');
+    if (!placeholder) {
+      placeholder = document.createElement('div');
+      placeholder.className = 'placeholder';
+      placeholder.textContent = '已完成项目汇总段：等 CH-083 收口后补';
+      feedEl.appendChild(placeholder);
+    }
+
+    feed.projects.forEach(function (project) {
+      var card = existing[project.name];
+      if (!card) {
+        card = document.createElement('section');
+        card.className = 'card';
+        card.dataset.project = project.name;
+      } else {
+        delete existing[project.name];
+      }
+      var signature = signatureOf(project);
+      var collapsed = VIEW === 'folded' && !openedProjects[project.name];
+      card.className = collapsed ? 'card card-folded' : 'card';
+      if (card.dataset.sig !== signature) {
+        card.innerHTML = cardInner(project);
+        card.dataset.sig = signature;
+      }
+      feedEl.insertBefore(card, placeholder);
+    });
+
+    Object.keys(existing).forEach(function (name) { existing[name].remove(); });
+
+    // 刷新之后把仍在飞的那几枚 resolve 重新标成等待态（卡被重建时不许把等待态弄丢）
+    Object.keys(resolveBusy).forEach(function (id) {
+      if (resolveBusy[id]) paintResolveBusy(id, true);
+    });
+
+    /* 取消单那一段（CD-019）：在所有项目卡之后、「已完成项目汇总段」空位之前。
+       读不到 cancelled（旧导出物）时它是空的，这一整块不出现，页面上什么都不变。 */
+    var cancelledEl = feedEl.querySelector('.card-cancelled');
+    var cancelledInner = cancelledSection(feed);
+    if (!cancelledInner) {
+      if (cancelledEl) cancelledEl.remove();
+      return;
+    }
+    if (!cancelledEl) {
+      cancelledEl = document.createElement('section');
+      cancelledEl.className = 'card card-cancelled';
+    }
+    if (cancelledEl.dataset.sig !== cancelledInner) {
+      cancelledEl.innerHTML = cancelledInner;
+      cancelledEl.dataset.sig = cancelledInner;
+    }
+    feedEl.insertBefore(cancelledEl, placeholder);
+  }
+
+  function showNotice(text) {
+    if (text) {
+      noticeEl.textContent = text;
+      noticeEl.hidden = false;
+    } else {
+      noticeEl.textContent = '';
+      noticeEl.hidden = true;
+    }
+  }
+
+  /* 折叠行与 resolve：点一下只换这一张卡的内容，别的卡与滚动位置不动 */
+  feedEl.addEventListener('click', function (event) {
+    var target = event.target.closest
+      ? event.target.closest('[data-open-project],[data-close-project],[data-toggle],[data-resolve]')
+      : null;
+    if (!target) return;
+    if (target.hasAttribute('data-resolve')) {
+      // 会话链接（cindy://session/…）不拦：让主进程的 will-navigate 接住它
+      sendResolve(target.getAttribute('data-resolve'));
+      return;
+    }
+    if (target.hasAttribute('data-open-project')) {
+      openedProjects[target.getAttribute('data-open-project')] = true;
+    } else if (target.hasAttribute('data-close-project')) {
+      delete openedProjects[target.getAttribute('data-close-project')];
+    } else {
+      var key = target.getAttribute('data-toggle');
+      expanded[key] = !expanded[key];
+    }
+    if (lastFeed) applyFeed(lastFeed);
+  });
+
+  var lastFeed = null;
+
+  /* ------------------------------------------------------------------ resolve（CD-019）
+
+     以前那一颗按钮没有任何点击处理：页面只认三种 data-* 目标，点它物理上什么都不会发生。
+     现在它走这条路：
+
+       点一下 → 按钮进等待态（不可再点、圈在转）→ 经 IPC 交到主进程 →
+       主进程算路、交给宿主、记一行「发出记录」→ 把「发到哪了 / 为什么没发出去」回给页面
+
+     三个结论都必须看得见：正在发、发出去了、没发出去。哪一个都不静默。
+     ------------------------------------------------------------------ */
+
+  var resolveBusy = Object.create(null);
+
+  function showResolveNote(text, isError) {
+    if (!resolveNoteEl) return;
+    if (!text) {
+      resolveNoteEl.textContent = '';
+      resolveNoteEl.hidden = true;
+      resolveNoteEl.classList.remove('is-error');
+      return;
+    }
+    resolveNoteEl.textContent = text;
+    resolveNoteEl.hidden = false;
+    resolveNoteEl.classList.toggle('is-error', !!isError);
+  }
+
+  /* 一枚按钮的等待态：只改那一个元素，不重建整张卡（卡里有正在呼吸的圆，也有滚动位置） */
+  function paintResolveBusy(id, busy) {
+    var nodes = feedEl.querySelectorAll('[data-resolve]');
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (nodes[i].getAttribute('data-resolve') !== id) continue;
+      nodes[i].classList.toggle('is-waiting', busy);
+      nodes[i].disabled = busy;
+      if (busy) nodes[i].setAttribute('aria-busy', 'true');
+      else nodes[i].removeAttribute('aria-busy');
+    }
+  }
+
+  /* 屏上这张单在哪张卡里：resolve 要的是「单 + 它所属项目的根」两样东西 */
+  function findTicketInFeed(id) {
+    if (!lastFeed) return null;
+    for (var i = 0; i < lastFeed.projects.length; i += 1) {
+      var project = lastFeed.projects[i];
+      for (var j = 0; j < project.tasks.length; j += 1) {
+        var tickets = project.tasks[j].tickets;
+        for (var k = 0; k < tickets.length; k += 1) {
+          if (tickets[k].id === id) return { ticket: tickets[k], project: project };
+        }
+      }
+      for (var m = 0; m < project.pool.length; m += 1) {
+        if (project.pool[m].id === id) return { ticket: project.pool[m], project: project };
+      }
+    }
+    return null;
+  }
+
+  /* 等待态那一句分两支，跟主进程要去的地方一致（CD-021 C5）：
+     · 有会话 → 「请求打开 … 的会话」（宿主只做导航）；
+     · 没有会话，或会话已经不在了（ticket.sessionGone）→ 「请求宿主在 … 新建会话」。
+     两句都不写「已发送」：真到那一步再说（结果行说的是主进程回报的可核事实）。 */
+  function waitingNote(hit) {
+    var ticket = hit.ticket || {};
+    var name = (hit.project && hit.project.name) || '这个项目';
+    if (ticket.arrow && ticket.sessionId) {
+      return '正在请求打开 ' + (ticket.id || '') + ' 的会话…';
+    }
+    if (ticket.sessionGone) {
+      return '原来那条会话已经不在 Cindy 里了，正在请求宿主在 ' + name + ' 新建会话…';
+    }
+    return '正在请求宿主在 ' + name + ' 新建会话…';
+  }
+
+  function sendResolve(id) {
+    if (!id || resolveBusy[id]) return;
+    var hit = findTicketInFeed(id);
+    if (!hit) {
+      showResolveNote('没发出去：' + id + ' 已经不在屏上这份导出物里了', true);
+      return;
+    }
+    if (!EMBEDDED || !window.cindyWidget || typeof window.cindyWidget.resolve !== 'function') {
+      showResolveNote('没发出去：浏览器里没有浮窗通道（交回会话只在桌面浮窗里能发）', true);
+      return;
+    }
+
+    resolveBusy[id] = true;
+    paintResolveBusy(id, true);
+    showResolveNote(waitingNote(hit), false);
+
+    Promise.resolve()
+      .then(function () {
+        return window.cindyWidget.resolve(hit.ticket, {
+          name: hit.project.name,
+          root: hit.project.root || ''
+        });
+      })
+      .then(function (result) {
+        if (result && result.ok) {
+          /* 成功只展开主进程给的那句话（它说的是两件可核的事：请求了哪条链接、复制了什么）。
+             这里不再加「已交回」这种前缀——宿主对一条删掉的会话只会弹「找不到」，
+             浮窗抢在它前面宣布成功就是在说假话（CD-022）。 */
+          showResolveNote(result.detail || '请求已发出（宿主没有给结论，具体看发出记录）', false);
+        } else {
+          showResolveNote('没发出去：' + ((result && result.reason) || '未知原因'), true);
+        }
+      })
+      .catch(function (error) {
+        showResolveNote('没发出去：' + ((error && error.message) || '连不上主进程'), true);
+      })
+      .then(function () {
+        resolveBusy[id] = false;
+        paintResolveBusy(id, false);
+      });
+  }
+
+  /* ------------------------------------------------------------------ 主题 */
+
+  /* 主题按钮没有了：跟系统走（head 里先定一次，这里负责系统切换时跟上）。
+     ?theme=dark|light 只留给截图/出图，正式用的时候不带。 */
+  var systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+  var forcedTheme = params.get('theme');
+
+  function followSystemTheme() {
+    if (forcedTheme === 'dark' || forcedTheme === 'light') return;
+    document.documentElement.dataset.theme = systemDark.matches ? 'dark' : 'light';
+  }
+
+  if (systemDark.addEventListener) {
+    systemDark.addEventListener('change', followSystemTheme);
+  } else if (systemDark.addListener) {
+    systemDark.addListener(followSystemTheme);
+  }
+
+  /* ------------------------------------------------------------------ 折叠成一行 */
+
+  function latestLabel() {
+    if (!latestTicket) return '';
+    return (latestTicket.id ? latestTicket.id + ' · ' : '') + (latestTicket.title || '');
+  }
+
+  function applyCollapsed() {
+    winEl.classList.toggle('is-collapsed', COLLAPSED);
+    collapsedLabelEl.textContent = latestLabel();
+    collapseEl.setAttribute('aria-label', COLLAPSED ? '展开面板' : '折叠为一行');
+    collapseEl.title = COLLAPSED ? '展开面板' : '折叠为一行';
+  }
+
+  collapseEl.addEventListener('click', function () {
+    COLLAPSED = !COLLAPSED;
+    applyCollapsed();
+    // 告诉主进程把窗口高度也改掉（浏览器里没有壳，就只折页面）
+    if (EMBEDDED && window.cindyWidget && typeof window.cindyWidget.setCollapsed === 'function') {
+      window.cindyWidget.setCollapsed(COLLAPSED);
+    }
+  });
+
+  applyCollapsed();
+
+  /* --------------------------------------------------- 卡片外那圈留白不吃点击（CD-016）
+
+     窗口的底态是穿透：那圈 12px 留白点下去要落到下面那个窗口。指针真落在卡片本体上才切回可交互——
+     那件事由主进程每 50ms 问一次系统，页面不参与。
+
+     页面只报一个事实：#win 的矩形。它变了就重报一次（折叠/展开、内容区被系统改了大小），
+     主进程拿它按指针当前位置重算一遍——那几个时刻指针往往一动没动。
+
+     为什么不在这里监听 mousemove 报指针位置：顶部那一行是窗口拖动区（-webkit-app-region: drag），
+     那一块鼠标事件到不了页面；收成一行之后整行都是拖动区，靠页面报就是「整个折叠行点不动」。 */
+  var rectBridge = EMBEDDED && window.cindyWidget
+    && typeof window.cindyWidget.reportCardRect === 'function'
+    ? window.cindyWidget : null;
+
+  function reportCardRect() {
+    if (!rectBridge) return;
+    var rect = winEl.getBoundingClientRect();
+    rectBridge.reportCardRect({
+      left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+    });
+  }
+
+  if (rectBridge) {
+    // 三种变化都要重报：卡片自己换了高度（折叠/展开）、内容区被系统改了大小（居中位置跟着变）、
+    // body 跟着重排。只盯 #win 不够：内容区变窄后 #win 尺寸没变、只是居中位置变了，
+    // ResizeObserver(#win) 不会响，主进程就会拿一个偏了 4px 的旧矩形算命中。
+    if (typeof ResizeObserver === 'function') {
+      var rectObserver = new ResizeObserver(reportCardRect);
+      rectObserver.observe(winEl);
+      rectObserver.observe(document.documentElement);
+      rectObserver.observe(document.body);
+    }
+    window.addEventListener('resize', reportCardRect);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', reportCardRect);
+    }
+    reportCardRect();
+  }
+
+  /* ------------------------------------------------------------------ 数据 */
+
+  /* 折叠行要的那张单：优先用主进程/夹具给的「最近活动」那一张；
+     浏览器那条路（HTTP / demo）没有这个字段时，按卡内已有的排序取第一张（最近的那张）。 */
+  function guessLatest(feed) {
+    if (!feed) return null;
+    for (var i = 0; i < feed.projects.length; i += 1) {
+      var project = feed.projects[i];
+      if (project.tasks.length && project.tasks[0].tickets.length) return project.tasks[0].tickets[0];
+      if (project.pool.length) return project.pool[0];
+    }
+    return null;
+  }
+
+  function start(feed) {
+    lastFeed = feed;
+    applyFeed(feed);
+    if (!latestTicket) latestTicket = guessLatest(feed);
+    applyCollapsed();
+  }
+
+  if (SOURCE === 'demo') {
+    start(DEMO);
+  } else if (SOURCE === 'ipc') {
+    startIpc();
+  } else {
+    try { token = localStorage.getItem(TOKEN_KEY) || ''; } catch (ignored) { token = ''; }
+    if (token) { poll(); } else { showGate(''); }
+  }
+
+  /* 桌面壳那条路：先主动要一次（首帧不用等推送），再订阅后续更新。
+     主进程那边读不到/半截 JSON 时给的是 ok:false + reason，这里照旧保留上一份并提示。 */
+  function startIpc() {
+    var apply = function (state) {
+      if (!state) return;
+      if (state.latest) latestTicket = state.latest;
+      if (state.feed) start(state.feed);
+      if (state.ok) {
+        showNotice('');
+      } else {
+        showNotice('这次没读到导出物：' + (state.reason || '未知原因') + '（屏上仍是上一份）');
+      }
+    };
+    Promise.resolve()
+      .then(function () { return window.cindyWidget.feed(); })
+      .then(apply)
+      .catch(function (error) {
+        showNotice('连不上主进程（' + ((error && error.message) || '未知原因') + '），屏上仍是上一份');
+      });
+    if (typeof window.cindyWidget.onFeed === 'function') {
+      window.cindyWidget.onFeed(apply);
+    }
+  }
+
+  function showGate(message) {
+    gateEl.hidden = false;
+    document.getElementById('gate-error').textContent = message || '';
+    document.getElementById('token').focus();
+  }
+
+  function hideGate() {
+    gateEl.hidden = true;
+  }
+
+  document.getElementById('gate-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var entered = document.getElementById('token').value.trim();
+    if (!entered) {
+      document.getElementById('gate-error').textContent = 'token 不能为空';
+      return;
+    }
+    token = entered;
+    try { localStorage.setItem(TOKEN_KEY, token); } catch (ignored) {}
+    hideGate();
+    fingerprint = '';
+    poll();
+  });
+
+  function schedule() {
+    setTimeout(poll, POLL_MS);
+  }
+
+  function poll() {
+    var url = '/api/feed' + (fingerprint ? '?since=' + encodeURIComponent(fingerprint) : '');
+    fetch(url, { cache: 'no-store', headers: token ? { Authorization: 'Bearer ' + token } : {} })
+      .then(function (response) {
+        if (response.status === 401) {
+          throw { unauthorized: true };
+        }
+        return response.json();
+      })
+      .then(function (body) {
+        if (!body.ok) {
+          // 读到半截 / 解析失败：一个节点都不动，只把原因挂在上面
+          showNotice('这次没读到导出物：' + (body.error || '未知原因') + '（屏上仍是上一份）');
+        } else {
+          showNotice('');
+          fingerprint = body.fingerprint || '';
+          if (!body.unchanged && body.feed) start(body.feed);
+        }
+        schedule();
+      })
+      .catch(function (error) {
+        if (error && error.unauthorized) {
+          token = '';
+          try { localStorage.removeItem(TOKEN_KEY); } catch (ignored) {}
+          showGate('token 不对，请重新粘贴');
+          return;
+        }
+        showNotice('连不上本地服务（' + ((error && error.message) || '网络错误') + '），屏上仍是上一份');
+        schedule();
+      });
+  }
+</script>
+</body>
+</html>

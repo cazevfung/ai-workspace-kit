@@ -1,0 +1,15 @@
+{
+  "name": "cindy-dashboard-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "420×700 常驻桌面浮窗（加载仓库里的 docs/样张/sample.html）",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1"
+  }
+}

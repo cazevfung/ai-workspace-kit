@@ -52,8 +52,8 @@ def main(argv=None) -> int:
               (result.stdout + result.stderr)[-1500:])
 
         check("工作区核心存在", (ws / "task_center" / "core.py").is_file())
-        check("项目内技能 6 个", len([p for p in (ws / ".agents" / "skills").iterdir()]) == 6)
-        check("用户级技能 26 个", len([p for p in (agents / "skills").iterdir()]) == 26)
+        check("项目内技能 7 个", len([p for p in (ws / ".agents" / "skills").iterdir()]) == 7)
+        check("用户级技能 27 个", len([p for p in (agents / "skills").iterdir()]) == 27)
         center_path = agents / "center.json"
         center_ok = False
         if center_path.is_file():
@@ -66,6 +66,27 @@ def main(argv=None) -> int:
         check("center.json 指向本工作区", center_ok, str(center_path))
         check("交接协议已复制", (agents / "intake" / "intake.md").is_file())
         check("安装清单已写", (agents / ".ai-workspace-kit.json").is_file())
+
+        # 浮窗面板：装到 <工作区>/panel，且占位符真的换成了这台机器上的路径。
+        # 两条分开报：「有没有装」与「装出来的是不是指对地方」是两件事——.mjs / .cjs / .html
+        # 曾经不在 install.py 的替换后缀里，那一步会让文件装过去却留着占位符。
+        panel_main = ws / "panel" / "app" / "main.mjs"
+        check("panel 已装到工作区", panel_main.is_file())
+        panel_files = [p for p in (ws / "panel").rglob("*") if p.is_file()] if (ws / "panel").is_dir() else []
+        panel_placeholders, panel_main_text = [], ""
+        for path in panel_files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            if "{{WORKSPACE}}" in text:
+                panel_placeholders.append(path)
+            if path == panel_main:
+                panel_main_text = text
+        check("panel 占位已换成真实路径",
+              bool(panel_files) and not panel_placeholders and ws.resolve().as_posix() in panel_main_text,
+              f"留着占位符的 {len(panel_placeholders)} 个（如 {', '.join(str(p) for p in panel_placeholders[:3])}）；"
+              f"main.mjs 里{'有' if ws.resolve().as_posix() in panel_main_text else '没有'}本工作区路径")
 
         leftovers = []
         for tree in (agents / "skills", agents / "intake"):

@@ -1,0 +1,531 @@
+{
+  "schemaVersion": 3,
+  "generatedAt": "2026-11-20T20:00:00+08:00",
+  "source": {
+    "db": "D:/redacted/task-center.sqlite3",
+    "schemaVersion": 16,
+    "sessionsDb": "redacted.db"
+  },
+  "projects": [
+    {
+      "id": "proj-a",
+      "name": "项目甲",
+      "root": "D:/redacted/项目甲",
+      "ticketCount": 3,
+      "openCount": 2,
+      "settledCount": 1,
+      "lastSettledAt": "2026-11-20T18:10:00+08:00",
+      "lastActivityAt": "2026-11-20T19:35:00+08:00",
+      "settledTickets": []
+    },
+    {
+      "id": "proj-c",
+      "name": "项目丙",
+      "root": "",
+      "ticketCount": 2,
+      "openCount": 1,
+      "settledCount": 1,
+      "lastSettledAt": "2026-11-20T19:00:00+08:00",
+      "lastActivityAt": "2026-11-20T19:00:00+08:00",
+      "settledTickets": []
+    }
+  ],
+  "groups": [
+    {
+      "key": "needs-you",
+      "label": "需要你出手",
+      "tasks": [
+        {
+          "sessionId": "s-ny",
+          "title": "任务甲一",
+          "project": "项目甲",
+          "tickets": [
+            {
+              "id": "N-1",
+              "title": "N-1 的标题",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 25,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:35:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-ny",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 1,
+            "review": 0,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:35:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "review",
+      "label": "待验收",
+      "tasks": [
+        {
+          "sessionId": "s-rv",
+          "title": "任务甲二",
+          "project": "项目甲",
+          "tickets": [
+            {
+              "id": "R-1",
+              "title": "R-1 的标题",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 8,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:52:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-rv",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "R-2",
+              "title": "R-2 的标题",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 2400,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-19T04:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-rv",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 2,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:52:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "running",
+      "label": "在跑",
+      "tasks": [
+        {
+          "sessionId": "s-run",
+          "title": "任务甲三",
+          "project": "项目甲",
+          "tickets": [
+            {
+              "id": "U-1",
+              "title": "U-1 的标题",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 120,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T18:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-run",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "U-2",
+              "title": "U-2 的标题",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 3000,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-18T18:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-run",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 2,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T18:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "queued",
+      "label": "排队",
+      "tasks": [
+        {
+          "sessionId": "s-q",
+          "title": "任务乙一",
+          "project": "项目乙",
+          "tickets": [
+            {
+              "id": "Q-1",
+              "title": "Q-1 的标题",
+              "state": "planned",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目乙",
+              "elapsedMinutes": 180,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T17:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-q",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 0,
+            "queued": 1
+          },
+          "lastActivityAt": "2026-11-20T17:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "pool",
+      "label": "池子里（还没人认领）",
+      "tickets": [
+        {
+          "id": "P-1",
+          "title": "P-1 的标题",
+          "state": "planned",
+          "merged": false,
+          "mergeState": "not-merged",
+          "branchExists": true,
+          "project": "项目甲",
+          "elapsedMinutes": 120,
+          "lastStep": "会话已绑定",
+          "lastActivityAt": "2026-11-20T18:00:00+08:00",
+          "device": "DESKTOP-GOLD",
+          "ticketSessionId": "",
+          "pmSessionId": "pm-gold"
+        },
+        {
+          "id": "P-2",
+          "title": "P-2 的标题",
+          "state": "planned",
+          "merged": false,
+          "mergeState": "not-merged",
+          "branchExists": true,
+          "project": "项目乙",
+          "elapsedMinutes": 90,
+          "lastStep": "会话已绑定",
+          "lastActivityAt": "2026-11-20T18:30:00+08:00",
+          "device": "DESKTOP-GOLD",
+          "ticketSessionId": "s-p2",
+          "pmSessionId": "pm-gold"
+        },
+        {
+          "id": "P-3",
+          "title": "P-3 的标题",
+          "state": "planned",
+          "merged": false,
+          "mergeState": "not-merged",
+          "branchExists": true,
+          "project": "项目甲",
+          "elapsedMinutes": 1800,
+          "lastStep": "会话已绑定",
+          "lastActivityAt": "2026-11-19T14:00:00+08:00",
+          "device": "DESKTOP-GOLD",
+          "ticketSessionId": "",
+          "pmSessionId": "pm-gold"
+        }
+      ]
+    },
+    {
+      "key": "unmerged",
+      "label": "待合并",
+      "tasks": [
+        {
+          "sessionId": "s-um",
+          "title": "任务乙二",
+          "project": "项目乙",
+          "tickets": [
+            {
+              "id": "M-1",
+              "title": "M-1 的标题",
+              "state": "done",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目乙",
+              "elapsedMinutes": 10,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:50:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-um",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:50:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "merge-unlanded",
+      "label": "已记录未落地",
+      "tasks": [
+        {
+          "sessionId": "s-mu",
+          "title": "任务丙一",
+          "project": "项目丙",
+          "tickets": [
+            {
+              "id": "L-1",
+              "title": "L-1 的标题",
+              "state": "done",
+              "merged": false,
+              "mergeState": "recorded-unlanded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 15,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:45:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-mu",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:45:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "merged-unrecorded",
+      "label": "已合，库里缺合并记录",
+      "tasks": [
+        {
+          "sessionId": "s-md",
+          "title": "任务丙二",
+          "project": "项目丙",
+          "tickets": [
+            {
+              "id": "K-1",
+              "title": "K-1 的标题",
+              "state": "done",
+              "merged": false,
+              "mergeState": "landed-unrecorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 20,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:40:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-md",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "K-2",
+              "title": "K-2 的标题",
+              "state": "done",
+              "merged": false,
+              "mergeState": "landed-unrecorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 5760,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-16T20:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-md",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:40:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "historical-direct",
+      "label": "历史直做（无分支）",
+      "tasks": [
+        {
+          "sessionId": "",
+          "title": "",
+          "project": "项目丙",
+          "tickets": [
+            {
+              "id": "H-1",
+              "title": "H-1 的标题",
+              "state": "done",
+              "merged": true,
+              "mergeState": "recorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 3600,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-18T08:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "H-2",
+              "title": "H-2 的标题",
+              "state": "done",
+              "merged": true,
+              "mergeState": "recorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 3600,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-18T08:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "H-3",
+              "title": "H-3 的标题",
+              "state": "done",
+              "merged": true,
+              "mergeState": "recorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 0,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T20:00:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "",
+              "pmSessionId": "pm-gold"
+            },
+            {
+              "id": "H-4",
+              "title": "H-4 的标题",
+              "state": "done",
+              "merged": true,
+              "mergeState": "recorded",
+              "branchExists": true,
+              "project": "项目丙",
+              "elapsedMinutes": 60,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:00:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 0,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-18T08:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "key": "mystery-group",
+      "label": "没见过的组",
+      "tasks": [
+        {
+          "sessionId": "s-mystery",
+          "title": "没见过的组里的任务",
+          "project": "项目甲",
+          "tickets": [
+            {
+              "id": "MY-1",
+              "title": "没见过的组里的单",
+              "state": "running",
+              "merged": false,
+              "mergeState": "not-merged",
+              "branchExists": true,
+              "project": "项目甲",
+              "elapsedMinutes": 5,
+              "lastStep": "会话已绑定",
+              "lastActivityAt": "2026-11-20T19:58:00+08:00",
+              "device": "DESKTOP-GOLD",
+              "ticketSessionId": "s-mystery",
+              "pmSessionId": "pm-gold"
+            }
+          ],
+          "counts": {
+            "needsYou": 0,
+            "review": 0,
+            "running": 1,
+            "queued": 0
+          },
+          "lastActivityAt": "2026-11-20T19:58:00+08:00"
+        }
+      ],
+      "tickets": [
+        {
+          "id": "MY-2",
+          "title": "没见过的组里的池子单",
+          "state": "running",
+          "merged": false,
+          "mergeState": "not-merged",
+          "branchExists": true,
+          "project": "项目甲",
+          "elapsedMinutes": 5,
+          "lastStep": "会话已绑定",
+          "lastActivityAt": "2026-11-20T19:57:00+08:00",
+          "device": "DESKTOP-GOLD",
+          "ticketSessionId": "",
+          "pmSessionId": "pm-gold"
+        }
+      ]
+    }
+  ],
+  "cancelled": [
+    {
+      "id": "X-1",
+      "title": "取消掉的单甲",
+      "project": "项目甲",
+      "cancelledAt": "2026-11-20T12:00:00+08:00",
+      "sessionId": "s-x1"
+    },
+    {
+      "id": "X-2",
+      "title": "取消掉的单乙",
+      "project": "",
+      "cancelledAt": "",
+      "sessionId": ""
+    },
+    {
+      "id": "X-3",
+      "title": "取消掉的单丙",
+      "project": "项目乙",
+      "cancelledAt": "2026-11-19T08:30:00+08:00",
+      "sessionId": ""
+    }
+  ]
+}
