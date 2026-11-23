@@ -123,6 +123,28 @@ def main(argv=None) -> int:
               f"留着占位符的 {len(panel_placeholders)} 个（如 {', '.join(str(p) for p in panel_placeholders[:3])}）；"
               f"main.mjs 里{'有' if ws.resolve().as_posix() in panel_main_text else '没有'}本工作区路径")
 
+        # 自动化层：两份调度正文模板必须随安装落地，而且占位符已经是这台机器的路径。
+        # 两条分开报：模板没装进来、与装进来却指错地方（占位没换）是两回事——
+        # 后者会把一串花括号填进别人的调度正文。
+        automation_docs = [ws / "automation" / name for name in ("queue-watch.md", "dispatcher.md")]
+        check("automation 两份调度模板已装到工作区",
+              all(path.is_file() for path in automation_docs),
+              "缺：" + "、".join(str(p) for p in automation_docs if not p.is_file()))
+        automation_placeholders, automation_text = [], ""
+        for path in automation_docs:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            automation_text += text
+            if "{{WORKSPACE}}" in text:
+                automation_placeholders.append(path.name)
+        workspace_posix = ws.resolve().as_posix()
+        check("automation 占位已换成真实路径",
+              bool(automation_docs) and not automation_placeholders
+              and workspace_posix in automation_text,
+              f"留着占位符的 {len(automation_placeholders)} 份（{', '.join(automation_placeholders)}）；"
+              f"正文里{'有' if workspace_posix in automation_text else '没有'}本工作区路径")
+
         leftovers = []
         for tree in (agents / "skills", agents / "intake"):
             for path in tree.rglob("*"):

@@ -2,9 +2,42 @@
 
 ## 0.5.0（2026-11-23）
 
-2026-11-23 发布。把 Windows 常驻浮窗面板并进套件（`panel/`），连同此前累计四段还没发出去的成果一起发出去；闸门判定、工单核心的状态机与面板的判据一行未改。
+2026-11-23 发布。这一版把三件事凑齐发出去：Windows 常驻浮窗面板并入套件（`panel/`）、工单引擎与工具补齐到与工作区同功能、无人值守那两条调度做进套件（`automation/` 与 `tools/schedule_plan.py`），连同此前累计还没发出去的几段成果一起；闸门判定、工单核心的状态机与面板的判据一行未改。
 
-### 浮窗面板并入套件（Windows 常驻浮窗，420×700）
+### 自动化层进套件：两条调度与一条闸门命令（AWK-109）
+
+无人值守那一层以前只以「这台机器上的两条定时任务」存在，别人装完套件拿不到。这一版把它变成可复制的产物：正文是模板，参数由脚本打印，**建调度这一步仍然留给人**。
+
+- 新增 `kit/automation/`：`queue-watch.md`（队列值守，每 30 分钟巡一遍会话）与 `dispatcher.md`（无人值守派单器，每 10 分钟读一次库）。两份都是从本机在跑的正文里取下来的，逐段抹掉本机绑定物——`targetSessionId`、36 位的调度 / 会话 id、`AppData/Roaming/Cindy` 下的会话库路径、模型与 provider、别的项目的根——工作区路径统一写成安装时替换的占位符。判据段落（四类要看的、粗筛前移、红线、必须叫人的三种情况）一段没删。
+- 新增 `kit/tools/schedule_plan.py`：输入一个工作区路径，输出 `schedule_create` 的完整 args（`name` / `cronExpr` / `timezone` / `recurring` / `workingDir` / `prompt` / `silentWhenIdle` / `preRunHook`）。**它不建调度、不写任何宿主状态**：源码里没有 `schedule_*` 调用、没有子进程、没有网络、不落一个文件，用例把这五条逐个钉住。
+- 闸门就是退出码：派单器的 `preRunHook` 直接跑 `python <工作区>/tools/next_action.py`，`0` 放行、`2` 跳过本轮不烧 token、其它 fail-closed——与 `next_action.py` 自己的三档口径一一对上，不另包一层脚本。队列值守**不设闸门**：它要看的是「会话卡住了」，而这件事不在工单库里，加了闸门等于把唯一能发现它的一路关掉。
+- `kit/docs/无人值守派单.md` 新增 §10「在自己的 Cindy 里建这条调度」：两条调度各多久跑一次、闸门的三档、参数怎么拿、建调度时哪三件事必须人定（模型、跑在哪条会话、要不要通知），以及离开 Cindy 用系统 cron 或 Windows 计划任务加同一个退出码替代（含 `|| true` 会把出错当成没活的写法警告）。§11 变更记录跟着加一行。
+- `README` / `README.en` 新增「自动化：无人值守跑起来」一节，指向那份文档与脚本；「装了什么」的目录树补上 `automation/`。
+- `verify/verify_install.py` 加两项现场检查：`automation` 两份模板已装到工作区、占位符已换成这台机器的真实路径（只证明「没留下什么」不算过）。
+- 用例：新增 `kit/tools/test_schedule_plan.py`（35 项）——两份模板在、占位符按布局两种都成立、没有写死盘符、没有 UUID / 会话库 / `targetSessionId` / 模型名、两条调度的 cron 与 `silentWhenIdle`、派单器钩子指向 `next_action.py` 而队列值守没有钩子、`--only` 与 `--json` 两条分支、相对路径与非绝对路径报错、模板里混进会话 id 时宁可报错也不输出。合计 932 → 967 项（`tests/` 354 + `tools/` 613）。
+- 发布动作：`VERSION` 与 `plugin/draft/ghost.json` 都是 `0.5.0`，重打 `dist/ai-workspace-kit-0.5.0.cindy`，`dist/` 只留这一个包；推 `master` 与 `v0.5.0` tag，`gh release create` 附两个资源（包与 `ai-workspace-kit-0.5.0-source.zip`）。
+- 刻意没做的：不替人建调度（脚本只打印参数）、不动 `task_center/`、不发 SkillHub、不上架插件市场。
+
+### 工单系统与工具补齐到与工作区同功能（AWK-110）
+
+引擎与工具面追平工作区，判据一处没有反过来改工作区；套件自己独有的增量（`wait_audit` 的第五类、`idle_watch` 的占位判断、`doc_gate` 的两处源码扫描、`center_config` 的中心库发现、schema 闸门认 `kit/task_center/db.py`）一条不丢。
+
+- `kit/task_center/core.py`：补 `archive_ticket`（第十个终态 `archived`，只能从 `done` 进、必带理由、`revision` 不变）与 `rename_project`，连带 `pending_blockers` 认归档为满足、`cancel_ticket` / `take_over_ticket` 认归档为终态、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件、跨项目车次脏行的判据。`db.py` 保留套件自己的迁移键位（`MIGRATIONS` 的键是「这一步装配完成后的版本号」，与工作区差一格，统一走 `migration_step()`）。
+- `kit/tools/`：搬进 `next_action.py`、`receipt_payload.py`、`handover_owner.py`、`coordinator_state.py`、`archive_legacy.py`、`backfill_merges.py` 与 `merge-projects.json`；`work_gate` 补池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动背书；`auto_merge` 补「按项目配置测试命令」那一层（`merge-projects.json` → 仓库自己的 `.agents/ticket-config.json` → 缺省 `run_tests.py`）；`close_gate` 按「每条」判第 5 节落点；`run_tests` 换成两处并行，仍然两处的用例数都打印。
+- `kit/docs/`：搬进 `无人值守派单.md`、`schema-shift.md`、`unmerged-exemptions.md`（与 `.json`），`protocol.md` 与 `closing.md` 按工作区对齐。
+- 用例：`kit/tests/` 与 `kit/tools/test_*.py` 两处同步，新增 `test_archive` / `test_parking` / `test_review_dispatched` / `test_review_unverified` / `test_answer_owner` 与六个工具各自的用例文件。合计 724 → 932 项（`tests/` 354 + `tools/` 578）。
+- 这一版不发版、不推送、不动 `panel/`、`VERSION`、`CHANGELOG`、`plugin/`、`dist/`——发版留给 AWK-108 之后的发布单收口。
+
+### 中心库只有一处发现路径（AWK-105）
+
+以前五个闸门各自找一遍库，装到别人的机器上就出现「闸门读的是另一份库」。现在发现链只有一处。
+
+- 新增 `tools/center_config.py`：`--db` → `TASK_CENTER_DB` → `TASK_CENTER_AGENTS_HOME` → 工作区指针 `.agents/center.json` 记的 `agents-home` → 本工作区 `.data` → `~/.agents`。指针指丢就报 `DB_NOT_FOUND`，不回落、不新建库。
+- `install.py` 在工作区写 `.agents/center.json`（只记 `agents_home`，不进版本库），`uninstall --all` 一并删掉；`work_gate` / `auto_merge` / `close_gate` 与 `idle_watch` / `wait_audit` 都改从这一处取，`work_gate --list` 打出「凭什么读到这一份」。
+- `kit/docs/closing.md` 新增「中心库怎么被发现」；`docs/INSTALL.md`、`docs/SHARING.md` 跟着对齐；`verify/verify_install.py` 加两项现场检查（读到本工作区的库、配置缺失报 `DB_NOT_FOUND`）。
+- 用例：`test_work_gate` 9 条、`test_auto_merge` 2 条，逐条锁住七步与默认档。
+
+### 浮窗面板并入套件（AWK-108，Windows 常驻浮窗 420×700）
 
 把已经在 `cindy-dashboard` 里跑起来的桌面浮窗搬进套件，作为 `panel/` 的一部分；判据、配色、版式与用例期望一行未改，只把本机路径换成占位符、把安装与自检接上。
 

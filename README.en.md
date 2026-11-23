@@ -196,7 +196,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 578 = 932, 0 failures
+python tools/run_tests.py            # should pass: tests/ 354 + tools/ 613 = 967, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -210,13 +210,13 @@ python tools/add_project.py D:/my-project      # writes .agents/ticket-config.js
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 932 (`tests/` 354, `tools/` 578) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 967 (`tests/` 354, `tools/` 613) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
-cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 932 tests
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 967 tests
 python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
 ```
 
@@ -261,6 +261,7 @@ ai-workspace/
 ├── tools/                 # gates + auto_merge + run_tests
 ├── tests/                 # cases for the core and the gates
 ├── docs/                  # protocol / closing / probe / intake / ...
+├── automation/            # schedule prompt templates: queue watch, unattended dispatcher
 ├── examples/
 ├── panel/                 # always-on Windows widget (Electron; needs Node 18+ and npm install electron)
 ├── .agents/skills/        # workspace skills
@@ -299,6 +300,36 @@ npm start            # start the widget against the real export
   source in without touching a single rule or colour.
 - Not included: `node_modules/`, `dashboard.html` (generated), `docs/evidence/`, that repository's
   `docs/CD-*.md`, and its own Python suite.
+
+---
+
+## Automation: running unattended
+
+After installation you do not have to babysit it: two schedules and one gate. The prompts are templates and
+the arguments come from a script.
+
+```bash
+python tools/schedule_plan.py --workspace /path/to/your/workspace        # human-readable
+python tools/schedule_plan.py --workspace /path/to/your/workspace --json # feed it to schedule_create
+```
+
+The prompts live in `automation/` (`queue-watch.md`, `dispatcher.md`); the script renders them into the full
+`schedule_create` arguments. **It never creates a schedule and writes no host state** — whether to create
+one is a human decision.
+
+| Schedule | How often | What one round does |
+| --- | --- | --- |
+| Queue watch | every 30 minutes (`0,30 * * * *`) | scans recently active projects and sessions for anyone stuck waiting, stopped on a question, or finished with nobody picking the result up |
+| Unattended dispatcher | every 10 minutes (`*/10 * * * *`) | reads `tools/next_action.py` and advances exactly one step: dispatch work, dispatch review, or merge |
+
+**The gate is the exit code of `next_action.py`**: `0` means work exists so the round runs, `2` means idle so
+the round is skipped without spending tokens, `1` (database unreadable, schema mismatch) fails closed and is
+recorded as a failure. The queue watch has no gate on purpose: what it looks for — a stuck session — is not
+in the ticket database, so a gate would close the only path that can find it.
+
+It also runs without Cindy: system cron or Windows Task Scheduler, same criterion, same exit code (`0` run,
+`2` skip, `1` alert). The cron expressions for both schedules, the gate wiring, and why creating the
+schedule stays with a human are in [`kit/docs/无人值守派单.md`](kit/docs/无人值守派单.md) §10.
 
 ---
 

@@ -201,7 +201,7 @@ python install.py --link-agents               # 顺带为 ~/.claude 与 ~/.codex
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 578 = 932 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 613 = 967 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -236,14 +236,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 932 项（`tests/` 354、`tools/` 578）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 967 项（`tests/` 354、`tools/` 613）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents"
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 932 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 967 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
@@ -295,9 +295,10 @@ ai-workspace/
 ├── PRD/                   # 需求；每个成果都要报 PRD 编号与版本
 ├── tasks/                 # round.md（本轮目标）、rounds.md（历史）、plan-*.md
 ├── task_center/           # 工单核心（纯标准库，SQLite）
-├── tools/                 # 闸门 + auto_merge + run_tests + 会话核对
+├── tools/                 # 闸门 + auto_merge + run_tests + 会话核对 + schedule_plan
 ├── tests/                 # 工单核心与闸门的用例
 ├── docs/                  # protocol / decisions / closing / probe / intake / skill-loading / claims-format
+├── automation/            # 调度正文模板：队列值守、无人值守派单器
 ├── examples/
 ├── panel/                 # Windows 常驻浮窗（Electron；要 Node 18+ 与 npm install electron）
 ├── .agents/skills/        # 工作区技能
@@ -340,6 +341,33 @@ npm start            # 启动浮窗，读的是真导出物
   判据与配色一行未改。
 - 没有搬进来的：`node_modules/`、`dashboard.html`（生成物）、`docs/evidence/`、面板仓库的
   `docs/CD-*.md` 与它自己的 Python 用例。
+
+---
+
+## 自动化：无人值守跑起来
+
+装完之后可以不盯：两条调度、一个闸门，参数由脚本打印，正文是模板。
+
+```bash
+python tools/schedule_plan.py --workspace /path/to/你的工作区        # 人读
+python tools/schedule_plan.py --workspace /path/to/你的工作区 --json  # 交给 schedule_create
+```
+
+两条调度的正文在 `automation/`（队列值守 `queue-watch.md`、派单器 `dispatcher.md`），脚本把它们
+填成 `schedule_create` 的完整 args 打印出来——**它自己不建调度、不写任何宿主状态**，建不建由人定。
+
+| 调度 | 多久跑一次 | 每轮做什么 |
+| --- | --- | --- |
+| 队列值守 | 每 30 分钟（`0,30 * * * *`） | 扫最近活跃的目录与会话，看谁卡在等人、卡在问句上、交了成果没人接 |
+| 无人值守派单器 | 每 10 分钟（`*/10 * * * *`） | 读 `tools/next_action.py` 的结论，一次只推进一格：派执行 / 派验收 / 合并 |
+
+**闸门就是 `next_action.py` 的退出码**：`0` 有活就放行，`2` 没活就跳过本轮不烧 token，
+`1`（库读不开、版本不对）fail-closed 挡住并记失败。队列值守不设闸门，因为它要看的是
+「会话卡住了」，而那件事不在工单库里——加了闸门反而会把唯一能发现它的一路关掉。
+
+离开 Cindy 也能跑：系统 cron 或 Windows 计划任务，判据不变，还是那个退出码（`0` 跑、`2` 跳过、
+`1` 报警）。两条调度的 cron、闸门写法、以及「为什么建调度这一步留给人在场」都在
+[`kit/docs/无人值守派单.md`](kit/docs/无人值守派单.md) 的 §10「在自己的 Cindy 里建这条调度」。
 
 ---
 

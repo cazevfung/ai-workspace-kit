@@ -272,8 +272,8 @@ CREATE UNIQUE INDEX active_session ON attempts(session_id)
 **一、可核的事实：它在哪一刻被归档，能复算。**
 
 - **归档是宿主做的，不是本工具。** `task_center/` 里没有任何归档**会话**的调用（`grep -rn "archive_sessions" task_center/` 无输出），所以「让它别归档」「等它归档完再来」这类设计在本仓库里做不到。注意别把两件事的名字混在一起：`archive_ticket` 归档的是**工单**（`tickets.state='archived'`），跟宿主里那条会话的 `status=archived` 毫无关系，一个归档了工单的会话下一条消息照样收得到。`move_session` 也搬不动已归档的会话（见 `docs/intake.md` 的限制那一段）。
-- **看两个字段就够：** 宿主会话库 `sessions` 表的 `status`（或 `cindy_helper` 的 `list_sessions` 回执里的同名字段），以及 `last_turn_ended_at` / `updated_at`。2026-11-22 在 `%APPDATA%\Cindy\cindy-*.db` 实测：调度建的协调会话 `404129f5-73de-476d-9517-fae6e65c18bd`，`last_turn_ended_at` = 08:04:08.244Z、`updated_at` = 08:04:08.266Z（相差 22 ms），`status=archived`；另一条 `fbe2f791-…` 同样是「这一轮结束即归档」（相差 26 ms）。
-- **不能从「这一轮结束了」推断「它一定归档」。** 同一天同一张表里，`bc73b954-…` 与 `fb41e678-…` 也结束了本轮，`status` 仍是 `active`。所以规矩只有一句：**不要假设一轮结束后的协调会话还能收信**，也不要把「还没归档」当成保证。
+- **看两个字段就够：** 宿主会话库 `sessions` 表的 `status`（或 `cindy_helper` 的 `list_sessions` 回执里的同名字段），以及 `last_turn_ended_at` / `updated_at`。2026-11-22 在 `%APPDATA%\Cindy\cindy-*.db` 实测：调度建的协调会话 `<session-id>`，`last_turn_ended_at` = 08:04:08.244Z、`updated_at` = 08:04:08.266Z（相差 22 ms），`status=archived`；另一条会话同样是「这一轮结束即归档」（相差 26 ms）。
+- **不能从「这一轮结束了」推断「它一定归档」。** 同一天同一张表里，另外两条会话也结束了本轮，`status` 仍是 `active`。所以规矩只有一句：**不要假设一轮结束后的协调会话还能收信**，也不要把「还没归档」当成保证。
 - **一条命令复算：** `python tools/coordinator_state.py --ticket <单号>`。它只读打开工单库与宿主会话库，打印这张单的 `owner_session_id`（现在谁负责）与 `origin`（谁派的）、宿主里那条会话的 `host_status` / `host_source` / `last_turn_ended_at` / `updated_at` 与结论；退出码 0 = 责任人还在（`OWNER_ACTIVE`），1 = 责任人已归档或宿主里查不到（`TAKEOVER_NEEDED`，并打印接替命令的形状），2 = 查不出来（没有 owner、会话库打不开——**「不知道」不当成「还在」**）。
 
 **二、两个字段：授权读 owner，审计读 origin。**
