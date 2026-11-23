@@ -9,6 +9,7 @@
 
     C:\\Users\\<名>\\ 或 X:/示例项目/ 或 X:/示例项目   → X:/示例项目
     8-4-4-4-12 形状的 UUID                               → <session-id>
+    夹具模块（tests/test_*.py、tools/test_*.py）里的 UUID **不替换**——见下面 FIXTURE_MODULE 的理由
 
 用法：
     python maintainer/sync_from_origin.py
@@ -29,9 +30,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 TEXT_SUFFIXES = {".py", ".md", ".txt", ".json", ".jsonl", ".sh", ".ps1", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
 SKIP_DIRS = {".git", ".data", "__pycache__", ".worktrees", "node_modules", "maintainer"}
+# 夹具模块里的 UUID 是**人造**会话 id（`aaaaaaaa-1111-4111-8111-…` 这种），而且必须彼此不同：
+# 同一个夹具里同时造三条会话，全部替换成 `<session-id>` 会撞 `sessions.id` 的唯一约束，整组用例
+# 直接 ERROR（2026-11-23，AWK-108 实测过一次：13 行替换后 `test_idle_watch` 报 UNIQUE 失败）。
+# 所以 UUID 这条规则跳过夹具模块。真名那条规则（C:/Users/<名字>）对夹具照常跑，一个字都没放宽。
+FIXTURE_MODULE = re.compile(r"(?:^|[\\/])(?:tests|tools)[\\/]test_[^\\/]*\.py$")
 
 UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
-HOME_ROOT = re.compile(r"(?:C:[\\/]Users[\\/][^\\/\s`\"']+|%USERPROFILE%)")
+# `%USERPROFILE%` 不算残留：它是**没被解析的环境变量**，不是某一台机器的用户名。把它当泄漏去替换，
+# 只会把夹具里的「别的项目」目录改成 X:/示例项目，一条真名也没少见（AWK-108）。
+HOME_ROOT = re.compile(r"C:[\\/]Users[\\/][^\\/\s`\"']+")
 # 替换根之后，把该路径段里剩下的反斜杠归一成斜杠，读起来一致
 EXAMPLE_PATH = re.compile(r"X:/示例项目[^\s`\"')|，；、]*")
 # 示例根下面再垫一层业务目录（`Documents/<项目>`）没有信息量，压平成 `X:/示例项目/<项目>`
@@ -47,11 +55,13 @@ UPSTREAM_TERMS = (
 )
 
 
-def redact(text: str) -> str:
+def redact(text: str, name: str = "") -> str:
+    """返回脱敏后的文本。`name` 是仓库内相对路径（posix），用来判「这是不是夹具模块」。"""
     text = HOME_ROOT.sub("X:/示例项目", text)
     text = EXAMPLE_PATH.sub(_normalize, text)
     text = EXAMPLE_NESTED.sub("X:/示例项目/", text)
-    text = UUID.sub("<session-id>", text)
+    if not FIXTURE_MODULE.search(name):
+        text = UUID.sub("<session-id>", text)
     for raw, clean in UPSTREAM_TERMS:
         text = text.replace(raw, clean)
     return text
@@ -112,11 +122,12 @@ def main(argv=None) -> int:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        fixed = redact(text)
+        name = path.relative_to(HERE).as_posix()
+        fixed = redact(text, name)
         if fixed == text:
             continue
         hits = sum(1 for a, b in zip(text.splitlines(), fixed.splitlines()) if a != b)
-        changed.append((path.relative_to(HERE).as_posix(), hits))
+        changed.append((name, hits))
         if not args.check:
             path.write_bytes(fixed.encode("utf-8"))
 

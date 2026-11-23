@@ -8,7 +8,7 @@ English version: [README.en.md](README.en.md)
 
 [它解决什么问题](#它解决什么问题) · [它是什么](#它是什么) · [上下文边界](#上下文边界) · [一张单的一生](#一张单的一生) · [闸门与判定点](#闸门与判定点) · [已知限制](#已知限制) · [安装](#安装) · [验证与 demo](#验证与-demo)
 
-这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.4.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主；Cindy、Claude Code、Codex 均可。
+这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.5.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主；Cindy、Claude Code、Codex 均可。
 
 ---
 
@@ -27,7 +27,7 @@ English version: [README.en.md](README.en.md)
 
 ## 它是什么
 
-它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 26 个技能，6 个工作区技能加 20 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
+它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 27 个技能，7 个工作区技能加 20 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
 
 ### 拆活
 
@@ -300,13 +300,14 @@ ai-workspace/
 ├── tests/                 # 工单核心与闸门的用例
 ├── docs/                  # protocol / decisions / closing / probe / intake / skill-loading / claims-format
 ├── examples/
+├── panel/                 # Windows 常驻浮窗（Electron；要 Node 18+ 与 npm install electron）
 ├── .agents/skills/        # 工作区技能
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.4.0` 共 26 个：
+技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.5.0` 共 27 个：
 
-- **工作区技能（6）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`bootstrap-workspace`
+- **工作区技能（7）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`shared-resource-identity`、`bootstrap-workspace`
 - **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
   `systematic-debugging`、`verification-before-completion`、`code-review-and-quality`、
   `requesting-code-review`、`receiving-code-review`、`merge-latest-branches`、`writing-skills`、
@@ -315,6 +316,31 @@ ai-workspace/
   `planning-and-task-breakdown`、`project-routing`、`handoff-to-workspace`
 
 工作区技能里最该先读的是 `skill-routing`：它把每个判断节点归口到一个技能或一条固定动作，归口缺失或引用了不存在的技能，`scripts/check_routing.py` 会当场失败。
+
+---
+
+## 浮窗面板：Windows 常驻浮窗（420×700）
+
+装完之后 `<工作区>/panel/` 里多一个桌面浮窗：无边框、始终置顶、不进任务栏、可以收成一行，读的是同一份
+`progress-export.json`。**它只读**——不发消息、不改工单状态、没有任何写操作。
+
+它需要**另外两样东西**才跑得起来，都不是 `install.py` 能替你装的：
+
+```bash
+cd panel/app
+npm install          # 装 electron（唯一的开发依赖），需要 Node 18+
+npm start            # 启动浮窗，读的是真导出物
+```
+
+- 用例在 `panel/app`：`node --test panel/app/test`（在仓库根）或 `cd panel/app && node --test`，
+  两种跑法都是七份文件、77 项。判据与版式不在这里，在
+  [`kit/PRD/PRD-016-Windows常驻浮窗.md`](kit/PRD/PRD-016-Windows常驻浮窗.md)。
+- 安装时 `install.py` 会把 `panel/` 正文里的工作区占位符换成真实路径；`.mjs` / `.cjs` / `.html`
+  因此进了模板替换后缀——不换的话，装出来的 `main.mjs` 会拿着一串占位符去读导出物。
+- 面板的来源：它先在另一个仓库里长起来（工单 `DASH-` / `CD-`），本版把源码搬进套件，
+  判据与配色一行未改。
+- 没有搬进来的：`node_modules/`、`dashboard.html`（生成物）、`docs/evidence/`、面板仓库的
+  `docs/CD-*.md` 与它自己的 Python 用例。
 
 ---
 
@@ -332,7 +358,7 @@ ai-workspace/
 
 ### 插件：装、启动、它会报出五步计划
 
-仓库里的 `dist/ai-workspace-kit-0.4.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
+仓库里的 `dist/ai-workspace-kit-0.5.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
 
 1. **装** —— 在 Cindy 侧边栏「插件」里导入本地包，选中这个文件，确认。**这一步必须由人点**：导入会把插件写进用户目录并启用，Agent 不代点，也不在你没看权限清单时替你确认。装上是本地开发副本，不经过市场审核。
 2. **启动** —— 在任意会话里敲 `$ai-workspace <你的工作区绝对路径>`，或者说「把这条路径加成项目、开一个协调会话」。它会调 `bootstrap`。

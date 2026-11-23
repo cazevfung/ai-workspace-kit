@@ -8,7 +8,7 @@
 
 [The problem](#the-problem-it-solves) · [What it is](#what-it-is) · [Context boundaries](#context-boundaries) · [Life of a ticket](#the-life-of-one-ticket) · [Gates](#gates-and-decision-points) · [Known limitations](#known-limitations) · [Install](#install) · [Demo](#verification-and-demo)
 
-The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.4.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md` (Cindy, Claude Code, Codex).
+The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.5.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md` (Cindy, Claude Code, Codex).
 
 ---
 
@@ -27,7 +27,7 @@ The common cause is not a weak model but the absence of a layer accountable to t
 
 ## What it is
 
-It plays the role of a project manager: breaking work down, handing it out, keeping it moving, bringing it home. The implementation has four parts: `task_center/`, the ticket core (standard library plus SQLite); `tools/`, the gate and merge scripts; `AGENTS.md`, the behaviour contract; and `skills/`, 26 skills (6 workspace, 20 general). The kit does not make the model stronger; it turns who does the work, what counts as done, who checks and why it merges into records and checks that fail.
+It plays the role of a project manager: breaking work down, handing it out, keeping it moving, bringing it home. The implementation has four parts: `task_center/`, the ticket core (standard library plus SQLite); `tools/`, the gate and merge scripts; `AGENTS.md`, the behaviour contract; and `skills/`, 27 skills (7 workspace, 20 general). The kit does not make the model stronger; it turns who does the work, what counts as done, who checks and why it merges into records and checks that fail.
 
 ### Breaking work down
 
@@ -262,16 +262,43 @@ ai-workspace/
 ├── tests/                 # cases for the core and the gates
 ├── docs/                  # protocol / closing / probe / intake / ...
 ├── examples/
+├── panel/                 # always-on Windows widget (Electron; needs Node 18+ and npm install electron)
 ├── .agents/skills/        # workspace skills
 └── .githooks/             # commit hooks
 ```
 
-The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.4.0` installs 26:
+The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.5.0` installs 27:
 
-- **Workspace skills (6):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`, `bootstrap-workspace`
+- **Workspace skills (7):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`, `shared-resource-identity`, `bootstrap-workspace`
 - **General skills (20):** `brainstorming`, `writing-plans`, `executing-plans`, `test-driven-development`, `systematic-debugging`, `verification-before-completion`, `code-review-and-quality`, `requesting-code-review`, `receiving-code-review`, `merge-latest-branches`, `writing-skills`, `shuo-ren-hua`, `dispatching-parallel-agents`, `subagent-driven-development`, `resumable-implementation-contracts`, `using-git-worktrees`, `doubt-driven-development`, `planning-and-task-breakdown`, `project-routing`, `handoff-to-workspace`
 
 The first workspace skill worth reading is `skill-routing`: it assigns each decision point to a skill or a fixed action, and `scripts/check_routing.py` fails when an assignment is missing or points nowhere.
+
+---
+
+## Panel: the always-on Windows widget (420×700)
+
+After installation `<workspace>/panel/` holds a desktop widget: frameless, always on top, kept out of the
+taskbar, collapsible to a single row. It reads the same `progress-export.json` and it is **read-only** — it
+sends no messages, changes no ticket state, and has no write path at all.
+
+It needs two things `install.py` cannot install for you:
+
+```bash
+cd panel/app
+npm install          # electron, the only dev dependency; needs Node 18+
+npm start            # start the widget against the real export
+```
+
+- Tests live in `panel/app`: `node --test panel/app/test` from the repo root, or `cd panel/app && node --test`.
+  Both run the same seven files, 77 tests. The rules and the layout are in
+  [`kit/PRD/PRD-016-Windows常驻浮窗.md`](kit/PRD/PRD-016-Windows常驻浮窗.md) (Chinese).
+- During installation `install.py` replaces the workspace placeholder inside `panel/` with the real path;
+  that is why `.mjs` / `.cjs` / `.html` joined the template-substitution suffixes.
+- Provenance: the widget grew up in another repository (tickets `DASH-` / `CD-`); this release moves the
+  source in without touching a single rule or colour.
+- Not included: `node_modules/`, `dashboard.html` (generated), `docs/evidence/`, that repository's
+  `docs/CD-*.md`, and its own Python suite.
 
 ---
 
