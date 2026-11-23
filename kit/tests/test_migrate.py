@@ -101,7 +101,10 @@ def build_v3(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
             "INSERT INTO tickets VALUES ('t1','p1','整理检查清单','一份清单','PRD.md',?,'[]',1,'running','a1',?)",
             (prd_sha, stamp))
         conn.execute(
-            "INSERT INTO tickets VALUES ('t2','p1','另起一张','另一份清单','PRD.md',?,'[]',1,'ready',NULL,?)",
+            # t2 要给一条可判定条件：从 AWK-110 起 `claim_ticket` 读到空条件就拒（它是池子里的念头，
+            # 不是可以开工的活）。这里是「升级后新字段可写」的夹具，不是「空条件能不能领」的用例。
+            "INSERT INTO tickets VALUES ('t2','p1','另起一张','另一份清单','PRD.md',?,"
+            "'[{\"id\":\"C1\",\"text\":\"含 `python tools/run_tests.py` 且退出码 0\"}]',1,'ready',NULL,?)",
             (prd_sha, stamp))
         conn.execute("INSERT INTO attempts VALUES ('a1','t1',1,'PRD.md',?,'running','executor-1',?)",
                      (prd_sha, stamp))

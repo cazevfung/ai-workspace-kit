@@ -4,7 +4,7 @@
 
 为什么要有这个文件：AWK-105 之前的每一处都自己写 `Path.home() / ".agents" / "center.json"`。
 用 `install.py --agents-home <目录>` 装完之后，闸门照样去读 `~/.agents/center.json`，
-于是它读到的是**另一套库**——实测读到 `D:/AI工作区` 的中心库并报 `SCHEMA_MISMATCH`。
+于是它读到的是**另一套库**——实测读到 `{{WORKSPACE}}` 的中心库并报 `SCHEMA_MISMATCH`。
 库没坏，是找错了。同一件事写在几个文件里，就必然有几个答案。
 
 顺序（写成一张表，也写进 `docs/closing.md` 的「中心库怎么被发现」）：

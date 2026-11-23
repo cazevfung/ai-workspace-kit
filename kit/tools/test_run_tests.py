@@ -187,5 +187,126 @@ class RunSuitesTest(unittest.TestCase):
         self.assertEqual([], run_tests.check_undeclared_suites(run_tests.ROOT, declared))
 
 
+GREEN_TESTS = '''import unittest
+
+
+class AlphaCase(unittest.TestCase):
+    def test_alpha_green(self):
+        self.assertTrue(True)
+'''
+
+GREEN_TOOLS = '''import unittest
+
+
+class BetaCase(unittest.TestCase):
+    def test_beta_green(self):
+        self.assertTrue(True)
+'''
+
+RED_TOOLS = '''import unittest
+
+
+class BetaCase(unittest.TestCase):
+    def test_beta_explodes(self):
+        self.fail("故意写红的用例：tools 这一处必须整体非零")
+'''
+
+
+class ParallelRunTest(unittest.TestCase):
+    """AW-110：两处用例改成两个子进程并行跑，但退出码语义与输出可读性不变。
+
+    串行版（run_suites）保留给 --serial 排查用，用例上面那一批照旧跑它。
+    这里钉的是并行版的四条：一处红整体红、输出按块不交错、汇总仍打两处
+    用例数与合计、main 认 --serial 与默认并行。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def write(self, relpath, text=PASSING):
+        path = self.root / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def suites(self):
+        return (
+            ("tests/", self.root / "tests", "test_*.py"),
+            ("tools/", self.root / "tools", "test_*.py"),
+        )
+
+    def run_parallel(self, verbosity=1):
+        stream = io.StringIO()
+        code = run_tests.run_suites_parallel(
+            self.root, self.suites(), verbosity=verbosity, stream=stream
+        )
+        return code, stream.getvalue()
+
+    # C2：一处红，整体就得非零，而且要能看出红在哪一处、哪一条
+    def test_one_red_suite_makes_overall_red(self):
+        self.write("tests/test_a.py", GREEN_TESTS)
+        self.write("tools/test_b.py", RED_TOOLS)
+        code, out = self.run_parallel()
+        self.assertEqual(1, code, out)
+        self.assertIn("test_beta_explodes", out)  # 是哪一条
+        self.assertIn("故意写红的用例", out)  # 带理由的 traceback
+        self.assertIn("tools/ 1 FAIL(1)", out)  # 是哪一处
+        self.assertIn("tests/ 1 OK", out)  # 另一处不受牵连
+
+    # C2：两处输出必须按块归属，不能你一句我一句
+    def test_parallel_output_blocks_do_not_interleave(self):
+        self.write("tests/test_a.py", GREEN_TESTS)
+        self.write("tools/test_b.py", GREEN_TOOLS)
+        code, out = self.run_parallel(verbosity=2)
+        self.assertEqual(0, code, out)
+        self.assertIn("test_alpha_green", out)
+        self.assertIn("test_beta_green", out)
+        tests_header = out.index("=== tests/")
+        tools_header = out.index("=== tools/")
+        self.assertLess(tests_header, tools_header, out)
+        # tests 那一处的用例名必须全在 tools 的头之前出现过
+        self.assertLess(out.index("test_alpha_green"), tools_header, out)
+        # tools 那一处的用例名必须在自己的头之后
+        self.assertGreater(out.index("test_beta_green"), tools_header, out)
+        # 而 tests 那一处结束了就别再冒出来（块中不再有它）
+        self.assertNotIn("test_alpha_green", out[tools_header:])
+
+    # C1：汇总仍然分别打两处的用例数与合计
+    def test_parallel_summary_keeps_both_counts(self):
+        self.write("tests/test_a.py", GREEN_TESTS)
+        self.write("tools/test_b.py", GREEN_TOOLS)
+        code, out = self.run_parallel()
+        self.assertEqual(0, code, out)
+        self.assertIn("tests/ 1 OK", out)
+        self.assertIn("tools/ 1 OK", out)
+        self.assertIn("合计 2 项", out)
+        self.assertIn("全部通过", out)
+
+    # 并行版同样不能把「目录没了」当成 0 项通过
+    def test_parallel_missing_suite_dir_fails(self):
+        self.write("tests/test_a.py")
+        code, out = self.run_parallel()
+        self.assertEqual(1, code, out)
+        self.assertIn("tools/ 声明的测试目录不存在", out)
+        self.assertIn("目录缺失", out)
+
+    # C5：main 默认并行，--serial 时退回串行
+    def test_main_defaults_to_parallel_and_serial_is_opt_in(self):
+        self.write("tests/test_a.py", GREEN_TESTS)
+        self.write("tools/test_b.py", GREEN_TOOLS)
+        stream = io.StringIO()
+        code = run_tests.main([], root=self.root, suites=self.suites(), stream=stream)
+        self.assertEqual(0, code, stream.getvalue())
+        self.assertIn("并行模式", stream.getvalue())
+
+        stream = io.StringIO()
+        code = run_tests.main(["--serial"], root=self.root, suites=self.suites(), stream=stream)
+        self.assertEqual(0, code, stream.getvalue())
+        self.assertIn("全部通过", stream.getvalue())
+        self.assertNotIn("并行模式", stream.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

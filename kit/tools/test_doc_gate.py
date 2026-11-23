@@ -1,5 +1,6 @@
 import contextlib
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import doc_gate
+import doc_gate  # noqa: E402
+
+
+def committed_text(repo: Path, relpath: str):
+    """读**提交过**的那份文件（`git show HEAD:<相对路径>`）；取不到时返回 None。
+
+    为什么不直接读工作区那份：`auto_merge` 合完之后会在真实检出上再跑一遍全量
+    测试，而收尾包（`tasks/round.md` / `tasks/rounds.md` / `tasks/closing-*.md`）
+    天然写在合并之前、可能正写了一半。直接读工作区时，脏收尾包能让合并后的那一场
+    测试变红——合并被回滚，原因却与这次改动毫无关系。取提交过的那份，闸门仍钉在
+    真实仓库上，但结果不再取决于工作区脏不脏（AW-123）。
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"HEAD:{relpath}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.stdout if proc.returncode == 0 else None
 
 
 GOOD = """# 计划：示例
@@ -306,14 +326,28 @@ class RoundTest(unittest.TestCase):
         self.assertIn(root / "tasks" / "round.md", targets)
 
     def test_real_round_file_passes(self):
-        """仓库根真的有一份合规的 round 文件——这条把闸门钉在全量测试上。"""
+        """仓库根那份 round 文件（**提交过的**那一版）要过闸门。
+
+        原来直接读工作区那份。改成读 `HEAD` 里那份，是因为 `auto_merge` 合完之后会
+        在真实检出上再跑一遍全量测试，而收尾包天然写在合并之前、可能正写了一半：
+        工作区的内容不该决定这一场测试的结果（AW-123）。闸门仍然钉在真实仓库上，
+        只是证据换成已提交的那一版。`--all` 那份检查也从这里拿掉——它同样会读
+        工作区的 round 文件，而 `--all` 的两组目标（plan 文件 + round 文件）已由
+        下面两个用例各自覆盖。
+        """
         repo = Path(__file__).resolve().parent.parent
-        self.assertEqual([], doc_gate.check_round(repo / "tasks" / "round.md"))
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            code = doc_gate.main(["--all"])
-        self.assertEqual(0, code, buffer.getvalue())
-        self.assertIn("闸门通过", buffer.getvalue())
+        text = committed_text(repo, "tasks/round.md")
+        if text is None:
+            self.skipTest("取不到 tasks/round.md 的提交内容（不是 git 仓库或缺这一版）")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "round.md"
+            target.write_text(text, encoding="utf-8")
+            self.assertEqual([], doc_gate.check_round(target))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = doc_gate.main([str(target)])
+            self.assertEqual(0, code, buffer.getvalue())
+            self.assertIn("闸门通过", buffer.getvalue())
 
 
 if __name__ == "__main__":

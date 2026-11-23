@@ -20,6 +20,43 @@ import work_gate
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def committed_text(repo: Path, relpath: str):
+    """读**提交过**的那份文件（`git show HEAD:<相对路径>`）；取不到时返回 None。
+
+    为什么不直接读工作区那份：`auto_merge` 合完之后会在真实检出上再跑一遍全量
+    测试，而收尾包（`tasks/round.md` / `tasks/rounds.md` / `tasks/closing-*.md`）
+    天然写在合并之前、可能正写了一半。直接读工作区时，脏收尾包能让合并后的那一场
+    测试变红——合并被回滚，原因却与这次改动毫无关系（AW-123）。
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"HEAD:{relpath}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def committed_closing_packages(repo: Path) -> list[str]:
+    """`HEAD` 里已经提交过的 `tasks/closing-*.md`，相对仓库根的名称（排序后）。"""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "ls-tree", "--name-only", "HEAD", "tasks/"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.returncode != 0:
+        return []
+    names = []
+    for line in proc.stdout.splitlines():
+        name = Path(line.strip()).name
+        if name.startswith("closing-") and name.endswith(".md"):
+            names.append(line.strip())
+    return sorted(names)
+
 GOOD_ROUND = """# 本轮：示例
 
 轮次：R-900
@@ -116,6 +153,14 @@ class PackageTest(unittest.TestCase):
         self.round.write_text(text, encoding="utf-8")
         return close_gate.check(self.root)
 
+    def write_section_5(self, body):
+        """只换第 5 节的正文，其余六节保持 GOOD_PACK 原样。"""
+        head, rest = GOOD_PACK.split("## 5. 欠 AI 的下一步", 1)
+        tail = rest.split("## 6. 欠人的一条可执行动作", 1)[1]
+        return self.write_pack(
+            head + "## 5. 欠 AI 的下一步\n\n" + body + "\n\n## 6. 欠人的一条可执行动作" + tail
+        )
+
     def assertMentions(self, problems, fragment):
         self.assertTrue(any(fragment in p for p in problems), problems)
 
@@ -159,6 +204,40 @@ class PackageTest(unittest.TestCase):
             + "## 5." + GOOD_PACK.split("## 5.", 1)[1]
         )
         self.assertMentions(self.write_pack(swapped), "顺序")
+
+    def test_section_5_item_without_locator_fails(self):
+        """「补进第二张单」既没有单号、没有路径、也没有命令：下一个会话无从下手。"""
+        problems = self.write_section_5("- 补进第二张单。")
+        self.assertMentions(problems, "第 5 节")
+        self.assertMentions(problems, "补进第二张单")
+
+    def test_section_5_one_bad_item_among_good_ones_fails(self):
+        """判据是「每条」：同一节里有一条没落点，整节就不算过。"""
+        problems = self.write_section_5("- 下一轮把 `tools/close_gate.py` 的第 4 节判据补上。\n- 继续优化。")
+        self.assertMentions(problems, "第 5 节")
+        self.assertMentions(problems, "继续优化")
+
+    def test_section_5_with_ticket_id_passes(self):
+        self.assertEqual([], self.write_section_5("- 接手 AW-109，把 parking 表补上。"))
+
+    def test_section_5_with_file_path_passes(self):
+        self.assertEqual([], self.write_section_5("- 改 docs/closing.md 的第 5 节示例。"))
+
+    def test_section_5_with_command_passes(self):
+        self.assertEqual([], self.write_section_5("- 跑 `python tools/run_tests.py` 复核基线。"))
+
+    def test_section_5_empty_fails(self):
+        """一条都不写等于没说这些东西去哪了：要么给落点，要么写进第 4 节。"""
+        problems = self.write_section_5("")
+        self.assertMentions(problems, "第 5 节")
+        self.assertMentions(problems, "第 4 节")
+
+    def test_section_5_continuation_lines_stay_with_their_item(self):
+        """续行并进同一条：长句换行不该被当成第二条去判。"""
+        problems = self.write_section_5(
+            "- 接手 AW-109\n  把 parking 表补上，判据见 `PRD/PRD-014-计划队列与依赖.md`。"
+        )
+        self.assertEqual([], problems)
 
     def test_missing_package_fails(self):
         self.pack.unlink()
@@ -339,18 +418,36 @@ class CliTest(unittest.TestCase):
 
 
 class RealRepoTest(unittest.TestCase):
-    """把闸门钉在真实仓库上：状态还是「进行中」时，它必须当场说没收尾。"""
+    """把闸门钉在真实仓库上：状态还是「进行中」时，它必须当场说没收尾。
+
+    读的是**提交过的**内容（`git show HEAD:`），不是工作区那份：`auto_merge`
+    合完之后在真实检出上再跑一遍测试，而收尾包可能正写了一半，工作区的内容不该
+    决定这一场测试的结果（AW-123）。
+    """
 
     def test_real_round_reports_its_status(self):
-        round_no, status, problems = close_gate.round_status(ROOT)
-        self.assertEqual([], problems)
-        self.assertIsNotNone(round_no)
-        if status != "进行中":
-            self.skipTest(f"本轮状态已是 {status}，收尾包的结构由别的用例覆盖")
-        problems = close_gate.check(ROOT)
-        self.assertTrue(
-            any("还没有收尾包" in p for p in problems), problems
-        )
+        round_text = committed_text(ROOT, "tasks/round.md")
+        if round_text is None:
+            self.skipTest("取不到 tasks/round.md 的提交内容（不是 git 仓库或缺这一版）")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tasks").mkdir()
+            (root / "tasks" / "round.md").write_text(round_text, encoding="utf-8")
+            # 已提交的收尾包也一并摆上：「有没有包」不该跟着工作区飘。
+            for relpath in committed_closing_packages(ROOT):
+                text = committed_text(ROOT, relpath)
+                if text is not None:
+                    (root / "tasks" / Path(relpath).name).write_text(text, encoding="utf-8")
+
+            round_no, status, problems = close_gate.round_status(root)
+            self.assertEqual([], problems)
+            self.assertIsNotNone(round_no)
+            if status != "进行中":
+                self.skipTest(f"本轮状态已是 {status}，收尾包的结构由别的用例覆盖")
+            problems = close_gate.check(root)
+            self.assertTrue(
+                any("还没有收尾包" in p for p in problems), problems
+            )
 
 
 class DefaultDbTest(unittest.TestCase):

@@ -247,9 +247,15 @@ class ListCommandTest(unittest.TestCase):
         return target
 
     def list_command(self, db, *extra):
+        # `--repo` 必须显式给：不给时 work_gate 退回它自己所在的那个检出，于是这个
+        # 用例会去读**真实仓库**的 `tasks/round.md`。那份文件天然写在合并之前、可能
+        # 正写了一半（AW-123），而它决定不了这里的任何一条断言。给成本用例自己的
+        # 临时项目，读的就是这个项目自己的（不存在的）轮次文件。
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = work_gate.main(["work_gate.py", "--list", "--db", str(db), *extra])
+            code = work_gate.main(
+                ["work_gate.py", "--list", "--db", str(db), "--repo", str(self.project), *extra]
+            )
         return code, out.getvalue(), err.getvalue()
 
     def backdate_last_event(self, db, minutes):
@@ -356,6 +362,63 @@ class ListCommandTest(unittest.TestCase):
         self.assertIn("其中 1 张最后落库超过 45 分钟", err)
         # 汇总行走 stderr：stdout 只有 6 列表格，机器解析不会被最后一行绊倒。
         self.assertNotIn("共 1 张在途", out)
+
+    # --- AW-109：池子里逐张点名，年龄线过了就判红 -------------------------
+
+    def planned(self, alias="repo-plan-1", criteria=None, days_old=0):
+        """造一张排期单：`criteria=None` 用一条可判定条件，`[]` 就是「念头」。"""
+        ticket = create_numbered(self.ok, self.ids, alias, {
+            "project_id": "repo", "title": "排在池子里的单", "state": "planned",
+            "deliverable": "一张只有轮到它才开工的单",
+            "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": ([{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}]
+                         if criteria is None else criteria),
+        })
+        if days_old:
+            self.backdate_created(ticket["id"], days_old)
+        return ticket
+
+    def backdate_created(self, ticket_id, days):
+        """把池子里那张单的 created_at 推到 N 天前：只改副本/临时库上的那一行。"""
+        stamp = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with contextlib.closing(sqlite3.connect(str(self.db))) as conn:
+            with conn:
+                conn.execute("UPDATE tickets SET created_at=? WHERE id=?", (stamp, ticket_id))
+
+    def test_list_names_every_planned_ticket_in_the_pool(self):
+        """C2：池子里有单时 `--list` 要逐张点名（不只是数一个数字），且退出 0。"""
+        self.planned()
+        code, out, err = self.list_command(self.db, "--repo", str(self.project))
+        self.assertEqual(0, code, out + err)
+        self.assertIn(self.tid("repo-plan-1"), err)
+        self.assertIn("1 条条件", err)
+        # 明细同样走 stderr：stdout 仍然只有那张六列表格。
+        self.assertNotIn(self.tid("repo-plan-1"), out)
+
+    def test_list_marks_a_pool_ticket_without_criteria(self):
+        """刚落下的空条件单要认得出来：它是念头，只能补条件或取消，领不走。"""
+        self.planned("repo-plan-empty", criteria=[])
+        code, out, err = self.list_command(self.db, "--repo", str(self.project))
+        self.assertEqual(0, code, out + err)
+        self.assertIn(self.tid("repo-plan-empty"), err)
+        self.assertIn("条件空着", err)
+        self.assertIn("revise_ticket", err)
+
+    def test_list_turns_red_when_the_oldest_pool_ticket_is_too_old(self):
+        """池子年龄线：排够 7 天的单必须报出来并判红，否则「加入口」只是把蒸发换成长草。"""
+        self.planned("repo-plan-old", days_old=work_gate.PLANNED_MAX_DAYS + 1)
+        code, out, err = self.list_command(self.db, "--repo", str(self.project))
+        self.assertEqual(1, code, out + err)
+        self.assertIn(self.tid("repo-plan-old"), err)
+        self.assertIn("pool-stale", err)
+
+    def test_list_stays_green_just_under_the_pool_line(self):
+        """年龄线是「超过」，不是「等于」：刚好在线上的一天不判红。"""
+        self.planned("repo-plan-young")
+        code, out, err = self.list_command(self.db, "--repo", str(self.project))
+        self.assertEqual(0, code, out + err)
+        self.assertIn(self.tid("repo-plan-young"), err)
+        self.assertIn(f"年龄线 {work_gate.PLANNED_MAX_DAYS} 天", err)
 
 
 class MergeCommitGateTest(unittest.TestCase):
@@ -740,6 +803,78 @@ class ClosingCommitGateTest(unittest.TestCase):
         self.git("add", "-A")
         self.assertEqual("allow", self.closing()["verdict"])
 
+    def test_closing_packet_change_is_allowed_when_a_running_ticket_backs_it(self):
+        """AW-124 现场：收尾包是成果本体的工单在 running 期间提交被 CLOSING_REJECTED。
+
+        只改 `tasks/closing-R-017.md`（补记追加目标）、`tasks/round.md` 的状态位不动，
+        而本项目正有一张绑定在 `running` 尝试上的工单在干这件事。这不是收尾提交，
+        是一条普通改动：必须按那张工单放行，不该被收尾提交的前提拦住。
+        """
+        self.bind()
+        self.packet()
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("allow", verdict["verdict"], verdict)
+        self.assertEqual("packet", verdict.get("mode"), verdict)
+        self.assertIn(self.tid("repo-1"), verdict["detail"])
+        self.assertIn("不是收尾", verdict["detail"])
+
+    def close_round_in_base(self):
+        """把「已收尾」写进基线：之后暂存 `进行中` 才是「从三档改回进行中」。"""
+        self.write_round(status="已收尾")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "收尾 R-900")
+
+    def test_closing_packet_change_detail_says_status_untouched(self):
+        """round.md 没进暂存区时，提示可以说「状态位没变」——那就是真实情况。"""
+        self.bind()
+        self.packet()
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("allow", verdict["verdict"], verdict)
+        self.assertIn("没有动", verdict["detail"])
+        self.assertIn("状态位", verdict["detail"])
+
+    def test_closing_packet_change_may_reopen_the_round_status(self):
+        """把状态位从三档改回 `进行中`（重开一轮）走的是工单，不是收尾例外。
+
+        这一支都带 `tasks/round.md`，但判据差一件事：状态位有没有改成三档之一。
+        改成 `进行中` 时状态位真的动了，所以提示不能再写「状态位没动」；
+        放行的依据依旧只有一张绑定在 `running` 尝试上的工单。
+        """
+        self.close_round_in_base()
+        self.bind()
+        self.packet()
+        self.write_round(status="进行中")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("allow", verdict["verdict"], verdict)
+        self.assertEqual("packet", verdict.get("mode"), verdict)
+        self.assertIn(self.tid("repo-1"), verdict["detail"])
+        self.assertIn("进行中", verdict["detail"])
+        self.assertNotIn("状态位没动", verdict["detail"])
+
+    def test_reopening_the_round_without_a_ticket_is_rejected(self):
+        """同一暂存区、没有工单：重开一轮也是普通改动，不能自拿走尾例外。"""
+        self.close_round_in_base()
+        self.packet()
+        self.write_round(status="进行中")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn("running", verdict["detail"])
+        self.assertIn("工单", verdict["detail"])
+
+    def test_closing_packet_change_still_rejects_round_body_edit(self):
+        """带上收尾包之后，round.md 仍只许改状态行；本轮目标一起改就拒。"""
+        self.bind()
+        self.packet()
+        self.write_round(status="进行中", goals="1. 换成更好达成的那个目标")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn("状态", verdict["detail"])
+
     # --- 拒收 -------------------------------------------------------------
 
     def test_closing_commit_rejects_extra_path(self):
@@ -784,6 +919,29 @@ class ClosingCommitGateTest(unittest.TestCase):
         self.assertEqual("reject", verdict["verdict"], verdict)
         self.assertIn(self.tid("repo-ready-1"), verdict["detail"])
         self.assertIn("ready", verdict["detail"])
+
+    def test_closing_packet_change_without_any_ticket_is_rejected(self):
+        """同一暂存区（只含收尾包）、一张工单都没有：没有东西能背书，仍然拒。
+
+        状态位没动，所以它不是收尾提交；而要让收尾包改动落地，只能靠一张绑定在
+        `running` 尝试上的工单。两样都没有时放行就等于给收尾包开一条无依据的旁路。
+        """
+        self.packet()
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn("收尾包", verdict["detail"])
+        self.assertIn("工单", verdict["detail"])
+        self.assertIn("不是收尾提交", verdict["detail"])
+
+    def test_a_ready_ticket_does_not_back_a_closing_packet_change(self):
+        """`ready` 是「等人领走」，不是「有人在做」，不能给收尾包改动背书。"""
+        self.planned("repo-ready-1", state="ready")
+        self.packet()
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn("running", verdict["detail"])
 
     def test_closing_commit_rejects_round_body_edit(self):
         """状态行之外的改动不许借这条路走：本轮目标改了也要拒。"""
@@ -849,6 +1007,22 @@ class ClosingCommitGateTest(unittest.TestCase):
         result = self.git("commit", "-m", "收尾 R-900", env={"TASK_CENTER_DB": str(self.db)})
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("收尾提交：R-900", result.stdout + result.stderr)
+
+    def test_hook_lets_a_ticket_backed_closing_packet_through(self):
+        """AW-124 的真实现场：带 TASK_CENTER_TICKET 的会话改收尾包，钩子必须放行。
+
+        那次改动只能靠 `git commit --no-verify` 落盘，钩子从头到尾没有给过一条
+        能走的路——这条用例钉住的就是那条路真的存在。
+        """
+        self.bind()
+        self.packet()
+        self.git("add", "-A")
+        self.hooks()
+        result = self.git("commit", "-m", "补记收尾包",
+                          env={"TASK_CENTER_DB": str(self.db),
+                               "TASK_CENTER_TICKET": self.tid("repo-1")})
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("收尾包", result.stdout + result.stderr)
 
     def test_hook_still_blocks_a_ticketless_commit_with_an_extra_path(self):
         """例外没变成后门：夹带别的文件、又没有工单，照旧拦。"""
@@ -1093,7 +1267,6 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertIn("stalled", payload["result"].get("reason", ""), f"要点名停住：{payload}")
 
 
-
 class CenterDiscoveryTest(unittest.TestCase):
     """中心库怎么发现：只有一处，且要认安装时的 --agents-home（AWK-105 C1/C2/C4）。
 
@@ -1228,6 +1401,7 @@ class CenterDiscoveryTest(unittest.TestCase):
         self.assertIn(str(self.agents_home / "center.json"), err.getvalue())
         # 不许「新建一个空库」：现场一个文件都没多出来。
         self.assertFalse(self.own_db.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

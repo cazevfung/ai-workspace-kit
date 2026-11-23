@@ -19,7 +19,7 @@
   1. 新增随包文档 `kit/docs/decisions.md`：写清四件被反复引用的口径——消息通道三档、回执一条、送达判据、项目接入面；`kit` 与 `skills` 里所有指向包外需求文档的引用改成指向它或改成不依赖外部文档的表述，`grep -rn "PRD-00[2-9]" kit skills --include=*.md --include=*.py` 输出为空。
   2. `kit/docs/protocol.md` 的 `create_ticket` 字段行写明 `deliverable` ≤500 字；`kit/task_center/__main__.py` 把「输入文件读不到」单独报成 `INPUT_UNREADABLE` 并带路径，核心返回的 `error` 原句照原样打印。
   3. 插件补真实图标（`plugin/draft/assets/icon.png`，`ghost.json` 声明 `icon`），按 Cindy 插件规范打出 `dist/ai-workspace-kit-0.2.1.cindy` 并入库存放；新增 `kit/tools/test_plugin_pack.py` 判包内三件套与图标体积；主文档写一节「装插件 → 启动 → 它报出四步计划」，并写明真装那一步要人在 Cindy 里点。
-- **不覆盖**：不改闸门判定（`work_gate` / `doc_gate` / `close_gate` / `ref_gate` 的判据）；不改 `task_center/core.py` 的校验与报错文字（只改其中指向不存在 PRD 的注释）；不把包外那几份需求文档全文搬进包里（它们带本机事实）；不动 `D:/AI工作区`；不做巡航与定时；不发布到 GitHub、公开市场或 SkillHub。
+- **不覆盖**：不改闸门判定（`work_gate` / `doc_gate` / `close_gate` / `ref_gate` 的判据）；不改 `task_center/core.py` 的校验与报错文字（只改其中指向不存在 PRD 的注释）；不把包外那几份需求文档全文搬进包里（它们带本机事实）；不动上游工作区；不做巡航与定时；不发布到 GitHub、公开市场或 SkillHub。
 
 ## 任务
 
@@ -66,17 +66,17 @@
 
 ### 7. 全量回归与记录
 
-跑两处测试与三道闸门，更新 `CHANGELOG.md` 的未发布节与用例数（`VERSION` 留到发版时再升，本轮不冒充已发布）；确认 `D:/AI工作区` 一个字节没动。
+跑两处测试与三道闸门，更新 `CHANGELOG.md` 的未发布节与用例数（`VERSION` 留到发版时再升，本轮不冒充已发布）；确认上游工作区一个字节没动。
 
 - 验证：`python tools/run_tests.py` 期望两处用例数都打印、合计不少于 481、末行 `结果：全部通过`、退出码 0。
 - 验证：`python verify/verify_onboard.py` 期望末行 `9/9`、退出码 0。
-- 验证：`git -C D:/AI工作区 status --porcelain` 期望输出为空、退出码 0。
+- 验证：`git -C <上游工作区> status --porcelain` 期望输出为空、退出码 0。
 
 ## 不做什么
 
 - 不改 `work_gate` / `doc_gate` / `close_gate` / `ref_gate` / `claims_gate` 的判定条件；不改 `task_center/core.py` 的字段校验、错误码与报错文案。
 - 不把包外那两份需求文档全文搬进套件，也不在套件里新建它们的副本；只沉淀判据。
-- 不动 `D:/AI工作区` 的任何文件；不把 `.data/` 与 `_sandbox/` 纳入提交；不推送远端。
+- 不动上游工作区的任何文件；不把 `.data/` 与 `_sandbox/` 纳入提交；不推送远端。
 - 不发布插件到公开市场或 SkillHub，不写 `releaseNotes` 冒充已上架版本。
 - 不做巡航、定时自动化、面板；不重写 README 的既有结构。
 

@@ -148,7 +148,14 @@ class CenterTest(unittest.TestCase):
         })
 
     def test_nonempty_unique_criteria_required(self):
-        for criteria in [[], [{"id": "C1", "text": ""}], [{"id": "C1", "text": "a"}] * 2]:
+        # 「一条都没有」与「形状写错」是两个错误码（AW-109）：前者是这张单还不可以被验收，
+        # 报 CRITERIA_NOT_JUDGEABLE；后者是字段写坏了，仍报 INVALID_INPUT。
+        self.error("CRITERIA_NOT_JUDGEABLE", "create_ticket", {
+            "project_id": "p1", "title": "任务",
+            "deliverable": "一份清单",
+            "prd_path": "PRD.md", "criteria": [],
+        })
+        for criteria in [[{"id": "C1", "text": ""}], [{"id": "C1", "text": "a"}] * 2]:
             self.error("INVALID_INPUT", "create_ticket", {
                 "project_id": "p1", "title": "任务",
                 "deliverable": "一份清单",
@@ -464,6 +471,7 @@ class CenterTest(unittest.TestCase):
         fresh = self.root / "fresh.sqlite3"
         result = Center(fresh).execute("init", {})
         self.assertEqual(SCHEMA_VERSION, result["result"]["schema_version"])
+
 
     def test_current_shape_with_old_version_header_is_rejected(self):
         # v2 shape but user_version=1: only the version gate can reject this.
