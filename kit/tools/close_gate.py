@@ -307,7 +307,8 @@ def default_db(root):
 
 
 def read_only(path):
-    path = Path(path)
+    # `as_uri()` 不接相对路径：给了相对的 --db 会抛 ValueError 而不是一句人话。
+    path = Path(path).absolute()
     if not path.is_file():
         raise GateError(f"中心库不存在：{path}")
     try:

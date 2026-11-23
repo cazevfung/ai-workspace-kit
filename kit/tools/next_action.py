@@ -214,7 +214,8 @@ def default_pause_file() -> Path:
 
 def read_only(path) -> sqlite3.Connection:
     """只读打开：`mode=ro` + `PRAGMA query_only`，与 wait_audit / idle_watch 同一写法。"""
-    path = Path(path)
+    # `as_uri()` 不接相对路径：给了相对的 --db 会抛 ValueError 而不是一句人话。
+    path = Path(path).absolute()
     if not path.is_file():
         raise PlannerError(f"DB_NOT_FOUND：库不存在：{path}")
     try:
