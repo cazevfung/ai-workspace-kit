@@ -1,6 +1,25 @@
 # 更新记录
 
-## 未发布
+## 0.5.1（2026-11-23）
+
+2026-11-23 发布。**这是一版安全修复，取代同一天发出去的 `0.5.0`。** `v0.5.0`（`46ce67d`）的 `install.py` 会无条件重写 `<agents_home>/center.json`，而那个参数的默认值就是 `~/.agents`；任何人拿下载链接试装一次，都可能把自己机器上的 `center.json` 改指到别处，于是整台机器的工作区工具一起读到空库——2026-11-23 22:10 真发生过一次（现场见下面 AWK-113 那条）。master 上早已合入修掉它的安装闸门，这一版就是把闸门发出去。
+
+`v0.5.0` 的 tag 留在 `46ce67d`，不删、不移动、也不 `tag -f`，那个 Release 照旧在；`0.5.1` 是它的替代下载。已经从 GitHub 下过 `0.5.0` 的人不必慌：受影响的是「装到临时目录」或「`--agents-home` 指向非默认目录」的那一次，看一眼 `~/.agents/center.json` 里的 `db` 是否还指向原来那份库就知道有没有被改；已经装好的机器重装一次就换上新的 `install.py`。
+
+### 安全修复：这版改了什么（AWK-113 的安装闸门）
+
+- `kit/tools/install_guard.py` 是唯一判据，新增 `tree_digest` / `diff_tree` 两个只读函数：装前装后对同一棵树取快照（≤256 KB 的文件算内容哈希、更大的只记大小与 mtime，另记目录项本身），用来证明「一个字节没变」，不必先写进去再恢复。
+- `install.py` 的默认行为改了。`--agents-home` 不是本机真实用户目录时（沙箱、临时、别人的目录）**默认一个用户级文件都不写**（`center.json` / `skills/` / `intake/` / 安装清单）；就是真实目录、而那里的 `center.json` 已指向**别的**库时**拒绝**，在复制第一个文件之前退出（码 2）并原文打印旧内容。要写必须显式 `--allow-user-config`；首次安装与「同一个库再装一次」行为不变。
+- `--dry-run` 预报三类结果：会写哪些用户级文件、会跳过什么、会拒绝什么。
+- `verify/verify_install.py` 加两项现场检查：不带开关的沙箱安装一个用户级文件都不写、真实 `~/.agents` 装前装后快照一致。用例在 `kit/tools/test_install_guard.py`（17 项）。
+
+### 发布动作（AWK-115）
+
+- `VERSION` 与 `plugin/draft/ghost.json` 都是 `0.5.1`；`dist/` 只留 `ai-workspace-kit-0.5.1.cindy`（旧包用 `git rm` 删掉）。打包命令是 `python tools/pack_plugin.py`：条目按名字排序、时间戳固定，同一份源码两次打出来字节相同，打完立刻拆开复核清单、入口与图标；宿主没有「打 `.cindy`」的现成能力，所以这条路就是可重复的手工方式。
+- 源码包 `ai-workspace-kit-0.5.1-source.zip` 由 tag 点的树生成：`git archive --format=zip --prefix=ai-workspace-kit-0.5.1/ v0.5.1 -o dist/ai-workspace-kit-0.5.1-source.zip`（同一棵树、同一条命令，内容相同）。
+- 推 `master` 与 `v0.5.1` tag，`gh release create v0.5.1` 附两个资源；Release note 指回 `0.5.0` 并写明这版取代它。三道闸门（`tools/run_tests.py` / `verify/verify_install.py` / `maintainer/redact_for_public.py --check`）全绿之后才推。
+- 随发布清掉 `kit/tasks/plan-013` / `plan-014` 里残留的两处真名与一处真实会话 id（`redact_for_public.py` 的替换口径，只动文档、不动代码）：`redact_for_public.py --check` 在 master 上本来就是红的，不修它这一版过不了第三道闸门。
+
 
 ### 公开仓库里剩下的本机路径：18 行逐条归位（AWK-112）
 

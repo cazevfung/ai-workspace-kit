@@ -5,7 +5,7 @@
 - `kit/PRD/PRD-001-工作区使用与工单体系.md` v0.1（工单闭环、验收条件要能跑、执行者不自验）
 - `docs/INSTALL.md` §安装器做了什么（当前口径：无条件写 `<agents-home>/center.json`、`skills/`、`intake/`）与 `kit/docs/closing.md` 的「中心库怎么被发现」（第 4 步：工作区指针 → `<agents_home>/center.json` 的 `db`，指丢即 `DB_NOT_FOUND`，不回落）
 - `install.py` 当前 master 46ce67d：第 283–284 行把 `--agents-home` 默认成 `~/.agents`，第 339–367 行无条件 `write_text(<agents_home>/center.json)`、`copy_tree(kit/docs, <agents_home>/intake)`、写 `<agents_home>/.ai-workspace-kit.json`，第 399 行起把 27 个技能复制进 `<skills_root>`；`kit/tools/center_config.py` 的发现链第 4 步与被写的指针互相咬着
-- 事件现场（2026-11-23 22:10，本单来源）：一个验收会话把工作区装到 `D:\awk109-verify\ws`，没传 `--agents-home`，于是 `<ws>/.agents/center.json` 记成真实的 `C:\Users\202108-107\.agents`，真实 `center.json` 被改指到沙箱空库；同一台机器上所有闸门一起读到空库，报 0 张在途
+- 事件现场（2026-11-23 22:10，本单来源）：一个验收会话把工作区装到 `D:\awk109-verify\ws`，没传 `--agents-home`，于是 `<ws>/.agents/center.json` 记成真实的 `X:/示例项目/.agents`，真实 `center.json` 被改指到沙箱空库；同一台机器上所有闸门一起读到空库，报 0 张在途
 - 本机实测（2026-11-23，只读）：真实 `~/.agents` 有 3156 个文件、511 MB，其中 `skills/` 501 MB；按「≤256 KB 的文件算内容哈希、其余算大小与 mtime」做一次树快照约 0.5 秒——快照对比这件事在用例里负担得起，不需要真写进去再恢复
 - 本轮目标见 `kit/tasks/round.md` R-002
 
@@ -94,7 +94,7 @@
 ## 不做什么
 
 - 不改 `task_center/` 的 schema 与操作面，不改 `kit/tools/center_config.py` 的发现顺序。
-- 不拿真实的 `C:\Users\202108-107\.agents` 做实验：所有安装都在临时 `--agents-home` 或假 HOME 下跑，「真实目录没被写」只用前后快照证明，绝不先写进去再恢复。
+- 不拿真实的 `X:/示例项目/.agents` 做实验：所有安装都在临时 `--agents-home` 或假 HOME 下跑，「真实目录没被写」只用前后快照证明，绝不先写进去再恢复。
 - 不动已装好的工作区（含 `D:/AI工作区`）、不动主检出、不推远端、不打 tag、不发版。
 - 不迁移历史安装、不自动备份或轮转旧 `center.json`、不替用户决定「该不该重指」——只拒绝并给出参数。
 - 不改 `--link-agents` 的语义（仍是显式传了才建链接）。

@@ -66,7 +66,7 @@
 - `test_generic_bind_step_names_a_real_session_id`：`bind_session` 步的 `session_id` 等于 `onboard.SESSION_ID_PLACEHOLDER`，该步 `requires_real_session_id` 为真，`check` 里含「真实」与「不许猜」。
 - `test_generic_stop_points_name_the_aw007_incident`：`plans["generic_dispatch"]["stop_points"]` 里有一句同时含 `AW-007`、`list_sessions` 与「停在第 3 步」。
 - `test_generic_open_session_is_a_local_step`：`open_session` 的 `server` 与 `kind` 都是 `local`，且不在 `CINDY_HELPER_TOOLS` / `TASK_CENTER_TOOLS` 里。
-- `SessionIdGuardTest`：`check_session_id("a31d514c-8517-4ab9-80bf-5519cc7d65cd")` 通过；`""`、`"<真实 session_id>"`、`"D:/tmp/awk106"`、`"unknown"`、`"placeholder"`、`"x"*501` 全部不通过且各有原因。
+- `SessionIdGuardTest`：`check_session_id("<session-id>")` 通过；`""`、`"<真实 session_id>"`、`"D:/tmp/awk106"`、`"unknown"`、`"placeholder"`、`"x"*501` 全部不通过且各有原因。
 - `CliTest.test_generic_json_carries_bind_template_and_stop`：`--host generic --json` 退出 0，`plans` 只有 `generic_dispatch`，`host_capabilities.send_to_session` 是 `False`，`stop_points` 非空。
 - `CliTest.test_generic_rejects_a_guessed_session_id`：`--host generic --session-id D:/tmp/awk106 --json` 退出 2，stderr 含 `不许猜`。
 - `CliTest.test_generic_fills_a_real_session_id`：给出合法 id 时 `bind_session` 步的 `session_id` 就是它，且 `session_id_source` 变成「命令行给出」。
@@ -99,7 +99,7 @@
 
 ### 五、提交与回执
 
-在 `.worktrees/AWK-106` 分支上提交（commit 钩子会调 `work_gate.py`，需 `TASK_CENTER_TICKET=AWK-106` 且尝试为 `running`）；`submit_result` 的 `head_sha` 取 `git rev-parse HEAD`，`base_sha` 取 `git merge-base HEAD master`，`artifacts` 每条带 `.worktrees/AWK-106/` 前缀；回执只发一条（工单号 + 状态 + 提交 sha）给协调会话 `33da2d7b-16c1-4541-92e0-a070e436bcd0`。
+在 `.worktrees/AWK-106` 分支上提交（commit 钩子会调 `work_gate.py`，需 `TASK_CENTER_TICKET=AWK-106` 且尝试为 `running`）；`submit_result` 的 `head_sha` 取 `git rev-parse HEAD`，`base_sha` 取 `git merge-base HEAD master`，`artifacts` 每条带 `.worktrees/AWK-106/` 前缀；回执只发一条（工单号 + 状态 + 提交 sha）给协调会话 `<session-id>`。
 
 证据：`git rev-parse HEAD` 输出 40 位十六进制且与 `submit_result` 的 `head_sha` 一致；`get_ticket` 回执 `state` 为 `awaiting_review`、`submissions[-1].artifacts` 每条以 `.worktrees/AWK-106/` 开头；两条命令退出码 0。
 

@@ -8,7 +8,7 @@ English version: [README.en.md](README.en.md)
 
 [它解决什么问题](#它解决什么问题) · [它是什么](#它是什么) · [上下文边界](#上下文边界) · [一张单的一生](#一张单的一生) · [闸门与判定点](#闸门与判定点) · [已知限制](#已知限制) · [安装](#安装) · [验证与 demo](#验证与-demo)
 
-这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.5.0。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主。Cindy 里的派发已实测（`create_project` / `send_to_session`）；Claude Code、Codex 这类宿主只保证「文件、脚本与 cron」这一层，派单按下文「两种宿主」那一节的手工计划走——本套件没有在这些宿主上真跑过完整闭环，所以不写「已支持」。
+这套流程在一个真实项目里跑过几十张工单，去掉项目专属内容之后打包成本套件，当前版本 0.5.1。运行需要 Python 3.10+，以及一个会读 `AGENTS.md` 的 agent 宿主。Cindy 里的派发已实测（`create_project` / `send_to_session`）；Claude Code、Codex 这类宿主只保证「文件、脚本与 cron」这一层，派单按下文「两种宿主」那一节的手工计划走——本套件没有在这些宿主上真跑过完整闭环，所以不写「已支持」。
 
 ---
 
@@ -208,7 +208,7 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 650 = 1004 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 658 = 1012 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
@@ -282,14 +282,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1004 项（`tests/` 354、`tools/` 650）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1012 项（`tests/` 354、`tools/` 658）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1004 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1012 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
@@ -351,7 +351,7 @@ ai-workspace/
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.5.0` 共 27 个：
+技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.5.1` 共 27 个：
 
 - **工作区技能（7）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`shared-resource-identity`、`bootstrap-workspace`
 - **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
@@ -431,7 +431,7 @@ python tools/schedule_plan.py --workspace /path/to/你的工作区 --json  # 交
 
 ### 插件：装、启动、它会报出五步计划
 
-仓库里的 `dist/ai-workspace-kit-0.5.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
+仓库里的 `dist/ai-workspace-kit-0.5.1.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
 
 1. **装** —— 在 Cindy 侧边栏「插件」里导入本地包，选中这个文件，确认。**这一步必须由人点**：导入会把插件写进用户目录并启用，Agent 不代点，也不在你没看权限清单时替你确认。装上是本地开发副本，不经过市场审核。
 2. **启动** —— 在任意会话里敲 `$ai-workspace <你的工作区绝对路径>`，或者说「把这条路径加成项目、开一个协调会话」。它会调 `bootstrap`。

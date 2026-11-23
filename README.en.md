@@ -8,7 +8,7 @@
 
 [The problem](#the-problem-it-solves) · [What it is](#what-it-is) · [Context boundaries](#context-boundaries) · [Life of a ticket](#the-life-of-one-ticket) · [Gates](#gates-and-decision-points) · [Known limitations](#known-limitations) · [Install](#install) · [Demo](#verification-and-demo)
 
-The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.5.0. It needs Python 3.10+ and an agent host that reads `AGENTS.md`. Dispatch inside Cindy is measured (`create_project` / `send_to_session`); hosts such as Claude Code and Codex are only covered at the "files, scripts and cron" layer — dispatch there follows the manual plan under "Two kinds of host" below. The kit has not run the full loop on those hosts, so this README does not claim "supported".
+The workflow has run dozens of tickets in a real project; stripped of project-specific content, it is packaged here at version 0.5.1. It needs Python 3.10+ and an agent host that reads `AGENTS.md`. Dispatch inside Cindy is measured (`create_project` / `send_to_session`); hosts such as Claude Code and Codex are only covered at the "files, scripts and cron" layer — dispatch there follows the manual plan under "Two kinds of host" below. The kit has not run the full loop on those hosts, so this README does not claim "supported".
 
 ---
 
@@ -205,7 +205,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 650 = 1004, 0 failures
+python tools/run_tests.py            # should pass: tests/ 354 + tools/ 658 = 1012, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -258,13 +258,13 @@ The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> s
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 1004 (`tests/` 354, `tools/` 650) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 1012 (`tests/` 354, `tools/` 658) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 1004 tests
+cd "$DRILL/ws" && python tools/run_tests.py      # last line must read 结果：全部通过, 1012 tests
 python verify/verify_receipt.py --workspace .    # verify/ ships with the workspace after install
 ```
 
@@ -316,7 +316,7 @@ ai-workspace/
 └── .githooks/             # commit hooks
 ```
 
-The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.5.0` installs 27:
+The skills are also installed to `~/.agents/skills`, so an agent can read them in any project; `v0.5.1` installs 27:
 
 - **Workspace skills (7):** `prd-authoring`, `pdsa-workflow`, `ticket-dispatch`, `plan-gate`, `skill-routing`, `shared-resource-identity`, `bootstrap-workspace`
 - **General skills (20):** `brainstorming`, `writing-plans`, `executing-plans`, `test-driven-development`, `systematic-debugging`, `verification-before-completion`, `code-review-and-quality`, `requesting-code-review`, `receiving-code-review`, `merge-latest-branches`, `writing-skills`, `shuo-ren-hua`, `dispatching-parallel-agents`, `subagent-driven-development`, `resumable-implementation-contracts`, `using-git-worktrees`, `doubt-driven-development`, `planning-and-task-breakdown`, `project-routing`, `handoff-to-workspace`
