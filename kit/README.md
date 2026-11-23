@@ -44,6 +44,29 @@ echo '{"project_id":"ai-workspace","title":"第一张工单","deliverable":"..."
 
 `.agents/skills/` 里的技能同时装在用户级目录 `~/.agents/skills/`，因此在任何项目里都能被 agent 读到。
 
+## 行尾口径：文本一律 LF
+
+`.gitattributes` 把全仓文本钉成 LF（`* text=auto eol=lf`）。只有 `skills/**` 保持 `-text`
+（连「按 LF 存」都不做，一律原字节进出，因为它要与 live 技能目录逐字节一致）。二进制文件由
+`text=auto` 按内容判定，不受转换影响。手工安装的工作区里还多一处 `.agents/skills/skill-routing/index/**`
+快照，同样标 `-text`。
+
+这么钉是为了让「检出的字节」等于「库里的 blob」：`task_center/artifacts.py` 记的 sha256
+是**工作树字节**算出来的，同一份内容在 `core.autocrlf=true` 与 `false` 的机器上一个是
+CRLF、一个是 LF，指纹就成了两个数，换台机器复核只能报 `ARTIFACT_CHANGED`。
+
+`python tools/check_eol.py` 就是核这件事的：声明面看 `git check-attr` 的 `eol`，落地面看工作树
+字节里有没有 CRLF。**它核的是「某一次检出」而不是「仓库」**，所以规则合入之后，每个已有的检出
+都要就地重检出一次，否则工作区停在半新半旧的 CRLF 上（`git add` 会一直警告
+`CRLF will be replaced by LF`）：
+
+```bash
+git rm --cached -r -q . && git reset --hard
+```
+
+**这一步会丢未提交的改动**：暂存区与工作区里没提交的内容、以及挡在受管路径上的未跟踪
+文件都会被覆盖。先把它们提交，或挪到 `.data/` 下再跑。新克隆不需要这一步——检出即 LF。
+
 ## 不要把它当成
 
 - 不是全自动流水线：`claim` 之后调用宿主创建会话那一步仍是手工的。

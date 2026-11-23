@@ -141,6 +141,7 @@ python tools/auto_merge.py --ticket <工单号> --record-only # 已合并且无�
 git worktree add .worktrees/<工单号> -b ticket/<工单号> master   # 开工：一单一树
 python tools/run_tests.py                       # 全部测试：tests/ 与 tools/test_*.py 两处一起跑
 python tools/run_tests.py -v                    # 同上，逐条打印用例名
+python tools/check_eol.py                       # 行尾自检：受管文本在本次检出里必须是 LF
 python -m task_center --db "{{WORKSPACE}}/.data/task-center.sqlite3" list_projects
 python -m task_center --db <绝对路径> <操作> --request-id <唯一编号> --input <JSON文件>
 python -m task_center.probe --roots D:/ --depth 2 --explain   # 只读项目探测

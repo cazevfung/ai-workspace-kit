@@ -1,3 +1,15 @@
-* text=auto
-# 技能内容要求逐字节一致时关掉换行转换；这里保留给上游同步使用。
+# 全仓文本钉成 LF：检出的工作树字节等于库里的 blob。
+#
+# 为什么钉：`task_center/artifacts.py` 记的是**工作树字节**的 sha256。同一份内容在
+# `core.autocrlf=true` 的机器上检出成 CRLF、在别的机器（或有人 unset 了它）上检出成 LF，
+# 同一个 artifact 就有了两个 sha，`review_result` 只能报 `ARTIFACT_CHANGED`。
+# `text=auto` 保留二进制按内容判定：被判定成二进制的文件绕开转换，原字节进出。
+#
+# 顺序有讲究：同一个文件里后写的规则覆盖先写的，所以 `skills/** -text` 这个例外排在最后。
+# `-text` 比 `eol=lf` 更强——连「按 LF 存」都不做，一律原字节进出。
+* text=auto eol=lf
+
+# 技能内容要跟 live 目录逐字节一致，所以禁止换行转换。
+# 没有这条时，core.autocrlf=true 的机器上一次新检出就会把 LF 变成 CRLF，
+# 内容看着一样，sha256 却变了——check_index.py 的正文比对是按字节的。
 skills/** -text
