@@ -223,62 +223,13 @@ def criteria(data, state=None):
     return value
 
 
-# `submit_result` 的五个形状字段（AWK-118）：以前逐项 `require`，形状全错的人要试五次才通——
-# 2026-11-24 03:38 的演练实测连撞五次 `INVALID_INPUT`（head_sha → base_sha → artifacts →
-# evidence → risks），每次只报第一条。规则一条没松，改成一次校完、一条说全：`message` 里
-# 既有全部期望形状，也有这一次哪几项不合格。上下限与每条长度上限只在这里写一遍。
-SUBMIT_ARRAYS = (("artifacts", 1, 20), ("evidence", 1, 100), ("risks", 0, 100))
-SUBMIT_ITEM_MAX = 4000
-SUBMIT_SHAPE_HINT = (
-    "submit_result shape: head_sha / base_sha are 40 hexadecimal characters (a first commit "
-    "with no parent, where `git merge-base HEAD master` fails, takes base_sha = git rev-parse HEAD "
-    "= head_sha); artifacts / evidence / risks are arrays of strings — artifacts 1-20, "
-    "evidence 1-100, risks 0-100 (each string nonempty and at most " + str(SUBMIT_ITEM_MAX) +
-    " characters; not a JSON string, not objects)"
-)
-
-
-def _sha_shape_problem(data, key):
-    """这个 sha 字段哪里不对；合格时返回 None。只校形状：本工具不跑 git。"""
+def string_list(data, key, minimum=0, maximum=100):
     value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        return f"{key} is missing (want 40 hexadecimal characters)"
-    if len(value) != 40 or any(c not in "0123456789abcdefABCDEF" for c in value):
-        return f"{key} is not 40 hexadecimal characters"
-    return None
-
-
-def _array_shape_problem(data, key, minimum, maximum):
-    """这个数组字段哪里不对；合格时返回 None。只报第一处错：同一条 message 里还有别项。"""
-    value = data.get(key)
-    if not isinstance(value, list):
-        return f"{key} is {type(value).__name__}, not an array of strings"
-    if not minimum <= len(value) <= maximum:
-        return f"{key} has {len(value)} entries, outside {minimum}-{maximum}"
-    for index, item in enumerate(value):
-        if not isinstance(item, str):
-            return f"{key}[{index}] is {type(item).__name__}, not a string"
-        if not item.strip() or len(item) > SUBMIT_ITEM_MAX:
-            return f"{key}[{index}] is not a nonempty string of at most {SUBMIT_ITEM_MAX} characters"
-    return None
-
-
-def submit_shape(data):
-    """一次取齐 `submit_result` 的五个形状字段，错了就一条 `INVALID_INPUT` 说全。
-
-    为什么不在逐项 require 上改文案：第一条不合格就把后面全遮住，形状错的人得试五次。
-    所以先把每一项「哪里不对」收进列表，最后只抛一次；该拒的一条没少拒（上下限、非空、
-    40 位十六进制都还在），变的只是把话说全这一次。
-    """
-    problems = [problem for problem in (
-        _sha_shape_problem(data, "head_sha"),
-        _sha_shape_problem(data, "base_sha"),
-        *(_array_shape_problem(data, key, low, high) for key, low, high in SUBMIT_ARRAYS),
-    ) if problem]
-    require(not problems, "INVALID_INPUT", f"{SUBMIT_SHAPE_HINT}. Wrong now: " + "; ".join(problems))
-    head_sha, base_sha = data["head_sha"].lower(), data["base_sha"].lower()
-    values = {key: data[key] for key, _, _ in SUBMIT_ARRAYS}
-    return head_sha, base_sha, values["artifacts"], values["evidence"], values["risks"]
+    require(isinstance(value, list) and minimum <= len(value) <= maximum,
+            "INVALID_INPUT", f"{key} must contain {minimum} to {maximum} strings")
+    for item in value:
+        text({key: item}, key)
+    return value
 
 
 def options(data):
@@ -1100,13 +1051,16 @@ class Center:
         require(ticket["state"] == "running", "INVALID_STATE", "Ticket is not accepting execution results")
         project = self._unchanged_prd(conn, ticket, attempt)
         # 两棵树都必填：`head_sha` 说「交的是哪一棵」，`base_sha` 说「它从哪分出来的」。
-        # 五个形状字段一次校完、一条说全（AWK-118）：先校它们再驳文件，缺字段时不至于
-        # 因为另一个原因报出 FILE_NOT_FOUND。
+        # 五个形状字段一次校完、一条说全（AWK-118）：先校它们再驳文件，缺字段时不至于因为
+        # 另一个原因报出 FILE_NOT_FOUND。三个数组的上下限（1-20 / 1-100 / 0-100）与每条
+        # 「非空且 ≤4000 字符」只在 `submit_shape` 里写了一遍；这里只拿结果，不重复判。
+        # 行数保持不变：`PRD/` 里有指向本文件的 `:<行号>` 引用。
         head_sha, base_sha, paths, evidence, risks = submit_shape(data)
         artifacts = [fingerprint(project["root"], path) for path in paths]
         require(len({str(Path(a["path"])).casefold() for a in artifacts}) == len(artifacts),
                 "INVALID_INPUT", "Duplicate artifact paths")
         summary = text(data, "summary")
+        # 形状不对时 `submit_shape` 已经抛了；到这里三个数组都是干净的字符串数组。
         # 这次尝试是按哪一版判据派发的：低于工单当前的版本，就说明它在开工后被改过，
         # 验收得按新条件重看一遍。这一句不回写任何行（PRD-013 R6）。
         criteria_changed = attempt["criteria_version"] < ticket["criteria_version"]
@@ -1869,3 +1823,62 @@ def review_snapshot(raw_checks, verdict):
     checks = stored_checks(raw_checks)
     tally = checks_summary(checks)
     return {"checks": checks, "checks_summary": tally, "summary": review_summary_line(verdict, tally)}
+
+# `submit_result` 的五个形状字段（AWK-118）：以前逐项 `require`，形状全错的人要试五次才通——
+# 2026-11-24 03:38 的演练实测连撞五次 `INVALID_INPUT`（head_sha → base_sha → artifacts →
+# evidence → risks），每次只报第一条。规则一条没松，改成一次校完、一条说全：`message` 里
+# 既有全部期望形状，也有这一次哪几项不合格。上下限与每条长度上限只在这里写一遍。
+# 放在文件末尾与 `review_checks` 同一个理由：`PRD/` 里有 `task_center/core.py:<行号>` 的引用，
+# ref_gate 核「那一行非空」，插在中间会把它们整体推走（PRD-014 的第 454 行就是这么红的）。
+SUBMIT_ARRAYS = (("artifacts", 1, 20), ("evidence", 1, 100), ("risks", 0, 100))
+SUBMIT_ITEM_MAX = 4000
+SUBMIT_SHAPE_HINT = (
+    "submit_result shape: head_sha / base_sha are 40 hexadecimal characters (a first commit "
+    "with no parent, where `git merge-base HEAD master` fails, takes base_sha = git rev-parse HEAD "
+    "= head_sha); artifacts / evidence / risks are arrays of strings — artifacts 1-20, "
+    "evidence 1-100, risks 0-100 (each string nonempty and at most " + str(SUBMIT_ITEM_MAX) +
+    " characters; not a JSON string, not objects)"
+)
+
+
+def _sha_shape_problem(data, key):
+    """这个 sha 字段哪里不对；合格时返回 None。只校形状：本工具不跑 git。"""
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return f"{key} is missing (want 40 hexadecimal characters)"
+    if len(value) != 40 or any(c not in "0123456789abcdefABCDEF" for c in value):
+        return f"{key} is not 40 hexadecimal characters"
+    return None
+
+
+def _array_shape_problem(data, key, minimum, maximum):
+    """这个数组字段哪里不对；合格时返回 None。只报第一处错：同一条 message 里还有别项。"""
+    value = data.get(key)
+    if not isinstance(value, list):
+        return f"{key} is {type(value).__name__}, not an array of strings"
+    if not minimum <= len(value) <= maximum:
+        return f"{key} has {len(value)} entries, outside {minimum}-{maximum}"
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            return f"{key}[{index}] is {type(item).__name__}, not a string"
+        if not item.strip() or len(item) > SUBMIT_ITEM_MAX:
+            return f"{key}[{index}] is not a nonempty string of at most {SUBMIT_ITEM_MAX} characters"
+    return None
+
+
+def submit_shape(data):
+    """一次取齐 `submit_result` 的五个形状字段，错了就一条 `INVALID_INPUT` 说全。
+
+    为什么不在逐项 require 上改文案：第一条不合格就把后面全遮住，形状错的人得试五次。
+    所以先把每一项「哪里不对」收进列表，最后只抛一次；该拒的一条没少拒（上下限、非空、
+    40 位十六进制都还在），变的只是把话说全这一次。
+    """
+    problems = [problem for problem in (
+        _sha_shape_problem(data, "head_sha"),
+        _sha_shape_problem(data, "base_sha"),
+        *(_array_shape_problem(data, key, low, high) for key, low, high in SUBMIT_ARRAYS),
+    ) if problem]
+    require(not problems, "INVALID_INPUT", f"{SUBMIT_SHAPE_HINT}. Wrong now: " + "; ".join(problems))
+    head_sha, base_sha = data["head_sha"].lower(), data["base_sha"].lower()
+    values = {key: data[key] for key, _, _ in SUBMIT_ARRAYS}
+    return head_sha, base_sha, values["artifacts"], values["evidence"], values["risks"]
