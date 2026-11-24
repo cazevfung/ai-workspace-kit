@@ -40,7 +40,7 @@
 
 - **还没报过 → 原样点名**（第 1 轮）；
 - **报过、但还没到下一次的时间 → 这一轮不点名**（`reason_code=blank_criteria_backoff`，
-  退出 2）。退避阶梓是 `POOL_REPORT_BACKOFF_SECONDS`：第 1 次之后 2 小时、第 2 次之后
+  退出 2）。退避阶梯是 `POOL_REPORT_BACKOFF_SECONDS`：第 1 次之后 2 小时、第 2 次之后
   6 小时、第 3 次之后 24 小时，此后一直 24 小时；
 - **报到第 `POOL_REPORT_ESCALATE_AFTER` 轮 → 升级**（`reason_code=blank_criteria_escalate`）：
   不再原样重报，人话换成「建一张 planned 单把这件事变成可验收的活，或用 ask_ticket 落一个
@@ -184,8 +184,8 @@ BLANK_CRITERIA_GRACE_SECONDS = 24 * 60 * 60
 POOL_REPORT_BACKOFF_SECONDS = (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
 
 # 报到第几轮就升级（不再原样重报）：这一轮的人话换成「建一张 planned 单 / ask_ticket」。
-# 取值是退避阶梓走完一轮的点：1 次原价 + 两次退避之后再叫一次，所以它跟
-# `POOL_REPORT_BACKOFF_SECONDS` 的长度对得上；改阶梓时这里一起看。
+# 取值是退避阶梯走完一轮的点：1 次原价 + 两次退避之后再叫一次，所以它跟
+# `POOL_REPORT_BACKOFF_SECONDS` 的长度对得上；改阶梯时这里一起看。
 POOL_REPORT_ESCALATE_AFTER = 3
 
 # 挡住派发的三个状态：`ACTIVE_TICKET_STATES` 去掉 `awaiting_review`（理由见模块头）。
