@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +36,27 @@ import install_guard
 REPO = Path(__file__).resolve().parents[2]
 INSTALL = REPO / "install.py"
 REAL_AGENTS = Path.home() / ".agents"
+
+# 安装器末尾那份总结的两个固定写法（AWK-119）。改措辞会先红在这里——那正是我们要的：
+# 这两行是「装完看得清」的全部内容，被人顺手改写而没人发现，等于这次修的洞又开了。
+SKIP_LINE_PREFIX = "未写："
+SKIP_REASON = "默认不写用户级配置，加 --allow-user-config"
+TOTAL_LINE = re.compile(r"本次(?:装了|会装) (\d+) 项、跳过 (\d+) 项")
+DONE_LINE = re.compile(r"已装 (\d+) 项：(.+)")
+
+
+def summary_counts(output: str):
+    """从 install.py 的输出里取出 (装了 N 项, 跳过 M 项, 逐条「未写：」行)。
+
+    合计与逐条必须是同一份账：这里不信任代码里的计数器，直接把屏幕上的两处
+    取出来比一次。「数得清」本身就是要交付的东西，自述不算。
+    找不到合计那一行时返回 (None, None, 行)，调用方据此报红。
+    """
+    total = TOTAL_LINE.search(output)
+    lines = [line.strip() for line in output.splitlines() if line.strip().startswith(SKIP_LINE_PREFIX)]
+    if total is None:
+        return None, None, lines
+    return int(total.group(1)), int(total.group(2)), lines
 
 
 def snapshot_real_agents():
@@ -268,6 +290,83 @@ class InstallRunTest(unittest.TestCase):
         center = json.loads(center.read_text(encoding="utf-8"))
         self.assertEqual((self.ws / ".data" / "task-center.sqlite3").resolve(),
                          Path(center["db"]).resolve())
+        self.assert_real_agents_untouched()
+
+    # 沙箱安装默认不写的那四个用户级位置（AWK-113 的判据，AWK-119 只负责说出来）。
+    def user_level_paths(self):
+        return (
+            self.agents / "skills",
+            self.agents / "center.json",
+            self.ws / ".agents" / "center.json",
+            self.agents / "intake",
+            self.agents / ".ai-workspace-kit.json",
+        )
+
+    def test_sandbox_install_summary_lists_skips_and_totals(self):
+        """不带开关装到临时目录：总结里数得清跳过了哪几项，合计对得上逐条。
+
+        现场是 2026-11-24 03:38 的演练：退出码 0、屏幕上只有「安装完成」，而 27 个技能
+        一个都没装。只断言「屏幕上出现过某个词」不够——那句跳过夹在 12 个步骤中间，
+        所以这里要求三件事同时成立：逐条带路径与原因、合计与逐条行数相等、装了 N 项
+        那行真的列了 N 个名字。
+        """
+        result = self.run_install("--workspace", str(self.ws),
+                                  "--agents-home", str(self.agents), "--no-git")
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output[-2000:])
+
+        installed, skipped, lines = summary_counts(output)
+        self.assertIsNotNone(installed, "总结里没有「本次装了 N 项、跳过 M 项」这一行")
+        self.assertEqual(len(lines), skipped, "合计里的跳过数与逐条「未写：」行数对不上")
+        self.assertGreaterEqual(skipped, 5, "沙箱默认该跳过的五个用户级位置没数全")
+
+        joined = "\n".join(lines)
+        for path in self.user_level_paths():
+            # 路径与原因在同一行：只有路径没有原因，读的人不知道是「不需要」还是「有开关」。
+            matched = [line for line in lines if str(path) in line]
+            self.assertTrue(matched, f"跳过的路径没写出来：{path}")
+            self.assertIn(SKIP_REASON, matched[0], f"跳过的行没写清原因：{matched[0]}")
+
+        # 装了 N 项也要数得出来：那一行列了几个名字，N 就是几。
+        done = DONE_LINE.search(output)
+        self.assertIsNotNone(done, "总结里没有「已装 N 项：…」这一行")
+        names = [name for name in done.group(2).strip().split("、") if name.strip()]
+        self.assertEqual(int(done.group(1)), len(names), "合计里的已装数与列出的项名个数对不上")
+        self.assertEqual(int(done.group(1)), installed)
+
+        # 仍然一个用户级文件都没写：这一半由 install_guard 的用例与 verify_install 守着，
+        # 这里再确认一次「说的是真的」。
+        self.assertFalse((self.agents / "center.json").exists())
+        self.assertFalse((self.agents / "skills").exists())
+        self.assert_real_agents_untouched()
+
+    def test_explicit_flag_summary_has_no_user_config_skip_lines(self):
+        """带 --allow-user-config 时，用户级那几项不再进「未写：」——否则是噪声。
+
+        反例正是本单要避免的另一种错：两种情形打同一套话，读的人分不出这次到底写了没写。
+        这里不看合计里那个 M（--no-git 仍会跳过两个 git 项），只看用户级那四个路径。
+        """
+        result = self.run_install("--workspace", str(self.ws),
+                                  "--agents-home", str(self.agents),
+                                  "--allow-user-config", "--no-git")
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output[-2000:])
+
+        installed, skipped, lines = summary_counts(output)
+        self.assertIsNotNone(installed, "总结里没有「本次装了 N 项、跳过 M 项」这一行")
+        self.assertEqual(len(lines), skipped, "合计里的跳过数与逐条「未写：」行数对不上")
+
+        joined = "\n".join(lines)
+        for path in self.user_level_paths():
+            self.assertNotIn(str(path), joined, f"带开关时不该再把它报成跳过：{path}")
+        for line in lines:
+            self.assertNotIn(SKIP_REASON, line, f"带开关时不该再出现「默认不写」的原因：{line}")
+
+        # 反过来确认这次真的写了：没写而「不报跳过」才是最难查的那种。
+        self.assertTrue((self.agents / "center.json").is_file())
+        self.assertTrue((self.agents / "skills").is_dir())
+        self.assertTrue((self.agents / "intake").is_dir())
+        self.assertTrue((self.agents / ".ai-workspace-kit.json").is_file())
         self.assert_real_agents_untouched()
 
     def test_dry_run_forecasts_skips_and_writes(self):
