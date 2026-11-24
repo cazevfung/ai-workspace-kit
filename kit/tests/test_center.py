@@ -325,6 +325,58 @@ class CenterTest(unittest.TestCase):
             self.error(code, "submit_result", {**payload, key: value})
         self.assertEqual("running", self.ok("get_ticket", self.scope())["state"])
 
+    def test_submit_shape_error_names_every_field_once(self):
+        """形状错时一条 message 说全五个字段（AWK-118 C3）。
+
+        演练实测（2026-11-24 03:38）：payload 连撞五次 INVALID_INPUT，每次只报一条，
+        从 head_sha 一路试到 risks。所以这里判的不是「报不报」，而是「一次报全没有」——
+        只报 artifacts 一条也算红。
+        """
+        self.ticket()
+        attempt = self.running()
+        payload = self.result_payload(attempt)
+        result = self.call("submit_result", {**payload, "artifacts": [{"path": "result.md"}]})
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("INVALID_INPUT", result["error"]["code"], result)
+        message = result["error"]["message"]
+        for fragment in ("artifacts 1-20", "evidence 1-100", "risks 0-100",
+                         "arrays of strings", "artifacts[0] is dict"):
+            self.assertIn(fragment, message)
+        # 换三种错法（字符串、空数组、数字数组）也仍然三项同时被点名：
+        # 不是「先撞到哪个报哪个」。
+        result = self.call("submit_result", {**payload, "artifacts": "result.md",
+                                             "evidence": [], "risks": [1]})
+        message = result["error"]["message"]
+        for fragment in ("artifacts is str", "evidence has 0 entries", "risks[0] is int"):
+            self.assertIn(fragment, message)
+        ticket = self.ok("get_ticket", self.scope())
+        self.assertEqual("running", ticket["state"])
+        self.assertEqual([], ticket["submissions"])
+
+    def test_submit_still_rejects_what_it_used_to(self):
+        """报错说全不等于放宽（AWK-118 C4）：上下限、非空、40 位十六进制照旧拒。
+
+        反例就是为了让报错更全而顺手把「缺 base_sha」「101 条证据」也收下——
+        那会把 PRD-013 AC12 的必填判据整条抹掉。
+        """
+        self.ticket()
+        attempt = self.running()
+        payload = self.result_payload(attempt)
+        missing_base = {key: value for key, value in payload.items() if key != "base_sha"}
+        for bad in (missing_base,
+                    {**payload, "base_sha": "abc"},
+                    {**payload, "evidence": ["逐条"] * 101},
+                    {**payload, "risks": ["风险"] * 101},
+                    {**payload, "artifacts": ["result.md"] * 21},
+                    {**payload, "artifacts": ["  "]}):
+            self.error("INVALID_INPUT", "submit_result", bad)
+        # 合法的最小 payload（一个成果、一条证据、没有风险）仍然一次成功。
+        receipt = self.ok("submit_result", payload)
+        self.assertEqual("awaiting_review", receipt["state"])
+        ticket = self.ok("get_ticket", self.scope())
+        self.assertEqual(1, len(ticket["submissions"]))
+        self.assertEqual(BASE_SHA, ticket["submissions"][0]["base_sha"])
+
     def test_submit_rejects_missing_or_external_files(self):
         self.ticket()
         attempt = self.running()
