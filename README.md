@@ -208,14 +208,14 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 658 = 1012 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 696 = 1050 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
 **从源码包跑测试要先知道一件事。** Release 里的 `*-source.zip` 解压出来**不是 git 工作树**，
 直接 `python tools/run_tests.py` 会看到两项 skip：`test_work_gate` 与 `test_auto_merge` 各有一条
 要读 `git diff --cached`（暂存区），非仓库目录里 git 自己就报错，所以它们跳过并写明原因。
-skip 不等于失败——汇总行仍是「全部通过」。想把 1012 项一条不落地跑完，先在这个目录
+skip 不等于失败——汇总行仍是「全部通过」。想把 1050 项一条不落地跑完，先在这个目录
 `git init` 并提交一次，再跑同一条命令。
 
 装完还要把工作区接进宿主、把业务仓库接进工作区：
@@ -288,14 +288,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1012 项（`tests/` 354、`tools/` 658）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1050 项（`tests/` 354、`tools/` 696）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1012 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1050 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
