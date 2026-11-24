@@ -125,11 +125,8 @@ class AuditError(RuntimeError):
 
 def read_only(path) -> sqlite3.Connection:
     """只读打开：`mode=ro` + `PRAGMA query_only`，与 idle_watch / session_roster 同一写法。"""
-    path = Path(path)
-    if not path.is_absolute():
-        # `as_uri()` 只收绝对路径：相对路径会一路报 ValueError 而不是 DB_NOT_FOUND，
-        # 一条用法错误看起来像工具崩了。先归一成绝对路径，剩下按原定判据走。
-        path = path.resolve()
+    # `as_uri()` 不接相对路径：给了相对的 --db 会抛 ValueError 而不是一句人话。
+    path = Path(path).absolute()
     if not path.is_file():
         raise AuditError(f"DB_NOT_FOUND：库不存在：{path}")
     try:

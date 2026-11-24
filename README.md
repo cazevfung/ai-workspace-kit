@@ -208,14 +208,14 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 658 = 1012 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 696 = 1050 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
 **从源码包跑测试要先知道一件事。** Release 里的 `*-source.zip` 解压出来**不是 git 工作树**，
 直接 `python tools/run_tests.py` 会看到两项 skip：`test_work_gate` 与 `test_auto_merge` 各有一条
 要读 `git diff --cached`（暂存区），非仓库目录里 git 自己就报错，所以它们跳过并写明原因。
-skip 不等于失败——汇总行仍是「全部通过」。想把 1012 项一条不落地跑完，先在这个目录
+skip 不等于失败——汇总行仍是「全部通过」。想把 1050 项一条不落地跑完，先在这个目录
 `git init` 并提交一次，再跑同一条命令。
 
 装完还要把工作区接进宿主、把业务仓库接进工作区：
@@ -288,14 +288,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1012 项（`tests/` 354、`tools/` 658）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1050 项（`tests/` 354、`tools/` 696）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1012 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1050 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
@@ -305,7 +305,7 @@ python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作�
 
 #### 与上游工作区的已知差异
 
-引擎与工具已经同步到工作区当前的状态（中心库 schema 16）：迁移 9–16、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version`、谁开的单（`tickets.requester_session_id`）与回执的消息 id（`notices.message_id`）、现在谁负责收尾（`tickets.owner_session_id`，配套 `take_over_ticket` / `report_notice_failure`）、合并记录的出处四列（`merges.source` / `verified_by` / `verified_at` / `note`，含 `manual` 与 `backfill` 两档当场核对祖先关系）、两个新操作 `archive_ticket`（第十个终态 `archived`）与 `rename_project`、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件，都跟工作区一致，`python kit/tools/auto_merge.py --list` 读同一个库不再报 `SCHEMA_MISMATCH`。工具的缺口也补齐了：`next_action`、`receipt_payload`、`handover_owner`、`coordinator_state`、`archive_legacy`、`backfill_merges` 与 `tools/merge-projects.json`（按项目配测试命令）都在，`work_gate` 有池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动的背书判据，`close_gate` 按「每条」判第 5 节的落点，`docs/无人值守派单.md`、`docs/schema-shift.md`、`docs/unmerged-exemptions.md`（与 `.json`）也随包，`docs/protocol.md` 整份是工作区那一份（操作表与表下面各节一起搬，只保留套件的 `{{WORKSPACE}}` 占位与 `INPUT_UNREADABLE` 那段）。下面五条是**刻意留着的不一致**：
+引擎与工具已经同步到工作区当前的状态（中心库 schema 16）：迁移 9–16、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version`、谁开的单（`tickets.requester_session_id`）与回执的消息 id（`notices.message_id`）、现在谁负责收尾（`tickets.owner_session_id`，配套 `take_over_ticket` / `report_notice_failure`）、合并记录的出处四列（`merges.source` / `verified_by` / `verified_at` / `note`，含 `manual` 与 `backfill` 两档当场核对祖先关系）、两个新操作 `archive_ticket`（第十个终态 `archived`）与 `rename_project`、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件，都跟工作区一致，`python kit/tools/auto_merge.py --list` 读同一个库不再报 `SCHEMA_MISMATCH`。工具的缺口也补齐了：`next_action`（含池子报告那一档 `fix_pool`：宽限期内不催、退避 2h→6h→24h、报到第 3 轮升级）、`pool_report`（点名之后落一笔台账）、`check_eol`（行尾自检）、`receipt_payload`、`handover_owner`、`coordinator_state`、`archive_legacy`、`backfill_merges` 与 `tools/merge-projects.json`（按项目配测试命令）都在，`work_gate` 有池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动的背书判据，`close_gate` 按「每条」判第 5 节的落点，`docs/无人值守派单.md`、`docs/schema-shift.md`、`docs/unmerged-exemptions.md`（与 `.json`）也随包，`docs/protocol.md` 整份是工作区那一份（操作表与表下面各节一起搬，只保留套件的 `{{WORKSPACE}}` 占位与 `INPUT_UNREADABLE` 那段）。下面五条是**刻意留着的不一致**：
 
 1. **PRD 正文只同步了一部分。** 包里现在有 `kit/PRD/PRD-001-工作区使用与工单体系.md` 与 `PRD-010`~`PRD-015` 六份正文（路径与示例已改成套件视角，`kit/PRD/` 下搜不到上游那台机器的本机路径，逐行清单见 `CHANGELOG.md` 的「公开仓库里剩下的本机路径」）。`PRD-002`~`PRD-009` 是这套工具自己的设计史，正文在 `design/PRD/` 下，不进 `kit/PRD/`；引擎注释里出现这些编号时指的是那一份。与工作区仍有一处差别：`PRD-015` 里两条复算命令原来指向工作区的历史轮次表与收尾包，套件不带这些文件，所以那两处写成了「原工作区的第 N 行」而不是可点的 `文件:行号`——否则 `ref_gate` 会把它们当成断链。
 2. **`auto_merge.py` 的测试命令按三层解，比工作区多一层。** 顺序是 `tools/merge-projects.json`（工作区侧一张表）→ 目标仓库自己的 `.agents/ticket-config.json`（`tools/add_project.py` 写的那一份，套件保留了这个入口）→ 缺省的 `python tools/run_tests.py`；三层都没有才报 `NO_TEST_COMMAND`。工作区只有前两层里的第一层。写记录前那道 schema 闸门也在，且**认两个位置**——`task_center/db.py` 与 `kit/task_center/db.py` 都算，因为套件的引擎住在 `kit/` 下，只按仓库根找会让闸门在这个仓库上永远静默跳过（AWK-101 就是这样把 schema 从 9 推到 13 而闸门没响）。

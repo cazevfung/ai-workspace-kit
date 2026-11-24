@@ -12,6 +12,11 @@ from .artifacts import fingerprint, project_root
 from .db import Problem, backup_database, connection, initialize, migrate_database, now, packed, require
 from .sessions_context import message_id, sessions_for
 
+# 空判据单的「已点名」台账（AW-140）：`events` 里 operation 等于本常量的行 = 这张单被
+# `fix_pool` 点名过一次。写它的是 `record_pool_report`，读它的是 `tools/next_action.py`
+# 的退避与升级判断——「报过几次」只有一个落库位置，不靠会话记忆。
+POOL_REPORT = "record_pool_report"
+
 FIELDS = {
     "init": set(),
     "migrate": set(),
@@ -59,6 +64,8 @@ FIELDS = {
     # `reviews` 行自动回落成可派（窗口常量见 `REVIEW_IN_FLIGHT_SECONDS`）。
     "review_dispatched": {"project_id", "ticket_id", "submission_id",
                           "reviewer_session_id", "note"},
+    # 空判据单「已经点名报过」（AW-140）：一条事件，不改状态，读侧靠它数轮次、退避、升级。
+    POOL_REPORT: {"project_id", "ticket_id", "session_id", "note"},
     # 执行会话记自己那次没送到的回执（AW-114 C2）：只收 failed，没有 status 字段。
     "report_notice_failure": {"project_id", "ticket_id", "attempt_id", "session_id",
                               "target_session_id", "detail", "wake_kind"},
@@ -1334,6 +1341,46 @@ class Center:
                 "reviewer_session_id": reviewer, "note": note,
                 "in_flight_until": (datetime.now(timezone.utc)
                                     + timedelta(seconds=REVIEW_IN_FLIGHT_SECONDS)).isoformat()}
+
+    def _record_pool_report(self, conn, data):
+        """记一笔「这张空判据单已经被点名报过」（AW-140）。
+
+        `tools/next_action.py` 的空判据档（`fix_pool`）只报不改，所以「已经报过几次」
+        不能由它自己写——它拿到的库是 `mode=ro`。这条事件就是那一侧的落库位置：
+        一条行 = 这张单被点名一次，读侧按条数决定「这一轮照不照原样报」与「要不要升级」。
+
+        三个边界与 `review_dispatched` 同形：
+
+        - **不改工单状态。** 还是 `planned` / `ready` / `rework`，`revision` 与
+          `criteria_version` 都不动——报过不是新的一代，更不是补了判据。
+        - **不写判据、不取消单。** 那两件事只有人能做（`revise_ticket` / `cancel_ticket`）。
+        - **不认证。** `session_id` 可给可不给，给了也只是一条自报的指向。
+
+        判据只有三条：工单存在；状态可领（空判据只在这三个状态里表达得出来）；
+        条件确实为空。条件不为空报 `INVALID_STATE`——把有判据的单记成「空判据报过」，
+        等于让读侧替一张真活记账。
+        """
+        ticket = self._ticket(conn, data)
+        require(ticket["state"] in CLAIMABLE_STATES, "INVALID_STATE",
+                "Only a claimable ticket can be recorded as reported; "
+                f"this one is {ticket['state']}")
+        try:
+            items = json.loads(ticket["criteria"] or "[]")
+        except (TypeError, ValueError):
+            raise Problem("INVALID_STATE",
+                          "This ticket's criteria cannot be read; fix that row instead of "
+                          "recording a blank-criteria report")
+        require(items == [], "INVALID_STATE",
+                "This ticket has criteria; only a blank-criteria ticket can be recorded as reported")
+        session_id = text(data, "session_id", 500) if data.get("session_id") else None
+        note = text(data, "note") if data.get("note") else None
+        # 轮次由读侧按行数算，这里只回显「记完之后是第几轮」，免得调用方自己数。
+        rounds = 1 + conn.execute(
+            "SELECT COUNT(*) FROM events WHERE ticket_id=? AND operation=?",
+            (ticket["id"], POOL_REPORT)).fetchone()[0]
+        return {"ticket_id": ticket["id"], "state": ticket["state"],
+                "revision": ticket["revision"], "session_id": session_id, "note": note,
+                "reported_rounds": rounds, "reported_at": now()}
 
     def _invalidate(self, conn, ticket, state):
         if ticket["current_attempt"]:
