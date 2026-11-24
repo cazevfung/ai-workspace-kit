@@ -82,7 +82,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | list_tickets | project_id 可选, limit 可选, offset 可选, planned 可选 | 默认 50 条，最多 100；按项目过滤。`planned: true`（CLI 糖 `--planned`，等价写法 payload 里写 `{"--planned": true}`）是**池子视图**：只列 `planned` 单，按依赖层数升序（无前置为第 0 层，同层按 `created_at`），`columns` 在原来那八列之后多出 `claimable`、`blocked_by` 与 `criteria_n` 三列，其余视图的表头与以前逐字一致（PRD-014 R6）。`blocked_by` 是**未 `done`** 的前置单号数组（无前置为空数组）；`criteria_n` 是条件条数（`planned` 可为 0，0 就是「念头」，它领不走）；`claimable` = 状态在 planned/ready/rework 之内 **且** 所有 `blocked_by` 已 `done`。**它不代表「现在就能领」**：同项目已有在途单时 `claim_ticket` 仍报 `DISPATCH_BUSY`，那是另一件事，不在这一列里混着答。回执是 `{"columns": […], "items": […], "limit", "offset"}`：`columns` 是这一份输出的表头（`id` / `project_id` / `title` / `state` / `revision` / `criteria_v` / `behind` / `created_at`），表头与每一条的字段名一致，一张单也没有时表头照旧给出。`criteria_v` 是工单当前的判据版本（与 `get_ticket` 的 `criteria_version` 同一个值）；`behind` 是 `git rev-list --count <最新提交的 head_sha>..master`，**算不出来时是字符串 `?` 而不是 `0`**——`head_sha` 为 NULL 的历史提交、分支已被删、目录不是仓库这三种情况都算不了，写 0 就会和「基于最新 master」分不开（PRD-013 R7）。 |
 | claim_ticket | project_id, ticket_id, expected_revision, coordinator_session_id, coordinator_workdir 可选, allow_parallel 可选, parallel_reason 可选, parallel_scope 可选 | 原子领取 `planned` / `ready` / `rework` 工单，生成 attempt_id，状态 dispatching。**PRD 指纹在领取这一刻取**：`claim_ticket` 自己读文件算 sha256，写进 attempts 的两列并回写 `tickets.prd_sha256`——排队期间 PRD 升版因此不再让单过期，claim 之后再变才是 `STALE_PRD`。**`blocked_by` 里有未 `done` 的前置时报 `BLOCKED_BY_DEPENDENCY`**，message 点名是哪张单、它当前在什么状态（`cancelled` 也算未满足），一行不写；这道校验排在 `DISPATCH_BUSY` 之前，因为它回答的是「这张单能不能开工」。**条件一条都没有时报 `CRITERIA_NOT_JUDGEABLE`**（`planned` 允许空着，但空着就只是念头），message 指回 `revise_ticket`；它与上面那道依赖校验同类，同样排在 `DISPATCH_BUSY` 之前。coordinator_session_id 是派发它的协调会话，1–500 字符，同一句里就被写成这张单的 `owner_session_id`（当时两者相等，之后 owner 可被 `take_over_ticket` 换掉）；coordinator_workdir 是协调者自己的工作目录（1–1000 字符），不传就是空，不阻止派发；**同项目已有在途工单时报 DISPATCH_BUSY，消息里点名那张单号与它停在哪一步**（在途 = dispatching / running / awaiting_review / blocked，见「同项目一次只跑一张单」；`planned` 不在其中，池子里排着的单不占这个名额）；`allow_parallel` 只收布尔且默认 false，显式传 true 才越过，越过往 events 写一条 `allow_parallel_override` 并在回执里回显 `parallel_with`。**越过必须同时给 `parallel_reason`**（1–200 字符，写清为什么这两张单可以同时跑）：缺了报 `PARALLEL_REASON_REQUIRED`，工单停在原状态、不产生尝试；可选 `parallel_scope` 是 1–20 条字符串，每条是一个项目内相对路径、目录，或一段以 `资源:` 开头的资源标识，形状不对报 INVALID_INPUT。这两项与 `parallel_with` 并列写进同一条事件，回执里也原样回显；`allow_parallel` 为 false 时带上它们报 INVALID_INPUT——不留一条没人读的声明。**带车次的单在这里多看一处**（见「车次：几时几张单算一趟活」）：车次的 `owner_session_id` 为空就把本次 `coordinator_session_id` 写进去，等于本会话就放行，是别的会话报 `BATCH_OWNED_BY_OTHER` 并点名车次号与持有会话（一行不写）；`closed_at` 非空的车次报 `INVALID_STATE`，不再接受新单；`tickets.batch_id` 指向别的项目的车次是脏行，入口就报 `BATCH_PROJECT_MISMATCH`。**车次这一段的三种拒绝都排在 `DISPATCH_BUSY` 之前**：同一现场两个条件都满足时报车次，不报「项目忙」（判序依据见「车次：几时几张单算一趟活」）。回执额外带 `batch_id` 与 `batch_owner_session_id` |
 | bind_session | project_id, ticket_id, attempt_id, session_id, project_root | 将预留尝试绑定到会话标识；状态 running；session_id 与 claim 时的 coordinator_session_id 相同则报 SELF_DISPATCH，工单停在 dispatching；回执含 session_id 与 coordinator_session_id；不代表已验证宿主身份 |
-| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks, head_sha, base_sha | 保存 submission_id、成果摘要、自检证据、这次提交的分支 head sha 与它分叉自哪个 commit；状态 awaiting_review。`head_sha` 与 `base_sha` 都必填，各收 40 位十六进制（大小写都收，存小写），缺字段、长度不对或含非十六进制字符报 INVALID_INPUT，被拒时一行不写。`head_sha` 记的是「被验收的那棵树」，合并时 `merge_ticket` 拿它与最新提交比；`base_sha` 是在提交处的工作树里跑 `git merge-base HEAD master` 的输出——**不是「填表那一刻 master 的 sha」**，rebase 之后两者语义不同（PRD-013 R7 / D5）。回执带 `criteria_changed`：这次尝试开始时的 `criteria_version` 低于工单当前值时是 true，说明判据在开工后被改过，验收得按新条件重看一遍。它不回写任何行。**回执与 `get_ticket` 的 `submissions[-1]` 都带 `conflict_preview`**（PRD-015 R2）：提交时对未来的目标分支跑一次 `git merge-tree --write-tree --name-only <head_sha> <目标分支 tip>`，形状是 `{target_branch, target_sha, command, exit_code, conflicts}`，`conflicts` 是按字母序去重的路径数组。无冲突时 `conflicts` 是空数组、`exit_code` 是 0，字段照常出现——不是省略、不是 `null`，验收会话据此分得清「跑过且干净」与「没跑」；有冲突时 `exit_code` 是 1 且回执 `ok` 仍是 true，预演只报告不处置：不拒收提交、不回滚、不自动解冲突、不改分支；算不出来（目录不是仓库、`head_sha` 不在本地、git 不可用）时 `conflict_preview` 是 `null`。落库为 `submissions.conflict_preview`（JSON 文本，可空），`list_tickets` 不加这一列 |
+| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks, head_sha, base_sha | 保存 submission_id、成果摘要、自检证据、这次提交的分支 head sha 与它分叉自哪个 commit；状态 awaiting_review。`head_sha` 与 `base_sha` 都必填，各收 40 位十六进制（大小写都收，存小写），缺字段、长度不对或含非十六进制字符报 INVALID_INPUT，被拒时一行不写。`artifacts` / `evidence` / `risks` 三个都是**字符串数组**：`artifacts` 1–20 条、`evidence` 1–100 条、`risks` 0–100 条，每条非空且不超过 4000 字符；传对象数组、传一整段 JSON 字符串、传单个字符串都报 INVALID_INPUT。**首次提交（新仓库只有一次初始提交、没有 `master` 分支）时 `git merge-base HEAD master` 跑不出来，`base_sha` 就填 `git rev-parse HEAD` 的输出（与 `head_sha` 相同），但这一格仍然必填**。形状错时回执只有一条 INVALID_INPUT，`message` 里同时点名五个字段的期望形状与这一次哪几项不合格；三个数组的形状表、最小 payload 与首次提交的取法见下文「`submit_result` 的形状：三个字符串数组与首次提交的 `base_sha`」。`head_sha` 记的是「被验收的那棵树」，合并时 `merge_ticket` 拿它与最新提交比；`base_sha` 是在提交处的工作树里跑 `git merge-base HEAD master` 的输出——**不是「填表那一刻 master 的 sha」**，rebase 之后两者语义不同（PRD-013 R7 / D5）。回执带 `criteria_changed`：这次尝试开始时的 `criteria_version` 低于工单当前值时是 true，说明判据在开工后被改过，验收得按新条件重看一遍。它不回写任何行。**回执与 `get_ticket` 的 `submissions[-1]` 都带 `conflict_preview`**（PRD-015 R2）：提交时对未来的目标分支跑一次 `git merge-tree --write-tree --name-only <head_sha> <目标分支 tip>`，形状是 `{target_branch, target_sha, command, exit_code, conflicts}`，`conflicts` 是按字母序去重的路径数组。无冲突时 `conflicts` 是空数组、`exit_code` 是 0，字段照常出现——不是省略、不是 `null`，验收会话据此分得清「跑过且干净」与「没跑」；有冲突时 `exit_code` 是 1 且回执 `ok` 仍是 true，预演只报告不处置：不拒收提交、不回滚、不自动解冲突、不改分支；算不出来（目录不是仓库、`head_sha` 不在本地、git 不可用）时 `conflict_preview` 是 `null`。落库为 `submissions.conflict_preview`（JSON 文本，可空），`list_tickets` 不加这一列 |
 | review_result | project_id, ticket_id, attempt_id, submission_id, reviewer_session_id, verdict, checks, reason | 只接受这八个顶层字段，多传即拒（见「验收 payload 是一张闭集」）；accept→done；reject→rework。验收者不能是该工单任一历史执行会话。`checks` 每条收两种写法：新的 `{id,status,evidence}`（status 取 `pass` / `unverified` / `fail`），或旧的 `{id,passed,evidence}`（归一成 pass / fail）；两个都给时不许自相矛盾，`unverified` 不许带 `passed`。判定规则跟着三档走：**accept 不许有 `fail`（`unverified` 不阻断）**，**reject 至少要有 `fail`**（未验不是失败，不能拿它当打回的理由）。回执带归一后的 `checks`、`checks_summary`（`{total,pass,unverified,fail}`）与一行 `summary` |
 | recover_ticket | project_id, ticket_id, attempt_id, expected_revision, reason | 只恢复 dispatching/running/awaiting_review/blocked；attempt_id 必须是当前尝试，旧编号返回 STALE_ATTEMPT；回执含 superseded_attempt_id、discarded_submission_id 与 voided_question_ids；旧尝试失效，它的开放问题转 voided，revision+1，回到 ready |
 | revise_ticket | project_id, ticket_id, expected_revision, reason, prd_path, criteria, deliverable 可选, reopen 可选, restart 可选, blocked_by / related / rides_with 可选 | 明确更新需求摘要和验收项。**默认不作废在飞的尝试**：`criteria` 确有变化时 `criteria_version` 加 1（回执回显 `from` / `to`），`revision`、`current_attempt`、`attempts.state` 一个都不动——判据变了不等于这一代作废（PRD-013 R6）。改判据时若有尝试在飞（`dispatching` / `running` / `awaiting_review` / `blocked`），回执带 `must_wake`（`session_id` + `attempt_id` + `criteria_version.from` / `.to`），并写一条 `criteria_revised_in_flight` 事件；带 `must_wake` 只说明「要叫谁、为什么叫」，发送仍由协调会话走 `send_to_session`。要作废就显式传 `restart: true`（只收布尔，缺省 false）：那是三个作废入口之一，旧尝试 `superseded`、开放问题转 `voided`、`revision` 加 1、回到 `ready`，回执没有 `must_wake`。`criteria` 与 create_ticket 同一道形状闸门，**按落点状态判**：`restart` 与「对已完成单 `reopen`」都把单送回 `ready`，所以这两条路不接受空列表（`planned` 的空条件只在不换状态时成立）；不合格报 `CRITERIA_NOT_JUDGEABLE` 且一行不写；deliverable 不传则保留原值；对已完成工单必须传 reopen=true（重开也换代次，`revision` 加 1，回到 ready）；传了依赖边就按那一类覆盖式改写（先清后写，成环报 `DEPENDENCY_CYCLE` 且整个事务回滚）；`planned` 单改路径仍留 `prd_sha256 = NULL`（排队期间不取指纹）；回执含 previous_state、criteria_version、must_wake、prd_path、prd_sha256 与 deliverable；已取消工单不能重开 |
@@ -131,7 +131,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 
 **验收用工作树的 SHA-256，不用 blob。** 在 `head_sha` 的检出（工作树）里对文件重算 `sha256`，与 `submissions.artifacts[].sha256` 比；拿分支 blob 去复算会看到系统性差异，那不是成果被改过（`ARTIFACT_CHANGED` 判的是工作树对工作树），也不是提交造了假。要用 blob 核对就先按 git 的换行规则归一（或 `git -c core.autocrlf=false checkout`），但那是另一种口径，不是本库记下的那一个——两处各写一种，事后没人分得清哪条是权威。
 
-`evidence` 为至少一条自检说明字符串，`risks` 为字符串数组，可为空。自检说明是执行者声明，不等于独立测试证据已经被系统验证。
+`evidence` 为 1–100 条自检说明字符串，`risks` 为 0–100 条字符串数组（没有风险就给空数组，字段不能省）。自检说明是执行者声明，不等于独立测试证据已经被系统验证。
 
 验收条件里说的「提交说明」，指的就是 `submit_result` 的 `summary` 与 `evidence` 两部分：`summary` 说清这次改了什么、边界在哪，`evidence` 逐条给出自检说明。别处不再有第二个位置——验收不得要求执行者额外写进工单描述、聊天回复、单独的文件或某个特定小标题下，也不得以「说明的位置不对」为由判不通过。条件想约束文案时，要写明它落在 `summary` 还是 `evidence`。
 
@@ -375,6 +375,52 @@ session_id 按原样精确比较，大小写不同即视为不同会话（`EXEC3
 6. 独立验收会话核对成果后调用 review_result。
 
 本版只实现第1、3、4、6步的本机记录和校验，不会自动执行第2或第5步。也正因第2步还没有适配层，「新开一个会话」目前靠调用方自觉；`SELF_DISPATCH` 只能拦住「用同一个标识绑自己的工单」这一种偷懒方式。
+
+### `submit_result` 的形状：三个字符串数组与首次提交的 `base_sha`
+
+演练记录（2026-11-24 03:38，`onboard --host generic` 的最小闭环）里，同一个人为同一个 payload 连撞五次 `INVALID_INPUT`：先 `head_sha`、再 `base_sha`、然后把 `artifacts` 传成对象数组、再把 `artifacts` 传成一整段 JSON 字符串、最后 `evidence` 与 `risks`。五次都是同一个原因——协议只写了字段名，没写形状。所以在这里一次写全：
+
+| 字段 | 形状 | 上下限 | 常见的错法 |
+| --- | --- | --- | --- |
+| `artifacts` | **字符串数组**，每项是一个项目内相对路径 | 1–20 条 | 传 `[{"path": "result.md"}]`（对象数组）、传 `"[\"result.md\"]"`（一整段 JSON 字符串）、传 `"result.md"`（单个字符串）、把绝对路径写进去 |
+| `evidence` | **字符串数组**，每项一条自检说明（跑过什么命令、看到什么） | 1–100 条 | 传空数组、把整段自检写成一个多行字符串 |
+| `risks` | **字符串数组**，每项一条已知风险 | 0–100 条（没有就给 `[]`，字段不能省） | 省略字段、写 `""`、写 `null` |
+| `head_sha` | 40 位十六进制（大小写都收，存小写） | 恰好 40 字符 | 传短 sha（`git rev-parse --short HEAD`）、传 `HEAD`、传分支名 |
+| `base_sha` | 同上，「这棵树从哪分叉」 | 恰好 40 字符 | 传「填表那一刻 master 的 sha」（rebase 之后语义不同，PRD-013 D5） |
+
+三个数组字段的每一项另有一条长度闸门：非空、不超过 4000 字符。
+
+**最小 payload**（把两处 `<…>` 换成真值、`--request-id` 用唯一编号就能跑）：
+
+```json
+{
+  "project_id": "<项目 id>",
+  "ticket_id": "<单号>",
+  "attempt_id": "<claim_ticket 回执里的 attempt_id>",
+  "session_id": "<这条执行会话的 id>",
+  "summary": "改完了什么、边界在哪",
+  "artifacts": ["kit/docs/protocol.md"],
+  "evidence": ["python tools/run_tests.py → 末行 结果：全部通过"],
+  "risks": [],
+  "head_sha": "<git rev-parse HEAD 的 40 位十六进制>",
+  "base_sha": "<git merge-base HEAD master 的 40 位十六进制>"
+}
+```
+
+```bash
+python -m task_center --db <中心库> submit_result --request-id <唯一编号> --input <JSON文件>
+```
+
+**首次提交没有 `master` 可对**：`git worktree add .worktrees/<单号> -b ticket/<单号> master` 出来的新仓库如果只有一次初始提交（没有父提交），`git merge-base HEAD master` 直接失败——`base_sha` 无处可取。这时填 `git rev-parse HEAD` 的输出，它与 `head_sha` 相同：这棵树确实没有从别处分叉。两条都跑得通的取法：
+
+```bash
+git rev-parse HEAD                                            # head_sha
+git merge-base HEAD master 2>/dev/null || git rev-parse HEAD  # base_sha：没有 master 分支时就与 head 相同
+```
+
+`base_sha` 仍然必填、仍然是 40 位十六进制（PRD-013 R7 / AC12）：缺它一样报 `INVALID_INPUT` 且一行不写。这一节给的是「填什么」，不是「可以不填」。
+
+**形状错只报一条，但一次说全**：`artifacts` / `evidence` / `risks` / `head_sha` / `base_sha` 五项的期望形状都写在同一份 `message` 里，后面跟 `Wrong now:` 与这一次不合格的每一项（例如 `artifacts[0] is dict, not a string`）。撞一次就能把五项一起改对，不用逐项试到第五次。
 
 ### 派发的载体
 

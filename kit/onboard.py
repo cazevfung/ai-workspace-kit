@@ -129,7 +129,10 @@ FAILURES = {
         "bind_session": "PROJECT_MISMATCH → project_root 与库里登记的项目根不一致，先回第 3 步核项目；"
                         "SELF_DISPATCH → 你绑的是协调会话自己，回去开一个独立的执行会话；"
                         "STALE_ATTEMPT → 重新 get_ticket 取当前 attempt。不许改传一个猜的 session_id 重试。",
-        "submit_result": "head_sha / base_sha 不是 40 位十六进制 → 用 git rev-parse HEAD 与 git merge-base HEAD master 的输出；"
+        "submit_result": "head_sha 用 git rev-parse HEAD；base_sha 用 git merge-base HEAD master，"
+                         "没有 master 分支（首次提交、没有父提交）时就用 git rev-parse HEAD，与 head_sha 相同；"
+                         "artifacts / evidence / risks 都是字符串数组（1-20 / 1-100 / 0-100 条）；"
+                         "形状错时回执只有一条 INVALID_INPUT、把五个字段的期望形状一次点名，照着同一条改全；"
                          "ARTIFACT_CHANGED → 成果被改、删或移出项目，重新提交；"
                          "STALE_PRD → PRD 改过，走 revise_ticket，不要直接重交。",
         "get_ticket": "state 不是 running，或 attempts[-1].session_id 与第 3 步那个不一致 → 绑定没成，"
@@ -266,10 +269,13 @@ def _generic_plan(workspace: str, *, project_id: str, ticket_id: str,
                 "evidence": ["<跑过的命令与输出摘要>"],
                 "risks": ["<已知风险；没有就写空数组>"],
                 "head_sha": "<git rev-parse HEAD 的 40 位十六进制>",
-                "base_sha": "<git merge-base HEAD master 的 40 位十六进制>",
+                "base_sha": "<git merge-base HEAD master 的 40 位十六进制；"
+                             "没有 master 分支（首次提交）就填 git rev-parse HEAD，与 head_sha 相同>",
             },
             "check": "提交时用第 4 步同一个 session_id；head_sha 是被验收的那棵树，base_sha 是它分叉自的 commit，"
-                     "两个都不是「填表那一刻 master 的 sha」。",
+                     "两个都不是「填表那一刻 master 的 sha」。artifacts / evidence / risks 三个都是字符串数组"
+                     "（1-20 / 1-100 / 0-100 条，不是对象数组、也不是 JSON 字符串）；形状错时一条报错会把"
+                     "五个字段的期望形状一次点名，照同一条改全，不必逐项试。",
         },
         {
             "order": 6,
