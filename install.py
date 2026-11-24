@@ -19,7 +19,7 @@
   1. 工作区本体（task_center、tools、docs、tests、PRD 模板、tasks 起步文件）
      以及能拿工作区当参数直接跑的校验脚本（verify/verify_receipt.py）
   2. 项目内技能 → <工作区>/.agents/skills
-  3. 全部 25 个技能 → <agents-home>/skills（已存在的默认跳过，不覆盖）
+  3. 全部技能 → <agents-home>/skills（已存在的默认跳过，不覆盖）
   4. <agents-home>/center.json（指向本工作区唯一的中心库）
      与 <工作区>/.agents/center.json（记住这次装的是哪个 agents-home，闸门按它找库）
   5. <agents-home>/intake/（交接协议，供别的项目的会话读取）
@@ -31,6 +31,11 @@
 用户目录时（沙箱 / 临时 / 别人的目录），默认一个字节都不写；agents-home 就是真实
 用户目录、而那里的 center.json 已经指向别的库时，默认拒绝并打印原内容。两种情况都
 要显式 --allow-user-config 才往下写（判据只有一处：kit/tools/install_guard.py）。
+
+而「没写」这件事不能只靠读上面那段才发现——装完末尾有一节「安装总结」：装了几项、
+未写的每一项（`未写：<路径>` 加原因）逐条列出，最后一句「本次装了 N 项、跳过 M 项」。
+沙箱安装不带 --allow-user-config 时退出码仍然是 0，所以这一节就是「这次其实没装
+技能」的提示；只看末尾那句「安装完成」会以为整套装好了（2026-11-24 的演练）。
 
 退出码：0 成功；1 有步骤失败；2 用法或环境不满足。
 """
@@ -87,6 +92,49 @@ def warn(message: str) -> None:
 
 def fail(message: str) -> None:
     say(f"   × {message}")
+
+
+# 「跳过」这件事只有一种写法（AWK-119）：前缀与原因都在这里出，逐条与合计用的是
+# 同一本账。散着打印的后果是两种口径——某一步新加了跳过、合计没跟上，数字照样对不上。
+SKIP_PREFIX = "未写："
+SKIP_REASON_USER_CONFIG = "默认不写用户级配置，加 --allow-user-config"
+
+
+class Summary:
+    """装了几项、哪些项一个字节都没写——两本账，末尾的合计由它们算。
+
+    为什么要单独记：沙箱安装（`--agents-home` 不是本机真实用户目录）默认不写用户级
+    配置，判据在 `kit/tools/install_guard.py`，而那一次安装的退出码仍然是 0。
+    2026-11-24 03:38 的演练就是这样：屏幕上写着「安装完成」，27 个技能、center.json、
+    intake 一个都没写，而跳过那两句夹在 12 个步骤中间。所以每一步「没写」都落到这里，
+    末尾用同一份账目报「装了 N 项、跳过 M 项」，两个数字对得上。
+    """
+
+    def __init__(self) -> None:
+        self.done: list[str] = []          # 装了的项名，按步骤先后
+        self.skipped: list[tuple[str, str, str]] = []  # (路径, 原因, 备注)
+
+    def did(self, name: str) -> None:
+        self.done.append(name)
+
+    def skip(self, path, reason: str = SKIP_REASON_USER_CONFIG, note: str = "") -> None:
+        self.skipped.append((str(path), reason, note))
+
+    def report(self, dry: bool = False) -> None:
+        """末尾那一节：逐条「未写：…」，再一句合计。预演时合计说「会装」。"""
+        step("安装总结")
+        if self.done:
+            say(f"   已装 {len(self.done)} 项：{'、'.join(self.done)}")
+        for path, reason, note in self.skipped:
+            line = f"   {SKIP_PREFIX}{path}（{reason}）"
+            if note:
+                line += f"—— {note}"
+            say(line)
+        verb = "会装" if dry else "装了"
+        say(f"   本次{verb} {len(self.done)} 项、跳过 {len(self.skipped)} 项")
+        if any(reason == SKIP_REASON_USER_CONFIG for _, reason, _ in self.skipped):
+            say("   要用到上面跳过的那些（用户级技能、center.json、intake/），"
+                "在原命令里加 --allow-user-config 再跑一次。")
 
 
 def template_text(text: str, workspace: str) -> str:
@@ -302,6 +350,9 @@ def main(argv=None) -> int:
     dry = args.dry_run
     decision = decide_user_config(agents_home, workspace_db,
                                   allow_user_config=args.allow_user_config)
+    summary = Summary()
+    skill_total = len(WORKSPACE_SKILLS) + len(GENERIC_SKILLS)
+    git_ok = not args.no_git and git_available()
 
     say(f"AI 工作区套件 v{VERSION}")
     say(f"工作区：{workspace}")
@@ -344,22 +395,27 @@ def main(argv=None) -> int:
     step("1/7 复制工作区本体")
     copied = copy_tree(KIT, workspace, workspace_str, dry)
     say(f"   已复制 {copied} 个文件")
+    summary.did("工作区本体")
     verifiers = copy_workspace_verifiers(workspace, workspace_str, dry)
     say(f"   已复制校验脚本 {len(verifiers)} 个：{', '.join(f'verify/{n}' for n in verifiers)}")
+    summary.did("verify/ 校验脚本")
 
     step("2/7 安装项目内技能")
     proj_installed, _ = install_skills(workspace / ".agents" / "skills", WORKSPACE_SKILLS,
                                        "workspace", str(workspace), dry, overwrite=True)
     say(f"   项目内技能 {len(proj_installed)} 个")
+    summary.did("项目内技能")
 
     step("3/7 安装用户级技能")
     if args.no_skills:
-        say("   跳过（--no-skills）")
+        summary.skip(skills_root, "给了 --no-skills", note="技能目录一个字节都没动")
+        say("   见末尾「安装总结」：--no-skills，不动技能目录")
         installed, skipped = [], []
     elif not decision.allowed and args.skills_dir is None:
         # 沙箱默认不写用户级技能；显式给了 --skills-dir 就算显式指定目标，照写。
-        say(f"   跳过：沙箱安装默认不写用户级技能（{skills_root}）")
-        say("   要写请加 --allow-user-config（或用 --skills-dir 显式指定一个目标目录）")
+        summary.skip(skills_root, note=f"0/{skill_total} 个技能一个都没装；"
+                                       "或用 --skills-dir 显式指定一个目标目录")
+        say("   见末尾「安装总结」：沙箱安装默认不写用户级配置")
         installed, skipped = [], []
     else:
         # 工作区技能与通用技能来源不同，分别处理
@@ -368,6 +424,7 @@ def main(argv=None) -> int:
         gen_ins, gen_skip = install_skills(skills_root, GENERIC_SKILLS, "generic", str(workspace),
                                            dry, args.overwrite_skills)
         installed, skipped = ws_ins + gen_ins, ws_skip + gen_skip
+        summary.did("用户级技能")
         say(f"   新装 {len(installed)} 个：{', '.join(installed) if installed else '（无）'}")
         if skipped:
             say(f"   跳过已存在的 {len(skipped)} 个：{', '.join(skipped)}")
@@ -377,19 +434,26 @@ def main(argv=None) -> int:
     pointer = workspace / ".agents" / "center.json"
     intake = agents_home / "intake"
     manifest = agents_home / ".ai-workspace-kit.json"
+    # 这四项同进同退（都受 install_guard 那一个判据管），所以项名与路径写在一处：
+    # 逐条「未写」、合计、以及「已装 N 项」里的名字都从这里出，不另骨一份。
+    user_items = (("center.json", center_path), ("工作区指针", pointer),
+                  ("intake/", intake), ("安装清单", manifest))
     if not decision.allowed:
-        say(f"   跳过：沙箱安装默认不写用户级 center.json / intake/ / 安装清单（{agents_home}）")
-        say("   要写请加 --allow-user-config")
+        for _, path in user_items:
+            summary.skip(path)
+        say("   见末尾「安装总结」：沙箱安装默认不写用户级配置，要写请加 --allow-user-config")
         # 工作区指针也不写：它记的是 agents_home，而那里没有 center.json 时，闸门按
         # 「指针指丢」报 DB_NOT_FOUND 而不是回落（center_config 的判据），会把一个本来
         # 能用自带库的工作区弄成闭门。不写指针，闸门就走「本工作区 .data」那一步。
-        say(f"   工作区指针也不写（{pointer}）：没有 agents_home 的 center.json 时，"
+        say(f"   工作区指针也一样（{pointer}）：没有 agents_home 的 center.json 时，"
             f"闸门会读到工作区自带的 {workspace_db}")
     elif dry:
         say(f"   预演：写 {center_path}（db → {workspace_db}）")
         say(f"   预演：写工作区指针 {pointer} → {agents_home}")
         say(f"   预演：复制交接协议到 {intake}/（docs 下全部文件，已有则改名备份）")
         say(f"   预演：写安装清单 {manifest}")
+        for name, _ in user_items:
+            summary.did(name)
     else:
         agents_home.mkdir(parents=True, exist_ok=True)
         center_path.write_text(
@@ -417,19 +481,26 @@ def main(argv=None) -> int:
             "installed_skills": installed,
             "skipped_skills": skipped,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
+        for name, _ in user_items:
+            summary.did(name)
 
     step("5/7 初始化中心库并登记项目")
     if not init_center(workspace, dry):
         return 1
+    summary.did("中心库")
 
     step("6/7 建立 git 仓库并做首次提交")
     if args.no_git:
-        say("   跳过（--no-git）")
+        summary.skip(workspace / ".git", "给了 --no-git")
+        say("   见末尾「安装总结」：--no-git，仓库与提交闸门都不做")
     elif not git_available():
+        summary.skip(workspace / ".git", "没有找到 git", note="工作区仍可使用")
         warn("没有找到 git；跳过仓库初始化与提交闸门（工作区仍可使用）")
     elif dry:
         say("   预演：git init → add → commit（首次提交后再启用钩子）")
+        summary.did("git 仓库")
     else:
+        summary.did("git 仓库")
         if not (workspace / ".git").exists():
             subprocess.run(["git", "-C", str(workspace), "init"], capture_output=True, check=False)
         if git_identity_ok(workspace):
@@ -444,27 +515,41 @@ def main(argv=None) -> int:
             warn("git 缺 user.name / user.email，跳过首次提交；配置后再提交即可")
 
     step("7/7 启用提交闸门")
-    if dry:
+    gate_config = workspace / ".git" / "config"
+    if not git_ok:
+        reason = "给了 --no-git" if args.no_git else "没有找到 git"
+        summary.skip(gate_config, reason, note="core.hooksPath 没设：没工单的改动不会被拦")
+        say("   见末尾「安装总结」：没有仓库时也没有提交闸门")
+    elif dry:
         say("   预演：git config core.hooksPath .githooks")
-    elif not args.no_git and git_available() and (workspace / ".git").exists():
+        summary.did("提交闸门")
+    elif (workspace / ".git").exists():
         subprocess.run(["git", "-C", str(workspace), "config", "core.hooksPath", ".githooks"],
                        capture_output=True, check=False)
         say("   已启用：没工单的改动无法提交（这是默认安全路径，可显式关闭）")
+        summary.did("提交闸门")
+    else:
+        summary.skip(gate_config, "工作区里没有 .git", note="core.hooksPath 没设")
 
     step("附：把浮窗面板装到 <工作区>/panel")
     if dry:
         say("   预演：复制 panel/（占位符换成真实路径）")
+        summary.did("浮窗面板")
     else:
         panel_files = copy_panel(workspace, workspace_str, dry)
         if panel_files:
             say(f"   已复制 {panel_files} 个文件：panel/（浮窗要 Node 18+ 与 npm install electron）")
+            summary.did("浮窗面板")
         else:
             warn("没有找到 panel/；跳过浮窗面板（其余部分照常可用）")
+            summary.skip(workspace / "panel", "套件里没有 panel/ 目录", note="其余部分照常可用")
 
     if args.link_agents and not args.no_skills:
         step("附：为其他 agent 建技能链接")
         made = link_agent_dirs(agents_home.parent, skills_root, dry)
         say(f"   新建 {len(made)} 条链接")
+
+    summary.report(dry=dry)
 
     print(f"""
 {'预演完成' if dry else '安装完成'}。下一步：

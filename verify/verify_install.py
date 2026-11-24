@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -122,6 +123,21 @@ def main(argv=None) -> int:
               and (sandbox_ws / ".data" / "task-center.sqlite3").is_file(),
               f"退出码 {result.returncode}；被写：{', '.join(written) or '（无）'}；"
               + (result.stdout + result.stderr)[-800:])
+
+        # AWK-119：退出码 0 而 27 个技能一个都没装，屏幕上却只说「安装完成」——这就是
+        # 那次演练里陌生人以为自己装好了的原因。所以「跳过」要能被数出来：逐条带路径、
+        # 合计与逐条行数相等，而且带开关的那一次必须一行都没有。
+        sandbox_output = result.stdout + result.stderr
+        skip_lines = [line.strip() for line in sandbox_output.splitlines()
+                      if line.strip().startswith("未写：")]
+        total = re.search(r"本次装了 (\d+) 项、跳过 (\d+) 项", sandbox_output)
+        reported = int(total.group(2)) if total else -1
+        check("沙箱安装的总结列了未写项与合计",
+              total is not None and reported == len(skip_lines) and reported >= 5
+              and all(str(sandbox_agents / name) in "\n".join(skip_lines)
+                      for name in ("skills", "center.json", "intake", ".ai-workspace-kit.json")),
+              f"合计说跳过了 {reported} 项，「未写：」行有 {len(skip_lines)} 条；"
+              + sandbox_output[-800:])
 
         # 真实现场：真实 ~/.agents 装前装后一个字节都不该变（只读比对，不先写再恢复）。
         changed = install_guard.diff_tree(real_before, install_guard.tree_digest(real_agents))
