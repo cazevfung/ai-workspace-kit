@@ -63,6 +63,7 @@
 2. 跑 `python -m unittest tests.test_center -v`（工作目录 `.worktrees/AWK-118/kit`）→ 红在「message 里没有 `artifacts 1-20`」与「一条 message 里只有第一项」。
 3. 落 `SUBMIT_ARRAYS` / `SUBMIT_SHAPE_HINT` / `submit_shape`，`_submit_result` 改用它；`string_list` 的唯一调用点就是这里，一并从 `core.py` 移除（`sha_text` 仍服务 `reviewed_sha`，保留）。
 4. 重跑同一批 → 绿。
+   **实施时的一处偏离（记账）**：收集器一开始写在 `string_list` 原位，结果 `ref_gate` 红在 `PRD-014` 的两处 `task_center/core.py:454` / `:865`——在文件中间插函数会把行号引用整体推走。改成照本文件已有的做法（`review_checks` 那一批）放到文件末尾，`string_list` 原地不动（它不再被 `submit_result` 调用），`_submit_result` 那一段替换成同样的行数。代价：多一个当前没被调用的通用形状函数，与 `text()` / `integer()` 同层。
 
 **验证**：`python -m unittest tests.test_center -v` 末行 `OK`；`python -c "import sys; sys.path.insert(0,'.'); from task_center.core import submit_shape"` 退出码 0（名字真的落在模块上）。
 
