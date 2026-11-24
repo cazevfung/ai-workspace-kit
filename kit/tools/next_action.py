@@ -19,9 +19,39 @@
     dispatch_execute  池子里有可领的单 —— 派执行会话
     dispatch_review   有单在等验收、且还没有验收会话在飞 —— 派验收会话
     merge             有已验收未合并的   —— 合并
+    fix_pool          池子里只剩躺了很久的空判据单 —— 点名它，人补判据或取消
     nothing           以上都没有 / 有在途单挡着 / 暂停中 / 验收在飞
 
-**优先级：验收 > 合并 > 派执行。** 理由不是偏好：`awaiting_review` 在
+**`fix_pool` 属于「有活」而不是「没活」。** 在这之前，池子里只剩空判据的 `planned`
+单时，它只是 `skipped` 里的一行、`action` 仍是 `nothing`——而那种单永远领不走
+（`claim_ticket` 报 `CRITERIA_NOT_JUDGEABLE`），于是「池子里有活、只是没人能领」
+被报成了「没活」。现在只要这种单的 `created_at` 已经超过
+`BLANK_CRITERIA_GRACE_SECONDS`（一天），它就单独成一档被点名。**阈值只有那一个来源**，
+本脚本与文档都不许各写一个数。
+
+**它是「只报不改」的最后一档。** 两条出路都要人或协调会话动手：`revise_ticket` 补上
+至少一条可判定条件，或 `cancel_ticket` 承认不做了。本脚本既不写判据也不取消单——
+库仍然是 `mode=ro`，一行都不写；替人做决定会让「这张单为什么没了」无迹可查。
+
+**报过之后要退避，报到第 N 轮要升级。** 这一档「有活」的代价是「没人处理就每轮再报
+一次」：同一张单、同一句话，一天下来烧掉几十轮，而输出一字不变。现在每一次点名都要先
+落一条 `record_pool_report` 事件（`task_center` 的同名写操作，或走
+`tools/pool_report.py`；本脚本只读），读侧按这张单已经报过几次决定三件事：
+
+- **还没报过 → 原样点名**（第 1 轮）；
+- **报过、但还没到下一次的时间 → 这一轮不点名**（`reason_code=blank_criteria_backoff`，
+  退出 2）。退避阶梓是 `POOL_REPORT_BACKOFF_SECONDS`：第 1 次之后 2 小时、第 2 次之后
+  6 小时、第 3 次之后 24 小时，此后一直 24 小时；
+- **报到第 `POOL_REPORT_ESCALATE_AFTER` 轮 → 升级**（`reason_code=blank_criteria_escalate`）：
+  不再原样重报，人话换成「建一张 planned 单把这件事变成可验收的活，或用 ask_ticket 落一个
+  问题」，两条老出路（`revise_ticket` / `cancel_ticket`）照旧。
+
+**「报过几次」只存在库里，不靠会话记忆。** 一条 `record_pool_report` 事件 = 这张单被
+点名一次；换一个会话、换一台机器读同一个库，算出来的轮次与下一次时间一模一样。
+本脚本不写这条记录（它只读），所以空判据档的人话里会把要落的记录名写出来：不落，
+下一轮就会从头再报一遍。
+
+**优先级：验收 > 合并 > 派执行 > 补池子。** 前三个的理由不是偏好：`awaiting_review` 在
 `DISPATCH_BUSY` 的口径里算在途（`task_center/core.py` 的 `ACTIVE_TICKET_STATES`），
 它不在这个循环里被挪走，池子里的单一张也领不出来——所以它是唯一会卡住整条链的
 动作，先做它。合并不挡任何派发，晚一轮没关系。
@@ -79,7 +109,8 @@
     python tools/next_action.py --project ai-workspace
     python tools/next_action.py --pause-file <路径>   # 换暂停标记的位置
 
-退出码：**0 = 有活（三个动作之一）；2 = 没活（含暂停中、有在途单挡着）；1 = 出错**
+退出码：**0 = 有活（四个动作之一，含 `fix_pool`）；2 = 没活（含暂停中、有在途单挡着、
+全在退避窗口里）；1 = 出错**
 （库不存在/读不开/版本不对/缺表、项目归属查不出、参数写错）。1 与 2 分得开，
 是这个脚本存在的理由之一。
 
@@ -113,6 +144,7 @@ if str(TOOLS) not in sys.path:
 from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
     ACTIVE_TICKET_STATES,
     CLAIMABLE_STATES,
+    POOL_REPORT,
     REVIEW_IN_FLIGHT_SECONDS,
     dependency_depths,
     pending_blockers,
@@ -122,14 +154,39 @@ from task_center.db import SCHEMA_VERSION  # noqa: E402
 # 都用它那一套函数。只调这两个函数、不改它一个字节——同一现场只能有一个答案（AWK-114）。
 import auto_merge  # noqa: E402
 
-# 四个结果的名字：人读输出、--json、退出码共用这一份，不另起别名。
+# 四个结果的名字之外还有第五档：`fix_pool`（池子里只剩领不走的空判据单）。
 DISPATCH_EXECUTE = "dispatch_execute"
 DISPATCH_REVIEW = "dispatch_review"
 MERGE = "merge"
+FIX_POOL = "fix_pool"
 NOTHING = "nothing"
-ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, NOTHING)
-# 有活的那三个。`nothing` 不在里面：退出码 0 只给「这一轮有事可做」。
-WORKING_ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE)
+ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, FIX_POOL, NOTHING)
+# 有活的那四个。`nothing` 不在里面：退出码 0 只给「这一轮有事可做」。
+# `fix_pool` 在里面：它要人（或协调会话）去补判据或取消单，调度侧必须开一轮去看它——
+# 报成 2 就又回到了「池子里有活、而循环安静地不动」那个现场。
+WORKING_ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, FIX_POOL)
+
+# 空判据单「躺多久之后才值得点名」的宽限期限（与上游 AW-138 同一个数与同一个理由）：
+# `planned` 允许 0 条验收条件（那是「已经知道要补什么、还写不出条件」的念头），但
+# `claim_ticket` 读到空列表就报 `CRITERIA_NOT_JUDGEABLE`，所以这种单永远领不走。给它一天
+# 不会把正常流程报成故障；而「躺了一整天」正是会被漏掉的现场。
+#
+# 调这个数只有本文件这一处：文档写的是「一个来源」，不跟着改数。
+BLANK_CRITERIA_GRACE_SECONDS = 24 * 60 * 60
+
+# 点名报过一次之后，下一轮再点到它之前要等多久。
+#
+# 起因：把空判据单升成一档「有活」之后，代价是「没人处理就每轮再报一次」——同一张单、
+# 同一句话，每轮醒来烧一轮，既没有升级也没有退避。节奏要跟着「人可能还没看见」变慢。
+#
+# 形状：「第 i 次点名之后等 POOL_REPORT_BACKOFF_SECONDS[i-1] 秒」。第 1 次之后 2 小时、
+# 第 2 次之后 6 小时、第 3 次之后 24 小时，此后再叫就按最后一个（24 小时）。
+POOL_REPORT_BACKOFF_SECONDS = (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
+
+# 报到第几轮就升级（不再原样重报）：这一轮的人话换成「建一张 planned 单 / ask_ticket」。
+# 取值是退避阶梓走完一轮的点：1 次原价 + 两次退避之后再叫一次，所以它跟
+# `POOL_REPORT_BACKOFF_SECONDS` 的长度对得上；改阶梓时这里一起看。
+POOL_REPORT_ESCALATE_AFTER = 3
 
 # 挡住派发的三个状态：`ACTIVE_TICKET_STATES` 去掉 `awaiting_review`（理由见模块头）。
 BLOCKING_STATES = tuple(
@@ -408,6 +465,93 @@ def review_in_flight(conn, ticket_id, submission_id, now, stop) -> dict | None:
     return None
 
 
+def pool_report_events(conn, ticket_id) -> list[dict]:
+    """这张单「已经被点名报过」的事实，按时间从新到旧。
+
+    只认带 `result` 的事件行：同一个 operation 名也会出现在被拒的调用里（条件不合时
+    `execute()` 写的那行带 `rejected`），它说的是「想记但没记成」，不是「已经报过」。
+    两者混在一起，会让一次失败把下一轮的点名压住。
+    """
+    rows = conn.execute(
+        "SELECT id, detail, created_at FROM events"
+        " WHERE ticket_id=? AND operation=? ORDER BY created_at DESC, id DESC LIMIT 50",
+        (ticket_id, POOL_REPORT),
+    ).fetchall()
+    items = []
+    for row in rows:
+        try:
+            detail = json.loads(row["detail"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        result = detail.get("result") if isinstance(detail, dict) else None
+        if not isinstance(result, dict):
+            continue
+        items.append({"event_id": row["id"], "created_at": row["created_at"]})
+    return items
+
+
+def pool_report_status(conn, ticket_id, now) -> dict:
+    """这张单报过几次、这一轮该不该再报、下一次最早什么时候能再报。
+
+    `rounds` 是「已经报过的次数」（不是「将要报第几轮」）：一条事件就是一次点名。
+    退避窗口从**最后一次**那条事件算起：`rounds` 次之后等
+    `POOL_REPORT_BACKOFF_SECONDS[min(rounds, len)-1]` 秒。
+
+    时间读不出来时**按该报处理**：宁可多叫一次，也不要因为一行脏时间把一张永远领不走
+    的单压住——那会变成「什么都没发生」的僵局，而这一档存在的理由就是不让人错过它。
+    """
+    events = pool_report_events(conn, ticket_id)
+    rounds = len(events)
+    status = {
+        "reported_rounds": rounds,
+        "last_reported_at": None,
+        "backoff_seconds": None,
+        "next_report_at": None,
+        "seconds_until_next_report": 0,
+        # 与「建单时间读不出来」（`timestamp_unreadable`）分开一个键：
+        # 后者说的是「这张单多大了」，这里说的是「上一次点名是什么时候」。
+        "report_timestamp_unreadable": False,
+        "due": True,
+    }
+    if not rounds:
+        return status
+    status["last_reported_at"] = events[0]["created_at"]
+    stamp = _parse_time(events[0]["created_at"])
+    if stamp is None:
+        status["report_timestamp_unreadable"] = True
+        return status
+    gap = POOL_REPORT_BACKOFF_SECONDS[
+        min(rounds, len(POOL_REPORT_BACKOFF_SECONDS)) - 1
+    ]
+    next_at = stamp + datetime.timedelta(seconds=gap)
+    left = int((next_at - now).total_seconds())
+    status.update({
+        "backoff_seconds": gap,
+        "next_report_at": next_at.isoformat(),
+        "seconds_until_next_report": max(left, 0),
+        "due": left <= 0,
+    })
+    return status
+
+
+def attach_pool_report(conn, entries, now) -> list[dict]:
+    """给空判据那一档的每张单补上「报过几次 / 该不该再报 / 是不是该升级」。
+
+    只读：本脚本一行都不写，「报过了」由协调会话或巡检调 `task_center` 的
+    `record_pool_report` 落库（或走 `tools/pool_report.py`）——读侧只能读台账，不能自己盖章。
+
+    `escalate` 只在「这一轮确实要报」且「这一轮就是第 N 轮」时为真：窗口内本来就不叫，
+    不该在那里提升级——否则一天能看到很多次「请升级」，而那正是要消掉的噪音。
+    """
+    for entry in entries:
+        status = pool_report_status(conn, entry["ticket_id"], now)
+        status["escalate"] = bool(
+            status["due"] and status["reported_rounds"] + 1 >= POOL_REPORT_ESCALATE_AFTER
+        )
+        entry.update(status)
+    return entries
+
+
 def blank_criteria(raw) -> bool:
     """这条工单的条件是不是一条都没有（`planned` 允许空，其余状态不允许）。
 
@@ -611,7 +755,7 @@ def merge_candidates(conn, project_id, project_root, skipped, stop) -> list[dict
     return items
 
 
-def execute_candidates(conn, project_id, skipped) -> list[dict]:
+def execute_candidates(conn, project_id, skipped, stale=None, now=None) -> list[dict]:
     """池子里可领的单：状态可领、`blocked_by` 全部 done、且写得出验收条件。
 
     `claimable` 的定义从 `task_center.core` 取（`CLAIMABLE_STATES` +
@@ -622,7 +766,16 @@ def execute_candidates(conn, project_id, skipped) -> list[dict]:
     **条件空着的单不算可领**（AW-109）：`planned` 允许 0 条条件，那是「已经知道要补
     什么、还写不出验收条件」的念头；`claim_ticket` 会报 `CRITERIA_NOT_JUDGEABLE`。
     不在这里筛掉的话，无人值守派单器会一圈一圈地派一张永远领不走的单。
+
+    **躺太久的还给一份到 `stale`**：它永远是 `skipped` 里的 `no_criteria`，但只写
+    这一行不够——`action` 仍是 `nothing`，于是这种单被「没活」替它报平安。所以
+    `created_at` 超过 `BLANK_CRITERIA_GRACE_SECONDS` 的那些另进 `stale`，由 `scan()`
+    升成 `fix_pool` 点名。阈值不在这里再写一个数：本文件只有上面那一处。时间读不出来时
+    **按超期处理并标 `timestamp_unreadable`**：宁可多报一次（成本是一轮会话），
+    也不要因为一行脏时间把一张永远领不走的单静默筛掉。
     """
+    stale = stale if stale is not None else []
+    now = now or datetime.datetime.now(datetime.timezone.utc)
     rows = project_tickets(conn, project_id, CLAIMABLE_STATES)
     depths = dependency_depths(conn, [row["id"] for row in rows])
     ordered = sorted(
@@ -631,11 +784,24 @@ def execute_candidates(conn, project_id, skipped) -> list[dict]:
     items, waiting, blank = [], [], []
     for row in ordered:
         if blank_criteria(row["criteria"]):
-            blank.append({
+            entry = {
                 "ticket_id": row["id"],
                 "state": row["state"],
                 "created_at": row["created_at"],
-            })
+            }
+            blank.append(entry)
+            stamp = _parse_time(row["created_at"])
+            if stamp is None:
+                stale.append({
+                    **entry,
+                    "age_seconds": None,
+                    "timestamp_unreadable": True,
+                })
+                continue
+            age = (now - stamp).total_seconds()
+            if age >= BLANK_CRITERIA_GRACE_SECONDS:
+                stale.append({**entry, "age_seconds": int(age),
+                              "timestamp_unreadable": False})
             continue
         pending = pending_blockers(conn, row["id"])
         if pending:
@@ -665,7 +831,8 @@ def execute_candidates(conn, project_id, skipped) -> list[dict]:
         skipped.append({
             "reason": "no_criteria",
             "detail": ("池子里的念头：条件还空着，领走也验收不了（claim_ticket 会报 "
-                       "CRITERIA_NOT_JUDGEABLE）；先 revise_ticket 补至少一条可判定条件"),
+                       "CRITERIA_NOT_JUDGEABLE）；先 revise_ticket 补至少一条可判定条件。"
+                       "其中躺过一天的会升成 fix_pool 单列一格（补判据 / cancel_ticket）"),
             "tickets": blank,
         })
     return items
@@ -702,9 +869,16 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
         "dispatch": None,
         "in_flight": [],
         "review_in_flight": [],
+        "fix_pool": [],
         "stop": stop,
         "skipped": skipped,
-        "candidates": {DISPATCH_REVIEW: [], MERGE: [], DISPATCH_EXECUTE: []},
+        # 退避与升级的口径从常量里原样拓印出来：人读输出、用例与文档都不必再写一个数。
+        "pool_report": {
+            "operation": POOL_REPORT,
+            "backoff_seconds": list(POOL_REPORT_BACKOFF_SECONDS),
+            "escalate_after": POOL_REPORT_ESCALATE_AFTER,
+        },
+        "candidates": {DISPATCH_REVIEW: [], MERGE: [], DISPATCH_EXECUTE: [], FIX_POOL: []},
     }
 
     marker = Path(pause_path) if pause_path else default_pause_file()
@@ -731,11 +905,16 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
     # 合并候选先算、也先给：「done 但没合并」的单一旦被「池子里还有可领单」遮住，这一轮
     # 就会去开下一张单，而上一张的成果还躺在分支上（AWK-114 的三次现场）。
     merges = merge_candidates(conn, pid, project["root"], skipped, stop)
-    executes = execute_candidates(conn, pid, skipped)
+    executes = execute_candidates(conn, pid, skipped, result["fix_pool"], current)
+    # 空判据那一档先管「躺得够久就点名」，再补上「报过几次、该不该再报、是不是该升级」
+    # ——只读台账，不写。
+    if result["fix_pool"]:
+        attach_pool_report(conn, result["fix_pool"], current)
     result["candidates"] = {
         DISPATCH_REVIEW: [item["ticket_id"] for item in reviews],
         MERGE: [item["ticket_id"] for item in merges],
         DISPATCH_EXECUTE: [item["ticket_id"] for item in executes],
+        FIX_POOL: [item["ticket_id"] for item in result["fix_pool"]],
     }
 
     if reviews:
@@ -835,9 +1014,113 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
         )
         return _finish(result)
 
+    if result["fix_pool"]:
+        # 池子里只剩「永远领不走」的单。它排在三档派发动作之后、`nothing` 之前：
+        # 有真能往前走的动作时那个优先，但一旦只剩它们，就不许再说「没活」——
+        # 池子里明明有单，只是没人能领。两条出路都要人动手，本脚本一个都不替它做。
+        #
+        # 这里还要问两件事：这一轮该不该再叫（退避）、叫到第几轮了（升级）。
+        # 两者都只从 `record_pool_report` 台账算，不看会话记忆。
+        due = [item for item in result["fix_pool"] if item["due"]]
+        if not due:
+            # 全在退避窗口里：这一轮不点名，退出 2（调度侧不开会话）。这不是「静默」：
+            # 每一张单都已经被点名过至少一次，名字、轮次与下一次时间都在 `fix_pool`
+            # 数组里，人跑一次 `--json` 就看得到；不落库记录才是真静默。
+            waiting = "；".join(
+                f"{item['ticket_id']}（已报 {item['reported_rounds']} 轮，"
+                f"还剩 {_span_text(item['seconds_until_next_report'])}）"
+                for item in result["fix_pool"]
+            )
+            result["reason_code"] = "blank_criteria_backoff"
+            result["human"] = (
+                f"nothing：{len(result['fix_pool'])} 张空判据单都还在退避窗口里——{waiting}；"
+                "到点之前不再点名（点名记录在库里，换一个会话也读得到），"
+                "要提前处理就直接 revise_ticket 补判据或 cancel_ticket"
+            )
+            return _finish(result)
+        escalating = [item for item in due if item["escalate"]]
+        if escalating:
+            # 报到第 N 轮：换一种叫法。仍然只报不改——建单 / 提问由读它的会话做，
+            # 本脚本不写判据、不取消单、也不替你开单。
+            pick = escalating[0]
+            result["action"] = FIX_POOL
+            result["reason_code"] = "blank_criteria_escalate"
+            result["ticket"] = _ticket_head(conn, pick["ticket_id"])
+            result["dispatch"] = {
+                "ticket_id": pick["ticket_id"],
+                "ticket_ids": [item["ticket_id"] for item in due],
+                "grace_seconds": BLANK_CRITERIA_GRACE_SECONDS,
+                # 两条合法出路，都落库、都查得到是谁为什么：补判据 / 承认不做了。
+                "outcomes": ["revise_ticket", "cancel_ticket"],
+                "escalate": True,
+                "reported_rounds": {
+                    item["ticket_id"]: item["reported_rounds"] for item in due
+                },
+                "escalate_after": POOL_REPORT_ESCALATE_AFTER,
+                # 升级的两条路，与「不许同步提问卡」不冲突：`ask_ticket` 是落库的问题，
+                # 不是卡片。
+                "escalation": {
+                    "ticket_ids": [item["ticket_id"] for item in escalating],
+                    "options": ["create_ticket:planned", "ask_ticket"],
+                },
+                "report_operation": POOL_REPORT,
+            }
+            names = "、".join(
+                f"{item['ticket_id']}（已连着报过 {item['reported_rounds']} 轮）"
+                for item in escalating
+            )
+            result["human"] = (
+                f"{FIX_POOL}：{names}，没人处理（升级门槛是 {POOL_REPORT_ESCALATE_AFTER} 轮）——"
+                "这一轮不再原样重报，升级成一件能验收的活：用 create_ticket 建一张 "
+                "state=planned 的单（把「补判据 / 取消这几张空判据单」写成可验收条件），"
+                "或在本会话持有 running 尝试时用 ask_ticket 落一个问题；"
+                "两条老出路仍是 revise_ticket / cancel_ticket。"
+                "next_action 只报不改，不会替你开单、写判据或取消单；"
+                f"这一轮也要落一条 {POOL_REPORT} 记录，否则下一轮还会再喊一次升级"
+            )
+            return _finish(_note_backoff(result, due))
+        stale = due
+        names = "、".join(
+            f"{item['ticket_id']}（{item['state']}，{_age_text(item)}，{_rounds_text(item)}）"
+            for item in stale
+        )
+        result["action"] = FIX_POOL
+        result["reason_code"] = "blank_criteria"
+        result["ticket"] = _ticket_head(conn, stale[0]["ticket_id"])
+        result["dispatch"] = {
+            "ticket_id": stale[0]["ticket_id"],
+            "ticket_ids": [item["ticket_id"] for item in stale],
+            "grace_seconds": BLANK_CRITERIA_GRACE_SECONDS,
+            # 两条合法出路，都落库、都查得到是谁为什么：补判据 / 承认不做了。
+            "outcomes": ["revise_ticket", "cancel_ticket"],
+            "escalate": False,
+            "reported_rounds": {
+                item["ticket_id"]: item["reported_rounds"] for item in stale
+            },
+            "report_operation": POOL_REPORT,
+        }
+        result["human"] = (
+            f"{FIX_POOL}：池子里 {len(stale)} 张单的验收条件空着、已经躺过 "
+            f"{_grace_text()}——{names}；它们永远领不走（claim_ticket 报 "
+            "CRITERIA_NOT_JUDGEABLE），两条出路：用 revise_ticket 补至少一条可判定条件，"
+            "或用 cancel_ticket 承认不做了。next_action 只报不改，不会替你写判据、也不会替你取消；"
+            f"点名之后要落一条 {POOL_REPORT} 记录"
+            "（python tools/pool_report.py --project <项目 id> --ticket <单号>），"
+            "否则下一轮还会从第 1 轮重报"
+        )
+        return _finish(_note_backoff(result, due))
+
     result["reason_code"] = "idle"
     result["human"] = "nothing：没活——池子里没有可领的单，也没有待验收、待合并的单"
     return _finish(result)
+
+
+def _note_backoff(result: dict, due: list[dict]) -> dict:
+    """同一档里有的到点、有的还在退避：人读那一行补一句，别让后一半消失。"""
+    waiting = len(result.get("fix_pool") or []) - len(due)
+    if waiting:
+        result["human"] += f"；另有 {waiting} 张空判据单还在退避窗口里，到点再点"
+    return result
 
 
 def _finish(result: dict) -> dict:
@@ -871,6 +1154,17 @@ def _finish(result: dict) -> dict:
                 f"另有 {len(ids)} 张 done 且无合并记录，但已在历史豁免清单里"
                 f"（不是等待合并的单，见 skipped）：{'、'.join(ids)}"
             )
+    # 已经单列成 `fix_pool` 那一档时不重复：那句话已经把单号与两条出路写全了。
+    # 全在退避窗口里的那一档也已经有自己的一句话（带轮次与还剩多久），不再缀一遍。
+    if result.get("action") != FIX_POOL and result.get("reason_code") != "blank_criteria_backoff":
+        stale = result.get("fix_pool") or []
+        if stale:
+            notes.append(
+                f"另有 {len(stale)} 张空判据的单已经躺过 {_grace_text()}"
+                f"（{', '.join(item['ticket_id'] + '，' + _rounds_text(item) for item in stale)}，"
+                "见 fix_pool）：补判据（revise_ticket）或 cancel_ticket，"
+                "否则它们永远领不走"
+            )
     if notes:
         result["human"] = result["human"] + "；" + "；".join(notes)
     return result
@@ -885,6 +1179,47 @@ def _waited_text(seconds: int) -> str:
     if seconds < 60:
         return "1 分钟以内"
     return f"{seconds // 60} 分钟"
+
+
+def _grace_text() -> str:
+    """空判据的期限人话：按天算，不把 86400 秒这种数写进人话。
+
+    取值只从 `BLANK_CRITERIA_GRACE_SECONDS` 推算，不在这里再写一个 24。
+    """
+    days = BLANK_CRITERIA_GRACE_SECONDS / 86400
+    return f"{days:.0f} 天" if days >= 1 else f"{BLANK_CRITERIA_GRACE_SECONDS // 60} 分钟"
+
+
+def _rounds_text(item: dict) -> str:
+    """这张单已经被点名报过几次的人话。只从台账算，不猜。"""
+    rounds = item.get("reported_rounds") or 0
+    if not rounds:
+        return "还没报过"
+    return f"已报过 {rounds} 轮"
+
+
+def _span_text(seconds: int) -> str:
+    """剩余时长的人话：不足一分钟不说「0 分钟」，那读起来像已经到点。"""
+    seconds = max(int(seconds), 0)
+    if seconds < 60:
+        return "1 分钟以内"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟"
+    hours, rest = divmod(seconds, 3600)
+    if hours < 24:
+        return f"{hours} 小时" + (f" {rest // 60} 分钟" if rest >= 60 else "")
+    days, rest = divmod(hours, 24)
+    return f"{days} 天" + (f" {rest} 小时" if rest else "")
+
+
+def _age_text(item: dict) -> str:
+    """一张空判据单已经躺了多久的人话；时间读不出来时就说读不出来，不编一个天数。"""
+    if item.get("timestamp_unreadable") or item.get("age_seconds") is None:
+        return "创建时间读不出来，按超期算"
+    seconds = item["age_seconds"]
+    if seconds < 86400:
+        return f"已经 {max(seconds // 3600, 1)} 小时"
+    return f"已经 {seconds // 86400} 天"
 
 
 def _short(sha) -> str:

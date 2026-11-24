@@ -8,7 +8,7 @@
 - 工单 AWK-117 的六条判据（C1–C6），取自中心库 `get_ticket`。
 - 现场依据（2026-11-24 本次开工实测，`git`/`diff` 自己跑过，不引用 03:38 那次的口径）：
   - master `5a7bcda` 上 `python tools/run_tests.py` 末行 `结果：全部通过`，合计 **1016 项**（`tests/` 354 + `tools/` 662）。
-  - 上游 `D:/AI工作区` 比套件多：`tools/check_eol.py`(162 行)、`tools/pool_report.py`(101 行)、`tools/test_eol_check.py`(151 行)、`tools/test_pool_report.py`(119 行)、`tools/test_relative_db.py`(205 行)；`task_center/core.py` 多常量 `POOL_REPORT`、字段闭集一行、`_record_pool_report` 共 47 行；`tools/next_action.py` 多 8 个函数（`pool_report_events` / `pool_report_status` / `attach_pool_report` / `_age_text` / `_grace_text` / `_note_backoff` / `_rounds_text` / `_span_text`）与 `fix_pool` 一档。
+  - 上游工作区比套件多：`tools/check_eol.py`(162 行)、`tools/pool_report.py`(101 行)、`tools/test_eol_check.py`(151 行)、`tools/test_pool_report.py`(119 行)、`tools/test_relative_db.py`(205 行)；`task_center/core.py` 多常量 `POOL_REPORT`、字段闭集一行、`_record_pool_report` 共 47 行；`tools/next_action.py` 多 8 个函数（`pool_report_events` / `pool_report_status` / `attach_pool_report` / `_age_text` / `_grace_text` / `_note_backoff` / `_rounds_text` / `_span_text`）与 `fix_pool` 一档。
   - 反向也有一份：套件的 `next_action` 有 `default_exemptions_path` / `ticket_branch_exists`（AWK-114 的合并口径），上游没有；`wait_audit` 的第五类 `awaiting_receipt`、`idle_watch` 的占位目录判断与 `center_config` 发现逻辑、`doc_gate` 的技能扫描、`closing.md` 的中心库发现一节，都只在套件这边。**所以这是双向合并。**
   - 两边差行数被行尾放大过一轮：套件工作树在 `core.autocrlf=true` 下检出成 CRLF，上游是 LF。去掉 CRLF 再比，`run_tests.py` 完全一致、`doc_gate.py` 只差套件那 11 行、`idle_watch.py` 只差套件那 57 行。
 
@@ -172,7 +172,7 @@
 - 不搬上游的 `merge_candidates` / `_finish` 的 skipped 部分（套件那份按项目根判豁免与分支，比上游多一层）。
 - 不把 `wait_audit` 第五类、`idle_watch` 占位、`doc_gate` 技能扫描、`center_config`、`run_tests` 两处布局、`install_guard`、`schedule_plan`、`automation/` 两份模板换成上游口径，哪怕上游文件看起来「更新」。
 - 不做 `git add --renormalize`，不改任何文本的工作树字节（`.gitattributes` 只影响之后的检出）。
-- 不拿 `D:/AI工作区/.data/task-center.sqlite3` 做写入实验：`record_pool_report` 的用例一律用临时库；读库一律显式 `--db`。
+- 不拿上游那份真实中心库做写入实验：`record_pool_report` 的用例一律用临时库；读库一律显式 `--db`。
 - 不在 `tasks/round.md` 上改状态、不写收尾包（收尾是协调会话那一轮的事）。
 
 ## 未决

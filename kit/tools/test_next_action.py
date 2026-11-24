@@ -35,6 +35,7 @@ if str(TOOLS.parent) not in sys.path:
     sys.path.insert(0, str(TOOLS.parent))
 
 import next_action
+from next_action import BLANK_CRITERIA_GRACE_SECONDS
 
 from task_center.db import SCHEMA_VERSION
 
@@ -47,6 +48,16 @@ OTHER_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 def stamp(day: int) -> str:
     """固定的时间戳：2026-11-<day>T00:00:00+00:00。"""
     return f"2026-11-{day:02d}T00:00:00+00:00"
+
+
+def hours_ago(hours: float) -> str:
+    """相对此刻的时间戳。
+
+    只有按「多久以前」判的那两档需要它（验收在飞的 30 分钟窗口、空判据的一天期限）：
+    写死一个绝对日期的话，一条用例今天绿、明天红——年龄是相对现在算的。
+    """
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(hours=hours)).isoformat()
 
 
 def create_db(path: Path, root: str) -> sqlite3.Connection:
@@ -122,8 +133,12 @@ class Fixture(unittest.TestCase):
 
     def add_ticket(self, ticket_id, state="planned", created_day=20,
                    prd_path="PRD/PRD-014-计划队列与依赖.md", project_id=PROJECT,
-                   criteria=CRITERIA_ONE):
-        """默认给一条可判定条件：从 AW-109 起空条件的单不派（它是念头，不是可领的活）。"""
+                   criteria=CRITERIA_ONE, created_at=None):
+        """默认给一条可判定条件：从 AW-109 起空条件的单不派（它是念头，不是可领的活）。
+
+        `created_at` 可以显式给：空判据那一档按建单时间算年龄，用例要靠它把一张单摆到
+        期限之内或之外，不能只靠 `created_day` 的那个固定日期。
+        """
         self.conn.execute(
             "INSERT INTO tickets (id, project_id, title, deliverable, prd_path,"
             " prd_sha256, criteria, revision, criteria_version, state,"
@@ -131,7 +146,7 @@ class Fixture(unittest.TestCase):
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ticket_id, project_id, f"{ticket_id} 的标题", "交付物", prd_path,
              "a" * 64, json.dumps(criteria, ensure_ascii=False), 1, 1, state, None,
-             stamp(created_day), None),
+             created_at or stamp(created_day), None),
         )
 
     def add_attempt(self, ticket_id, attempt_id, state="running",
@@ -332,8 +347,13 @@ class ExecuteTest(Fixture):
         self.assertEqual(result["dispatch"]["depth"], 1)
 
     def test_ticket_without_criteria_is_not_dispatched(self):
-        """空条件的 planned 是池子里的念头：不派出去，进 skipped 并说明原因（AW-109）。"""
-        self.add_ticket("AW-914", state="planned", criteria=[])
+        """空条件的 planned 是池子里的念头：不派出去，进 skipped 并说明原因（AW-109）。
+
+        建单时间摆在期限之内（一小时前）：它这一轮还不该升成 `fix_pool`，只该是
+        `skipped` 里的一行。躺过期限的情形在 `FixPoolTest` 里判。
+        """
+        self.add_ticket("AW-914", state="planned", criteria=[],
+                        created_at=hours_ago(1))
         code, out, _ = self.run_main("--json")
         self.assertEqual(code, next_action.EXIT_IDLE)
         result = json.loads(out)
@@ -341,12 +361,320 @@ class ExecuteTest(Fixture):
         skipped = [item for item in result["skipped"] if item["reason"] == "no_criteria"]
         self.assertTrue(skipped, result)
         self.assertEqual(skipped[0]["tickets"][0]["ticket_id"], "AW-914")
+        self.assertEqual(result["fix_pool"], [])
 
     def test_other_project_tickets_are_not_candidates(self):
         self.add_ticket("OTHER-1", state="planned", project_id="another-project")
         code, out, _ = self.run_main("--json")
         self.assertEqual(code, next_action.EXIT_IDLE)
         self.assertEqual(json.loads(out)["action"], next_action.NOTHING)
+
+
+class FixPoolTest(Fixture):
+    """AW-138：池子里只剩躺过期限的空判据单时，给 `fix_pool` 点名，不再报「没活」。
+
+    这组用例要守住三件事，而且三件都只能靠两个可观测事实判（`action` 与退出码）：
+
+    1. **看得见：** 空判据 + 超过 `BLANK_CRITERIA_GRACE_SECONDS` → `fix_pool` 并点名，
+       不是 `nothing`（C1）。
+    2. **分得开：** 同一张单补上判据之后回到正常动作；期限之内也不点（C2）——
+       不补与补上输出一样，这条就白做了。
+    3. **只报不改（C5）：** 跑完一张空判据单的现场，库里的行一个字节也不变。
+    """
+
+    def stale(self, ticket_id="AW-990", hours=None, **kwargs):
+        """建一张空判据、建单时间超过期限的单。默认超过一天零一小时。"""
+        hours = BLANK_CRITERIA_GRACE_SECONDS / 3600 + 1 if hours is None else hours
+        self.add_ticket(ticket_id, state="planned", criteria=[],
+                        created_at=hours_ago(hours), **kwargs)
+
+    def test_stale_blank_criteria_becomes_fix_pool(self):
+        self.stale("AW-990")
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.FIX_POOL)
+        self.assertEqual(result["reason_code"], "blank_criteria")
+        self.assertEqual(result["dispatch"]["ticket_id"], "AW-990")
+        self.assertEqual(result["dispatch"]["ticket_ids"], ["AW-990"])
+        self.assertEqual(result["candidates"][next_action.FIX_POOL], ["AW-990"])
+        # 两条出路都要写在回执里：补判据 / 取消，不是「请人工确认」。
+        self.assertEqual(result["dispatch"]["outcomes"],
+                         ["revise_ticket", "cancel_ticket"])
+        for word in ("fix_pool", "AW-990", "revise_ticket", "cancel_ticket", "只报不改"):
+            self.assertIn(word, result["human"])
+        # 它仍然是 skipped 里的 no_criteria：升成一档不等于从原来那张表里消失。
+        self.assertTrue([item for item in result["skipped"]
+                         if item["reason"] == "no_criteria"])
+
+    def test_human_line_names_the_ticket(self):
+        """人读那一行（不带 --json）也要点名：巡检靠它一眼看见。"""
+        self.stale("AW-991")
+        code, out, _ = self.run_main()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertTrue(out.strip().startswith(next_action.FIX_POOL))
+        self.assertIn("AW-991", out)
+
+    def test_filling_the_criteria_brings_back_normal_action(self):
+        """C2 的正向：补上判据之后就不再是 fix_pool，而是一张可领的单。"""
+        self.stale("AW-992")
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(json.loads(out)["action"], next_action.FIX_POOL)
+
+        self.conn.execute(
+            "UPDATE tickets SET criteria=?, criteria_version=2 WHERE id='AW-992'",
+            (json.dumps(CRITERIA_ONE, ensure_ascii=False),),
+        )
+        code, out, _ = self.run_main("--json")
+        result = json.loads(out)
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["action"], next_action.DISPATCH_EXECUTE)
+        self.assertEqual(result["fix_pool"], [])
+
+    def test_fresh_blank_criteria_is_not_named(self):
+        """期限之内（一小时前建的）不点：建单与补判据本来就可能是两次动作。"""
+        self.add_ticket("AW-993", state="planned", criteria=[],
+                        created_at=hours_ago(1))
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["fix_pool"], [])
+
+    def test_threshold_boundary_comes_from_the_constant(self):
+        """既不过期就不过期：差一分钟不点、过一分钟就点（阈值只认那一个常量）。"""
+        grace_hours = BLANK_CRITERIA_GRACE_SECONDS / 3600
+        self.add_ticket("AW-994", state="planned", criteria=[],
+                        created_at=hours_ago(grace_hours - 1 / 60))
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        self.assertEqual(json.loads(out)["action"], next_action.NOTHING)
+
+        self.conn.execute(
+            "UPDATE tickets SET created_at=? WHERE id='AW-994'",
+            (hours_ago(grace_hours + 1 / 60),),
+        )
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(json.loads(out)["action"], next_action.FIX_POOL)
+
+    def test_real_work_still_wins_but_the_blank_one_is_named(self):
+        """池子里另有能派的单时先派它（fix_pool 是兜底），但人话里要提到空判据那张。"""
+        self.stale("AW-995")
+        self.add_ticket("AW-996", state="planned", created_at=hours_ago(2))
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.DISPATCH_EXECUTE)
+        self.assertEqual(result["dispatch"]["ticket_id"], "AW-996")
+        self.assertEqual(result["candidates"][next_action.FIX_POOL], ["AW-995"])
+        self.assertIn("AW-995", result["human"])
+        self.assertIn("fix_pool", result["human"])
+
+    def test_unreadable_created_at_counts_as_stale(self):
+        """时间读不出来时按超期算：宁可多报一轮，也不要把它静默筛掉。"""
+        self.add_ticket("AW-997", state="planned", criteria=[],
+                        created_at="not-a-timestamp")
+        code, out, _ = self.run_main("--json")
+        self.assertEqual(code, next_action.EXIT_WORK)
+        result = json.loads(out)
+        self.assertEqual(result["action"], next_action.FIX_POOL)
+        self.assertTrue(result["fix_pool"][0]["timestamp_unreadable"])
+        self.assertIn("读不出来", result["human"])
+
+    def test_next_action_never_writes_to_the_pool(self):
+        """C5：只报不改——跑完一轮，库里的行一个字节也不变（不写判据、不取消、不改状态）。"""
+        self.stale("AW-998")
+        self.add_ticket("AW-999", state="planned", created_at=hours_ago(2))
+        self.conn.commit()
+
+        def snapshot():
+            return (
+                [tuple(row) for row in self.conn.execute(
+                    "SELECT id, state, criteria, criteria_version, revision,"
+                    " current_attempt, created_at FROM tickets ORDER BY id")],
+                self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0],
+                self.conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
+                self.conn.execute("SELECT COUNT(*) FROM notices").fetchone()[0],
+            )
+
+        before = snapshot()
+        self.run_main("--json")
+        self.run_main()
+        self.assertEqual(snapshot(), before)
+        # 库连接是只读打开的：写不进东西，不是靠「记得不写」。
+        with self.assertRaises(sqlite3.OperationalError):
+            self.conn_is_read_only()
+
+    def conn_is_read_only(self):
+        """`next_action.read_only()` 打开的那条连接必须拒绝写入（C5 的机制层）。"""
+        conn = next_action.read_only(self.db_path)
+        try:
+            conn.execute("UPDATE tickets SET state='cancelled' WHERE id='AW-998'")
+        finally:
+            conn.close()
+
+
+class FixPoolThrottleTest(Fixture):
+    """AW-140：同一批空判据单不许每轮一字不变地重报——报过要退避，报到第 N 轮要升级。
+
+    这一组只看两个可观测事实（`action` / `reason_code` 与退出码），但每个用例都要造一份
+    **落库的台账**：`record_pool_report` 事件。台账不在会话上下文里，所以每个用例开头都
+    从空库起算，中途只通过 `report()` 往库里加行——这正是「换一个会话也读得到」的形状。
+    """
+
+    def stale(self, ticket_id="AW-970", state="planned"):
+        """一张空判据、建单时间已经超过宽限期的单。"""
+        hours = BLANK_CRITERIA_GRACE_SECONDS / 3600 + 1
+        self.add_ticket(ticket_id, state=state, criteria=[], created_at=hours_ago(hours))
+
+    def report(self, ticket_id, hours_ago_value=0.5, request_id=None):
+        """落一条「已经点名报过」的事件：一条行 = 一次点名（与 task_center 的写法同形）。"""
+        detail = {"request_id": request_id or f"req-{ticket_id}-{hours_ago_value}",
+                  "result": {"ticket_id": ticket_id, "reported_rounds": 0}}
+        self.add_events_table_row(ticket_id, next_action.POOL_REPORT,
+                                  detail, hours_ago(hours_ago_value))
+
+    def scan_json(self):
+        code, out, _ = self.run_main("--json")
+        return code, json.loads(out)
+
+    def test_third_report_escalates_instead_of_repeating(self):
+        """报到第 N 轮：这一条不再是「补判据还是取消」的原话，而是「去升级」。"""
+        self.stale("AW-970")
+        self.report("AW-970", hours_ago_value=8)
+        self.report("AW-970", hours_ago_value=7)
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["action"], next_action.FIX_POOL)
+        self.assertEqual(result["reason_code"], "blank_criteria_escalate")
+        self.assertTrue(result["dispatch"]["escalate"])
+        self.assertEqual(result["dispatch"]["reported_rounds"], {"AW-970": 2})
+        self.assertEqual(result["dispatch"]["escalation"]["ticket_ids"], ["AW-970"])
+        self.assertEqual(result["dispatch"]["escalation"]["options"],
+                         ["create_ticket:planned", "ask_ticket"])
+        for word in ("升级", "planned", "ask_ticket", "revise_ticket", "cancel_ticket"):
+            self.assertIn(word, result["human"])
+
+    def test_inside_the_backoff_window_it_is_not_repeated(self):
+        """报过一次、还没到点：这一轮不点名，退出 2（调度侧不开会话）——但台账照旧读得出。"""
+        self.stale("AW-971")
+        self.report("AW-971", hours_ago_value=0.5)
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        self.assertEqual(result["action"], next_action.NOTHING)
+        self.assertEqual(result["reason_code"], "blank_criteria_backoff")
+        entry = result["fix_pool"][0]
+        self.assertEqual(entry["reported_rounds"], 1)
+        self.assertFalse(entry["due"])
+        self.assertGreater(entry["seconds_until_next_report"], 0)
+        # 名字、轮次与还剩多久都还在输出里：不点名不等于看不见。
+        self.assertIn("AW-971", result["human"])
+        self.assertIn("退避", result["human"])
+
+    def test_round_two_is_due_after_the_first_window(self):
+        """第一次之后等 2 小时：过了窗口就照原样点名，并带上「已报过 1 轮」。"""
+        self.stale("AW-972")
+        self.report("AW-972", hours_ago_value=3)
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["action"], next_action.FIX_POOL)
+        self.assertEqual(result["reason_code"], "blank_criteria")
+        self.assertFalse(result["dispatch"]["escalate"])
+        self.assertEqual(result["dispatch"]["reported_rounds"], {"AW-972": 1})
+
+    def test_the_streak_is_read_from_the_database_not_the_session(self):
+        """C2 的反例在这里失效：报过之后，再跑一次（等同换会话）不会从第 1 轮重算。"""
+        self.stale("AW-973")
+        first_code, first = self.scan_json()
+        self.assertEqual(first_code, next_action.EXIT_WORK)
+        self.assertEqual(first["reason_code"], "blank_criteria")
+        self.assertEqual(first["fix_pool"][0]["reported_rounds"], 0)
+
+        # 上一次现场（任何会话）落下的记录就是全部状态：模型里没有别的东西可丢。
+        self.report("AW-973", hours_ago_value=0.2, request_id="req-AW-973-1")
+        second_code, second = self.scan_json()
+        self.assertEqual(second_code, next_action.EXIT_IDLE)
+        self.assertEqual(second["reason_code"], "blank_criteria_backoff")
+        self.assertEqual(second["fix_pool"][0]["reported_rounds"], 1)
+
+    def test_escalation_is_announced_once_then_backed_off(self):
+        """升级过一次之后不许每轮都喊「请升级」：此后按 24 小时一次。"""
+        self.stale("AW-974")
+        for hours in (40, 32, 0.5):
+            self.report("AW-974", hours_ago_value=hours)
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_IDLE)
+        self.assertEqual(result["reason_code"], "blank_criteria_backoff")
+        self.assertEqual(result["fix_pool"][0]["reported_rounds"], 3)
+        self.assertEqual(result["fix_pool"][0]["backoff_seconds"],
+                         next_action.POOL_REPORT_BACKOFF_SECONDS[-1])
+
+        # 24 小时之后才轮到下一次：仍然是升级那一句，不是每轮重喊。
+        self.conn.execute(
+            "UPDATE events SET created_at=? WHERE ticket_id='AW-974' AND operation=?",
+            (hours_ago(25), next_action.POOL_REPORT))
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["reason_code"], "blank_criteria_escalate")
+
+    def test_real_work_still_wins_while_the_blank_one_is_due(self):
+        """C3：有可派的单时先给那个——节流不许把真活压住，也不许把这一档提到前面。"""
+        self.stale("AW-975")
+        self.report("AW-975", hours_ago_value=8)
+        self.report("AW-975", hours_ago_value=7)
+        self.add_ticket("AW-976", state="planned", created_at=hours_ago(2))
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["action"], next_action.DISPATCH_EXECUTE)
+        self.assertEqual(result["dispatch"]["ticket_id"], "AW-976")
+        self.assertEqual(result["candidates"][next_action.FIX_POOL], ["AW-975"])
+        self.assertIn("AW-975", result["human"])
+
+    def test_mixed_due_and_backoff_names_both(self):
+        """一张到点、一张还在窗口里：点名的只有到点那张，退避那张也要写进人话。"""
+        self.stale("AW-980")
+        self.report("AW-980", hours_ago_value=8)
+        self.report("AW-980", hours_ago_value=7)
+        self.stale("AW-981")
+        self.report("AW-981", hours_ago_value=0.1)
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["dispatch"]["ticket_ids"], ["AW-980"])
+        self.assertEqual(result["candidates"][next_action.FIX_POOL], ["AW-980", "AW-981"])
+        self.assertIn("另有 1 张空判据单还在退避窗口里", result["human"])
+
+    def test_rejection_row_does_not_count_as_a_report(self):
+        """被拒的调用也留一行同名事件：它带 `rejected`，不是「已经报过」。"""
+        self.stale("AW-977")
+        self.add_events_table_row("AW-977", next_action.POOL_REPORT,
+                                  {"rejected": "INVALID_STATE", "request_id": "req-x"},
+                                  hours_ago(0.2))
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["reason_code"], "blank_criteria")
+        self.assertEqual(result["fix_pool"][0]["reported_rounds"], 0)
+
+    def test_unreadable_report_time_does_not_silence_the_ticket(self):
+        """点名记录的时间读不出来时按该报处理：宁可多叫一次，也不押住它。"""
+        self.stale("AW-978")
+        self.add_events_table_row("AW-978", next_action.POOL_REPORT,
+                                  {"request_id": "req-y", "result": {"ticket_id": "AW-978"}},
+                                  "not-a-timestamp")
+        code, result = self.scan_json()
+        self.assertEqual(code, next_action.EXIT_WORK)
+        self.assertEqual(result["reason_code"], "blank_criteria")
+        self.assertTrue(result["fix_pool"][0]["report_timestamp_unreadable"])
+
+    def test_thresholds_are_echoed_from_the_constants(self):
+        """阈值只有一个来源：输出里的数就是那几个常量，再没有第二个 2/6/24。"""
+        self.stale("AW-979")
+        _, result = self.scan_json()
+        self.assertEqual(result["pool_report"]["escalate_after"],
+                         next_action.POOL_REPORT_ESCALATE_AFTER)
+        self.assertEqual(result["pool_report"]["backoff_seconds"],
+                         list(next_action.POOL_REPORT_BACKOFF_SECONDS))
+        self.assertEqual(result["pool_report"]["operation"], next_action.POOL_REPORT)
 
 
 class ReviewTest(Fixture):
