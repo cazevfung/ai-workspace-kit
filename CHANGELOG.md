@@ -2,16 +2,23 @@
 
 ## 0.6.0（2026-11-25）
 
-2026-11-25 发布。**这一版把套件追到工作区源码的当前状态：`D:/AI工作区` 已经又合了二十来张单，而套件停在 0.5.2，`relocate_project`、`invariants`、`sleep_audit`、`dispatch_payload` 这些能力用户一次装都装不到。**
+2026-11-25 发布。**这一版把套件追到工作区源码的当前状态：`D:/AI工作区` 那边已经往前走了好几轮，而套件停在 0.5.2，`relocate_project`、`invariants`、`sleep_audit`、`dispatch_payload` 这些能力用户一次装都装不到。**
 
 「拿 GitHub 链接一次装完」这句话要重新成立，就得不靠人抄。所以这一版没有逐条搬文件，而是在同步脚本上重跑一遍：`python maintainer/sync_from_origin.py --origin <原工作区>`，它自己把本机路径换成 `{{WORKSPACE}}` 占位符；跑完再跑 `python maintainer/redact_for_public.py`，把同步带进来的真实用户名与会话 id 清掉。两个脚本都能重复跑，结果一样。
 
 ### 同步了什么
 
-- **框架代码（`kit/`）**：`task_center` 9 个文件、`tools` 51 个、`tests` 40 个、`examples` 2 个、`docs` 9 份、`.githooks` 1 个，全部换成工作区当前 master 的那一份。对外看得见的新能力：`relocate_project`（换项目根不再需要先撤销登记，有工单也迁得成）、`invariants.py`（库里那几条不能破的规矩只读自检）、`sleep_audit.py`（定时任务是不是真的在睡）、`dispatch_payload.py`（派单消息的五块骨架）、`unmerged_scan.py`（「验收过了但没合并」分三类）、`record_pool_report`、`merge_ticket` 的 `source` / `verified_by` / `verified_at` / `note` 四列、`archive_ticket` 与 `rename_project`、三档验收、`planned` 允许空条件。中心库 schema 仍是 16，这一版不改 schema、不改任何闸门的判定逻辑。
-- **技能（`skills/`）**：通用技能 20 → **22**（新增 `ui-design` 与 `video-jerky-repair`），40 个工作区技能文件按工作区当前版本同步；`bootstrap-workspace` 仍只有套件这一份。合计 29 个技能（22 通用 + 7 工作区）。
-- **设计史（`design/`）**：`design/README.md.origin`、`design/AGENTS.md.origin` 与 `design/PRD/` 下 16 份 PRD 同步到工作区当前版本（`PRD-000` 到 `PRD-015`）；`kit/PRD/` 里套件自己的七份 PRD 不在同步范围（面板那两份归 AWK-122）。
-- **面板（`panel/`）**：**这一版没有改它的内容。** 逐文件核过一遍（`git ls-files` 两边的跟踪清单对撞，40 个文件）：26 个字节相同，10 个只差 `{{WORKSPACE}}` 占位符与行尾，`README.md` 是两份不同的说明（面板那份写的是「装到 `<工作区>/panel` 之后怎么跑」，面板仓库那份写的是那个仓库自己），`app/run-tests.mjs` 与 `app/test/package.json` 是套件侧的测试入口。结论与逐文件比对方式记在 AWK-121 的提交证据里。面板仓库那份 `verify-session-targets.mjs` 写死了本机账号路径，套件这一份把用户目录算成 `%APPDATA%`，所以没有拿面板仓库覆盖它。
+这一节的数字只有三处来源，别处来的不写；拿今天的重跑替换第一处是错的，重跑算的是今天，而这里记的是当时：
+
+1. **那次同步脚本自己打印的输出**（2026-11-25 跑的那一次）。量它的是 `maintainer/sync_from_origin.py` 的 `f863689` 那一版——AWK-121 的返工提交，加了 `KEEP_AS_IS`、把行尾统一成 LF、同步后自动脱敏；今天 master 上那份与它逐字相同（`git diff f863689 HEAD -- maintainer/sync_from_origin.py` 没有输出）。那次跑的输出逐字记在工单 AWK-121 的提交摘要里，下面六个「文件数」与 PRD 那一条都出自它。
+2. **`python tools/run_tests.py` 的汇总行与末行**：用例数、skip 条数（见下面「用例数」）。
+3. **`v0.6.0` 那棵树与面板仓库的 `git ls-files` 计数**：按目录数、按受管文件数出来的东西（技能目录数、PRD 份数、面板逐文件比对），命令都写在它们旁边，读的人自己就能重算一遍。
+
+- **框架代码（`kit/`）**：`task_center` 8 个文件、`tools` 46 个、`tests` 40 个、`examples` 2 个，全部换成工作区当前 master 的那一份。**这四个数是脚本这次写进去的文件数，不是 `kit/` 下最终有多少文件**：`v0.6.0` 那棵树里 `kit/task_center/` 是 9 个、`kit/tools/` 是 62 个，差出来的部分是 `KEEP_AS_IS` 里不许覆盖的七处（`kit/tools/` 五份、`kit/task_center/` 一份、`kit/docs/` 一份）与套件自己独有的文件（数法：`git ls-tree -r --name-only v0.6.0:kit/tools | wc -l`）。对外看得见的新能力：`relocate_project`（换项目根不再需要先撤销登记，有工单也迁得成）、`invariants.py`（库里那几条不能破的规矩只读自检）、`sleep_audit.py`（定时任务是不是真的在睡）、`dispatch_payload.py`（派单消息的五块骨架）、`unmerged_scan.py`（「验收过了但没合并」分三类）、`record_pool_report`、`merge_ticket` 的 `source` / `verified_by` / `verified_at` / `note` 四列、`archive_ticket` 与 `rename_project`、三档验收、`planned` 允许空条件。中心库 schema 仍是 16（`kit/task_center/db.py` 的 `SCHEMA_VERSION`），这一版不改 schema、不改任何闸门的判定逻辑。
+- **框架文档与钩子**：`docs` 8 份（`.md`）、`.githooks` 1 个，同样换成工作区当前 master 的那一份；`kit/docs/` 最终是 12 份，差出来的那份是 `protocol.md`（`KEEP_AS_IS` 里那七处之一）与套件自己独有的几份。
+- **技能（`skills/`）**：`generic` 119 个文件、`workspace` 43 个文件（脚本按文件计）。按目录数是 22 个通用技能、7 个工作区技能，比 0.5.2 那棵树多出 `ui-design` 与 `video-jerky-repair`（0.5.2 是 20 个通用技能）；数法：`git ls-tree -d --name-only v0.6.0:skills/generic | wc -l` 得 22、把 `generic` 换成 `workspace` 得 7，合计 29 个技能（22 通用 + 7 工作区）。`bootstrap-workspace` 仍只有套件这一份。
+- **设计史（`design/`）**：`design/README.md.origin`、`design/AGENTS.md.origin` 与 `design/PRD/` 下 16 份 PRD 同步到工作区当前版本（`PRD-000` 到 `PRD-015`）。`kit/PRD/` 不在同步范围：一共 8 份，其中六份是套件自己的，另外两份（`PRD-010` 项目进度面板、`PRD-016` Windows 常规浮窗）是面板的、归 AWK-122。
+- **面板（`panel/`）**：**这一版没有改它的内容。** 逐文件核过一遍（`git ls-files` 两边的跟踪清单对撞）：`panel/` 侧 40 个受管文件里，26 个与面板仓库逐字节相同，12 个不同，另有 2 个只有套件侧有（`app/run-tests.mjs` 与 `app/test/package.json`，套件自己的测试入口），三者相加 40。`README.md` 就是那 12 个不同里的一个：两份不同的说明（面板那份写的是「装到 `<工作区>/panel` 之后怎么跑」，面板仓库那份写的是那个仓库自己）。逐文件结论与比对方式记在 AWK-121 的提交证据里。面板仓库那份 `verify-session-targets.mjs` 写死了本机账号路径，套件这一份把用户目录算成 `%APPDATA%`，所以没有拿面板仓库覆盖它。
 
 ### 同步之后手工改回来的四件
 
@@ -24,13 +31,15 @@
 
 ### 用例数
 
-`tests/ 396` + `tools/ 739` = **1135 项**，末行「结果：全部通过」。比 0.5.2 的 1012 项多 123 项，全部来自同步进来的用例；新增的四件改动没有自带用例（工作区那份没有对应实现，也就没有对应断言）。
+**本机仓库（git 检出）里跑 `python tools/run_tests.py`**：`tests/ 396` + `tools/ 739` = **1135 项**，末行「结果：全部通过」。3 条 skip 都属「这个前提在这里不成立」那一类（`tasks/round.md` 的提交内容取不到两条、某份计划文件还没创建一条），skip 不算失败。比 0.5.2 那一节记的 1012 项多 123 项，全部来自同步进来的用例；新增的四件改动没有自带用例（工作区那份没有对应实现，也就没有对应断言）。
+
+**源码包是另一个口径，别把两边的数混成一句。** 源码包由 tag 点的树 `git archive` 生成，解到**非 git 目录**里跑同一条命令：**1130 项**（`tests/ 396` + `tools/ 734`）、**6 条 skip**，末行仍是「结果：全部通过」。总数比本机少 5 项，因为 `test_eol_check` 整个模块要求自己在一个 git 检出里（它读 `.gitattributes` 与实际行尾），在源码包里整块被 skip，那 6 项用例换成了 1 条 `ModuleSkipped`（739 − 6 + 1 = 734）。比本机多出来的 3 条 skip（`test_auto_merge` 与 `test_work_gate` 各一条要读暂存区，加 `test_eol_check` 那一模块）也都是同一个前提：目录不是 git 仓库。
 
 ### 发布件
 
 - `VERSION` 与 `plugin/draft/ghost.json` → `0.6.0`。
 - `dist/` 只留 `ai-workspace-kit-0.6.0.cindy`（`0.5.2` 的旧包用 `git rm` 删掉）与源码包 `ai-workspace-kit-0.6.0-source.zip`（由 tag 点的树 `git archive` 生成）。
-- 源码包在非 git 目录里跑测试会看到两条 skip（`test_work_gate` 与 `test_auto_merge` 各一条要读暂存区），skip 不算失败；`test_eol_check` 与 `test_project_config` 现在两种目录都成立。
+- 源码包在非 git 目录里跑的读数见上面「用例数」的第二节：1130 项、6 条 skip，末行仍是「结果：全部通过」；那 6 条的前提都是「目录不是 git 仓库」，`test_project_config` 在两种目录里都成立。
 - `v0.5.0` / `v0.5.1` / `v0.5.2` 三个已发的 tag 与 Release 都没动：不 `push -f`、不 `tag -f`。
 
 ## 0.5.2（2026-11-24）
