@@ -21,7 +21,11 @@
 2. 收尾包存在、UTF-8 可解码、七节齐全且顺序正确。
 3. 第 3 节非空，且不是裸「无」「待补充」这类占位（真为零要写「无，因为…」）。
 4. 第 7 节第一个非空行是 `已收尾` / `等一句答复` / `需重开一轮` 之一。
-5. `--check` 三条现场事实：`git status --porcelain` 为空；中心库里本项目没有在途
+5. 第 5 节「欠 AI 的下一步」每条都有落点：工单/PRD 号、文件路径，或反引号里的
+   一段命令或标识。一条都没有、或某条没落点，都非零并点名第 5 节。这一条早就写
+   在 `docs/closing.md` 里（「要有落点（文件、工单、命令），不写『继续优化』」），
+   以前只是散文要求，判不了；2026-11-22 起按「每条」判一次（AW-108）。
+6. `--check` 三条现场事实：`git status --porcelain` 为空；中心库里本项目没有在途
    工单（只读打开，照 `tools/session_roster.py` 的写法）；状态位与第 7 节结论一致。
    在途集合从 `tools/work_gate.py` **导入**，不在这里再写一份：`planned` 不算在途，
    `dispatching` / `running` / `awaiting_review` / `blocked` / `ready` / `rework` 算。
@@ -47,7 +51,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # 写一份四个状态的元组，钩子那边六个——同一件事两个答案，于是 AW-094 留在 `ready`
 # 时 close_gate --check 说可以收、收尾提交被连拒三次（PRD-014 R1 / docs/closing.md）。
 from work_gate import CLOSING_BLOCKING_STATES
-import center_config
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
@@ -288,22 +291,40 @@ def check(root, package=None):
     return problems + package_problems
 
 
-def default_db(root):
-    """中心库的默认落点：与 `work_gate` / `auto_merge` 同一处发现（`tools/center_config.py`）。
+def main_checkout(root):
+    """工作树里跑时，找出它对应的主检出根（中心库在主检出那边）。
 
-    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 这个检出（工作树里退回
-    主检出）的 `.data/task-center.sqlite3`。本闸门不单独看 `~/.agents`：它判的是
-    「这一份检出的活干完没」，落点默认就是自己那个库，与以前的行为一致。
-    什么都没有时返回第一个候选，让调用方报「库不存在」而不是静默跑别的库。
+    `git rev-parse --git-common-dir` 在主检出里回答 `<根>/.git`，在工作树里也回答
+    主检出那个 `.git`——工作树的 `.git` 只是一个文本指针。所以「它的父目录」就是
+    主检出，中心库在主检出的 `.data/` 下。找不到就返回 None，不猜。
     """
     try:
-        return center_config.resolve(repo=root, include_user_config=False).db
-    except center_config.DiscoveryError as error:
-        if error.config is not None:
-            # 指到了一个说得出名字的位置却没读到：这不是「还没建库」，是「指错了」，
-            # 当场报出来，不要拿本地候选蒙过去。
-            raise GateError(f"{error.code}：{error.message}。{error.fix}") from error
-        return Path(root) / ".data" / "task-center.sqlite3"
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    common = Path(result.stdout.strip())
+    return common.parent if common.name == ".git" else common
+
+
+def default_db(root):
+    """中心库的默认落点：先看这个检出，再看主检出；都没有就报第一个候选。"""
+    candidates = [Path(root) / ".data" / "task-center.sqlite3"]
+    main = main_checkout(root)
+    if main is not None:
+        candidates.append(main / ".data" / "task-center.sqlite3")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def read_only(path):
@@ -333,39 +354,74 @@ def in_flight_tickets(db, project):
         conn.close()
 
 
-def check_facts(root, db, project=DEFAULT_PROJECT):
-    """`--check` 的三条现场事实，各自独立成句。"""
-    root = Path(root)
-    problems = []
-
+def is_git_checkout(root):
+    """这个根是不是 git 检出。用 `rev-parse --git-dir` 问，不用 `status`。"""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain"],
+            ["git", "-C", str(root), "rev-parse", "--git-dir"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=120,
+            timeout=60,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        problems.append(f"{root}: 跑不了 `git status`（{exc}）；三条现场事实要在一个 git 检出上判")
-    else:
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip().splitlines()[:1]
-            problems.append(
-                f"{root}: 不是 git 检出或 git 报错（{detail[0] if detail else result.returncode}）；"
-                "三条现场事实要在一个 git 检出上判"
-            )
-        else:
-            dirty = [line for line in result.stdout.splitlines() if line.strip()]
-            if dirty:
-                sample = "、".join(line[3:].strip() or line.strip() for line in dirty[:5])
-                more = f" 等 {len(dirty)} 处" if len(dirty) > 5 else ""
-                problems.append(
-                    f"{root}: 工作区不干净（{sample}{more}）；成果在磁盘上、不在版本库里，先说清它归哪一次提交"
-                )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
-    rows = in_flight_tickets(db, project)
+
+def check_facts(root, db, project=DEFAULT_PROJECT, explicit_db=False):
+    """`--check` 的三条现场事实，各自独立成句。
+
+    git 面只在 git 检出上判：业务项目根（如 `台词演进研究`）不是仓库，文档可以直接
+    落盘，拿「跑不了 git status」当不通过等于把这些项目永远卡在收尾间外。非 git 根
+    打一行「git 面跳过」并继续判库与状态位，另外两条一字不变。
+    那一行直接打出来而不是攒进 problems：后面库那一步可能抛 GateError（本机没那个
+    项目的库），攒着的话这行话会随异常一起丢掉，而它正是「git 面为何没判」的唯一交代。
+    """
+    root = Path(root)
+    problems = []
+
+    checkout = is_git_checkout(root)
+    if not checkout:
+        print(f"git 面跳过（{root} 不是 git 检出）；工作区是否干净这一条不判，状态位照旧")
+    else:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            problems.append(f"{root}: 跑不了 `git status`（{exc}）；三条现场事实要在一个 git 检出上判")
+        else:
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip().splitlines()[:1]
+                problems.append(
+                    f"{root}: 不是 git 检出或 git 报错（{detail[0] if detail else result.returncode}）；"
+                    "三条现场事实要在一个 git 检出上判"
+                )
+            else:
+                dirty = [line for line in result.stdout.splitlines() if line.strip()]
+                if dirty:
+                    sample = "、".join(line[3:].strip() or line.strip() for line in dirty[:5])
+                    more = f" 等 {len(dirty)} 处" if len(dirty) > 5 else ""
+                    problems.append(
+                        f"{root}: 工作区不干净（{sample}{more}）；成果在磁盘上、不在版本库里，先说清它归哪一次提交"
+                    )
+
+    # 库面只在「不是 git 检出、也没显式给 --db」的项目根上跟着跳过：那种项目
+    # （如 `台词演进研究`）既没有版本库、也没有自己的 `.data/`，拿 `中心库不存在` 判死
+    # 等于把它们永远卡在收尾闸门外；要真判库就 `--db` 指到项目登记在那份库上。
+    # git 检出上缺库、或显式给的 --db 不存在，仍然当场报错，不静默跳过。
+    rows = []
+    if not checkout and not explicit_db and not Path(db).is_file():
+        print(f"库面跳过（{db} 不存在）；要判库就用 --db 指到项目登记在那份库上")
+    else:
+        rows = in_flight_tickets(db, project)
     if rows:
         listed = "、".join(f"{ticket_id}（{state}）" for ticket_id, state in rows)
         problems.append(
@@ -406,8 +462,7 @@ def main(argv=None):
     parser.add_argument(
         "--db",
         default=None,
-        help=f"中心库（默认按 tools/center_config.py 的顺序发现：工作区指针 → 本检出 "
-             f"{DEFAULT_DB}，工作树里退回主检出；与 work_gate / auto_merge 同一处）",
+        help=f"中心库（默认本检出的 {DEFAULT_DB}，工作树里退回主检出的 .data/）",
     )
     parser.add_argument("--project", default=DEFAULT_PROJECT, help=f"项目标识（默认 {DEFAULT_PROJECT}）")
     parser.add_argument("--check", action="store_true", help="再加三条现场事实：工作区、在途工单、状态与结论")
@@ -419,7 +474,7 @@ def main(argv=None):
     try:
         problems = check(root, args.package)
         if args.check:
-            problems.extend(check_facts(root, db, args.project))
+            problems.extend(check_facts(root, db, args.project, explicit_db=args.db is not None))
     except GateError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2

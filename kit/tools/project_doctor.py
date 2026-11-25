@@ -154,7 +154,7 @@ def main(argv):
         except (AttributeError, ValueError):
             pass
     parser = argparse.ArgumentParser(description="安装面体检：钩子、工作树忽略、入口文档")
-    parser.add_argument("--db", default=None, help="中心库路径；不给就按 TASK_CENTER_DB / 工作区指针 / ~/.agents 找")
+    parser.add_argument("--db", default=None, help="中心库路径；不给就按 TASK_CENTER_DB / center.json 找")
     parser.add_argument("--root", default=None, help="只查这一个目录，不需要中心库")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv[1:])
@@ -168,16 +168,9 @@ def main(argv):
         report["project_id"] = "-"
         reports.append(report)
     else:
-        try:
-            db_path = work_gate.discover_db(args.db).db
-        except work_gate.center_config.DiscoveryError as error:
-            print(f"中心库没找到：{error.code}", file=sys.stderr)
-            print(f"  {error.message}", file=sys.stderr)
-            print(f"  {work_gate.center_config.ORDER_HINT}", file=sys.stderr)
-            return 1
-        if not Path(db_path).is_file():
-            print(f"中心库没找到：DB_NOT_FOUND（{db_path}）", file=sys.stderr)
-            print(f"  {work_gate.center_config.ORDER_HINT}", file=sys.stderr)
+        db_path = work_gate.find_db(args.db)
+        if db_path is None or not Path(db_path).is_file():
+            print("中心库没找到：给 --db，或检查 ~/.agents/center.json 的 db 字段", file=sys.stderr)
             return 1
         try:
             projects = registered_roots(db_path)
@@ -191,8 +184,8 @@ def main(argv):
                           "hooks_path": None, "hooks_ok": None, "worktrees_ignored": None,
                           "docs_found": False, "docs": [], "notes": [],
                           "problems": [{"item": "root", "detail": "目录不存在",
-                                        "fix": f"这个项目登记的根已经没了：unregister_project 撤销再重新登记，"
-                                               f"或把目录恢复回 {root}"}]}
+                                        "fix": f"这个项目登记的根已经没了：找到目录搬到了哪里，用 relocate_project 把登记迁过去"
+                                               f"（有工单也能迁）；或把目录恢复回 {root}"}]}
             else:
                 report = inspect(root)
                 report["project_id"] = project_id

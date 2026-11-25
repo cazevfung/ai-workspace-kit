@@ -101,7 +101,7 @@ def build_v3(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
             "INSERT INTO tickets VALUES ('t1','p1','整理检查清单','一份清单','PRD.md',?,'[]',1,'running','a1',?)",
             (prd_sha, stamp))
         conn.execute(
-            # t2 要给一条可判定条件：从 AWK-110 起 `claim_ticket` 读到空条件就拒（它是池子里的念头，
+            # t2 要给一条可判定条件：从 AW-109 起 `claim_ticket` 读到空条件就拒（它是池子里的念头，
             # 不是可以开工的活）。这里是「升级后新字段可写」的夹具，不是「空条件能不能领」的用例。
             "INSERT INTO tickets VALUES ('t2','p1','另起一张','另一份清单','PRD.md',?,"
             "'[{\"id\":\"C1\",\"text\":\"含 `python tools/run_tests.py` 且退出码 0\"}]',1,'ready',NULL,?)",
@@ -605,25 +605,6 @@ def build_v13(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     return path
 
 
-def build_v14(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
-    """写一个内容完整的 v14 库：正式库升 schema 15 之前的形状。
-
-    在 v13 形状上只补 13 -> 14 那两列（`tickets.requester_session_id`、`notices.message_id`），
-    `tickets.owner_session_id` 仍缺——那是 15 的唯一任务。有了这一级，“声称 14 却已经有
-    owner” 这种旧版本头配新形状才有一条能跑的用例。
-    """
-    path = build_v13(path, project_root, stamp)
-    conn = sqlite3.connect(path)
-    try:
-        conn.execute("ALTER TABLE tickets ADD COLUMN requester_session_id TEXT")
-        conn.execute("ALTER TABLE notices ADD COLUMN message_id TEXT")
-        conn.execute("PRAGMA user_version=14")
-        conn.commit()
-    finally:
-        conn.close()
-    return path
-
-
 def build_v15(path, project_root, stamp="2026-01-01T00:00:00+00:00"):
     """写一个内容完整的 v15 库：正式库升 schema 16 之前的形状。
 
@@ -745,6 +726,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(self.db))
+
         self.assertIn("coordinator_session_id", columns(self.db, "attempts"))
         self.assertIn("merges", table_names(self.db))
         self.assertEqual(before, counts(self.db))
@@ -773,6 +755,7 @@ class MigrateTest(unittest.TestCase):
         result = Center(db).execute("migrate", {})
         self.assertTrue(result["ok"], result)
         self.assertEqual(SCHEMA_VERSION, result["result"]["schema_version"])
+
         self.assertFalse(result["result"]["migrated"])
         self.assertIn("已是最新", result["result"]["message"])
         self.assertEqual(before, counts(db))
@@ -789,6 +772,7 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(second["result"]["migrated"])
         self.assertFalse(second["result"]["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(self.db))
+
         self.assertEqual(before, counts(self.db))
 
     # --- 5 -> 6：问答两张表与 blocked 索引谓词 ------------------------------
@@ -803,6 +787,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertLessEqual({"questions", "answers"}, table_names(legacy))
         index = index_sql(legacy, "active_session")
         self.assertIn("'blocked'", index)
@@ -846,6 +831,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("target_session_id", columns(legacy, "notices"))
         self.assertIn("wake_kind", columns(legacy, "notices"))
         self.assertEqual(before, counts(legacy))
@@ -902,6 +888,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("head_sha", columns(legacy, "submissions"))
         self.assertIn("reviewed_sha", columns(legacy, "merges"))
         # 旧数据一行不丢：两张提交、一条合并记录、一条回执与事件全在。
@@ -958,6 +945,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("criteria_version", columns(legacy, "tickets"))
         self.assertIn("criteria_version", columns(legacy, "attempts"))
         self.assertIn("base_sha", columns(legacy, "submissions"))
@@ -996,6 +984,7 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(again["result"]["migrated"])
         self.assertIn("已是最新", again["result"]["message"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertEqual(before, counts(legacy, TABLES + ("merges",)))
 
     def test_v9_header_with_new_columns_is_rejected_untouched(self):
@@ -1050,6 +1039,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("coordinator_workdir", columns(legacy, "attempts"))
         self.assertIn("notices", table_names(legacy))
         self.assertIn("status='sent'", index_sql(legacy, "one_sent_notice"))
@@ -1148,6 +1138,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         # 新增的两样：依赖边表与发号盘。
         self.assertIn("ticket_links", table_names(legacy))
         self.assertIn("next_number", columns(legacy, "projects"))
@@ -1198,6 +1189,7 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(again["result"]["migrated"])
         self.assertIn("已是最新", again["result"]["message"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertEqual(before, counts(legacy, TABLES + ("merges", "ticket_links")))
 
     def test_v10_header_with_the_new_table_or_a_nullable_fingerprint_is_rejected(self):
@@ -1238,6 +1230,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         # 新增的两样：车次表与两个指针列。
         self.assertIn("batches", table_names(legacy))
         self.assertIn("batch_id", columns(legacy, "tickets"))
@@ -1294,6 +1287,7 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(again["result"]["migrated"])
         self.assertIn("已是最新", again["result"]["message"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertEqual(before, counts(legacy, V11_TABLES + ("batches",)))
 
     def test_v11_header_with_batch_structures_is_rejected_untouched(self):
@@ -1329,6 +1323,7 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, receipt["schema_version"])
         self.assertTrue(receipt["migrated"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertIn("conflict_preview", columns(legacy, "submissions"))
         # 行数逐表不变：这一列不给任何一行写值。
         self.assertEqual(before, counts(legacy, V12_TABLES))
@@ -1350,6 +1345,7 @@ class MigrateTest(unittest.TestCase):
         self.assertFalse(again["result"]["migrated"])
         self.assertIn("已是最新", again["result"]["message"])
         self.assertEqual(SCHEMA_VERSION, user_version(legacy))
+
         self.assertEqual(before, counts(legacy, V12_TABLES))
 
     def test_v12_header_with_conflict_preview_is_rejected_untouched(self):
@@ -1367,7 +1363,6 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
         self.assertEqual(12, user_version(legacy))
         self.assertEqual(before, digest(legacy))
-
 
     def test_upgrade_from_v13_adds_owner_session_id_and_backfills_it(self):
         """C5：14 → 15 只多一列（owner）；13 → 14 是 AW-106 先落地的 `requester_session_id` 与 `notices.message_id`。存量单的 owner 填那一代的协调会话，没有尝试的单留 NULL。"""
@@ -1423,22 +1418,6 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual(13, user_version(legacy))
         self.assertEqual(before, digest(legacy))
 
-
-    def test_v14_header_with_owner_session_id_is_rejected_untouched(self):
-        """形状守卫：声称 14 却已经有 15 的那一列，一律拒且一个字节不改。"""
-        legacy = build_v14(self.root / "center-v14-shape.sqlite3", self.project)
-        conn = sqlite3.connect(legacy)
-        try:
-            conn.execute("ALTER TABLE tickets ADD COLUMN owner_session_id TEXT")
-            conn.commit()
-        finally:
-            conn.close()
-        before = digest(legacy)
-        result = Center(legacy).execute("migrate", {})
-        self.assertFalse(result["ok"], result)
-        self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
-        self.assertEqual(14, user_version(legacy))
-        self.assertEqual(before, digest(legacy))
 
     def test_upgrade_from_v15_adds_merge_backfill_columns_without_backfilling(self):
         """C6：15 → 16 只多四列；存量合并行的 source / verified_by / verified_at / note 留 NULL。"""
@@ -1517,7 +1496,6 @@ class MigrateTest(unittest.TestCase):
         self.assertEqual("SCHEMA_MISMATCH", result["error"]["code"])
         self.assertEqual(15, user_version(legacy))
         self.assertEqual(before, digest(legacy))
-
 
 
 if __name__ == "__main__":

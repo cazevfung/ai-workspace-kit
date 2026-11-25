@@ -68,7 +68,7 @@ class ModelReportTest(unittest.TestCase):
         self.counter += 1
         self.center.execute(
             "insert into tickets values (?,?,?,?,?,?,?,?,?,NULL,?)",
-            (ticket_id, "demo", "样例", "交付物", "docs/guide.md", "sha", "[]", 1, "done",
+            (ticket_id, "demo", "样例", "交付物", "PRD/PRD-003.md", "sha", "[]", 1, "done",
              "2026-11-01T00:00:00"),
         )
         return ticket_id
@@ -78,7 +78,7 @@ class ModelReportTest(unittest.TestCase):
         attempt_id = attempt_id or f"att-{self.counter}"
         self.center.execute(
             "insert into attempts values (?,?,?,?,?,?,?,?,?)",
-            (attempt_id, ticket_id, 1, "docs/guide.md", "sha", "accepted", session_id,
+            (attempt_id, ticket_id, 1, "PRD/PRD-003.md", "sha", "accepted", session_id,
              f"2026-11-01T00:{minute:02d}:00", None),
         )
         return attempt_id

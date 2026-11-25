@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .artifacts import fingerprint, project_root
+from .artifacts import ARTIFACT_KEYS, artifact_drift, check_artifact, fingerprint, project_root
 from .db import Problem, backup_database, connection, initialize, migrate_database, now, packed, require
 from .sessions_context import message_id, sessions_for
 
@@ -24,6 +24,9 @@ FIELDS = {
     "review_result": {"project_id", "ticket_id", "attempt_id", "submission_id", "reviewer_session_id", "verdict", "checks", "reason"},
     "register_project": {"project_id", "name", "root"},
     "unregister_project": {"project_id"},
+    # 换根不改身份（AW-154）：只动 `projects.root`，`project_id` / `name` / `next_number`
+    # 与名下工单一律不变。有工单的项目以前改不了根（`unregister_project` 会拒），这条补上。
+    "relocate_project": {"project_id", "new_root"},
     # 显示名可改，身份不动（AW-115）：`projects.name` 是给人看的名字，写错了得能改；
     # `changed_by` 是可选的执行会话标识（自报），只进事件与回执，不参与任何判定。
     "rename_project": {"project_id", "name", "changed_by"},
@@ -37,7 +40,7 @@ FIELDS = {
                      "coordinator_workdir", "allow_parallel", "parallel_reason", "parallel_scope"},
     "bind_session": {"project_id", "ticket_id", "attempt_id", "session_id", "project_root"},
     "submit_result": {"project_id", "ticket_id", "attempt_id", "session_id", "summary", "artifacts", "evidence", "risks",
-                      "head_sha", "base_sha"},
+                      "head_sha", "base_sha", "repo_kind"},
     "recover_ticket": {"project_id", "ticket_id", "attempt_id", "expected_revision", "reason"},
     "revise_ticket": {"project_id", "ticket_id", "expected_revision", "reason", "prd_path", "criteria", "deliverable", "reopen",
                       "restart", "blocked_by", "related", "rides_with"},
@@ -221,6 +224,22 @@ def criteria(data, state=None):
     for item in value:
         judgeable(item["id"], item["text"])
     return value
+
+
+def cancelled_message(ticket, action):
+    """取消之后为什么不能接着做：一句话说清事实、后果与唯一出路（AW-159）。
+
+    为什么值得单独写一句而不是复用「状态不对」：`cancel_ticket` 把 `current_attempt`
+    置空、`revision` 加一，于是取消后的调用最先撞上的往往是 `STALE_ATTEMPT` /
+    `STALE_REVISION`——那两句话的意思是「重读一遍再来」，而这条路在所有状态下都走不通。
+    2026-11-24 HSE-005 现场就是这么走到「手改库」那一步的：14:04:57 取消，14:28:38
+    库里凭空多出一条 attempt，`events` 里没有对应的 claim。所以第一句要说的是
+    「这张单已经取消」，它是唯一一条让重试失去意义的事实。
+    """
+    return (f"{ticket['id']} 已经取消（state=cancelled, revision={ticket['revision']}）："
+            f"{action} 不接受，一行都没有写。取消是单向门——之后不再产生新尝试、不推高 "
+            "revision、不收执行结果、也不能被恢复或重开。要把这件事接着做，新建一张单"
+            "（create_ticket）；取消原因在 events 里最后一条成功的 cancel_ticket 的 result.reason。")
 
 
 def string_list(data, key, minimum=0, maximum=100):
@@ -468,9 +487,9 @@ def latest_head_sha(conn, ticket_id):
     return None if row is None else row["head_sha"]
 
 
-def ticket_dict(row):
+def ticket_dict(row, warnings=None):
     value = dict(row)
-    value["criteria"] = json.loads(value["criteria"])
+    value["criteria"] = json_column(value["criteria"], "criteria", f"ticket {value.get('id')}", warnings, as_list=True)
     return value
 
 
@@ -543,8 +562,8 @@ class Center:
         except UnicodeEncodeError:
             return {"ok": False, "error": {"code": "INVALID_INPUT",
                                            "message": "Text cannot be encoded as UTF-8; write the JSON input as UTF-8 (ASCII-escaped JSON is safest)"}}
-        except (ValueError, TypeError, OSError, RecursionError):
-            return {"ok": False, "error": {"code": "INVALID_INPUT", "message": "Invalid input or inaccessible local path"}}
+        except (ValueError, TypeError, OSError, RecursionError) as exc:
+            return {"ok": False, "error": {"code": "INVALID_INPUT", "message": unreadable_message(operation, exc)}}
 
     def _record_rejection(self, operation, payload, request_id, code):
         """R3：被拒的写操作留一行事件，别的什么都不写。
@@ -768,19 +787,17 @@ class Center:
                     + "；环上的单都无法开工，所以要么改成单向，要么拆开")
 
     def _get_ticket(self, conn, data):
-        result = ticket_dict(self._ticket(conn, data))
+        warnings: list = []
+        result = ticket_dict(self._ticket(conn, data), warnings)
         result["attempts"] = [dict(row) for row in conn.execute("SELECT * FROM attempts WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
         submissions = conn.execute("SELECT s.* FROM submissions s JOIN attempts a ON a.id=s.attempt_id WHERE a.ticket_id=? ORDER BY s.rowid", (result["id"],))
         result["submissions"] = [dict(row) for row in submissions]
         for item in result["submissions"]:
-            for key in ("artifacts", "evidence", "risks"):
-                item[key] = json.loads(item[key])
-            # 预演原样回给验收会话：NULL 仍然是 None（「没跑过／算不出来」），
-            # 不是 `{"conflicts": []}`（「跑过且干净」）——两者在验收眼里是两件事（PRD-015 R2）。
-            item["conflict_preview"] = (None if item["conflict_preview"] is None
-                                        else json.loads(item["conflict_preview"]))
+            # 预演原样回给验收会话：NULL 仍然是 None（「没跑过／算不出来」），不是
+            # `{"conflicts": []}`（「跑过且干净」）——两者在验收眼里是两件事（PRD-015 R2）。
+            decode_submission(item, warnings)
         reviews = conn.execute("SELECT r.* FROM reviews r JOIN submissions s ON s.id=r.submission_id JOIN attempts a ON a.id=s.attempt_id WHERE a.ticket_id=? ORDER BY r.rowid", (result["id"],))
-        result["reviews"] = [dict(row, **review_snapshot(row["checks"], row["verdict"])) for row in reviews]
+        result["reviews"] = [dict(row, **review_snapshot(row["checks"], row["verdict"], warnings, f"review {row['id']}")) for row in reviews]
         latest = result["reviews"][-1] if result["reviews"] else None
         result["review_summary"], result["unverified_checks"] = (latest["summary"], latest["checks_summary"]["unverified"]) if latest else (None, 0)
         result["merges"] = [dict(row) for row in conn.execute(
@@ -789,7 +806,7 @@ class Center:
         result["questions"] = [dict(row) for row in conn.execute(
             "SELECT * FROM questions WHERE ticket_id=? ORDER BY rowid", (result["id"],))]
         for item in result["questions"]:
-            item["options"] = json.loads(item["options"])
+            item["options"] = json_column(item["options"], "options", f"question {item['id']}", warnings, as_list=True)
         result["answers"] = [dict(row) for row in conn.execute(
             "SELECT a.* FROM answers a JOIN questions q ON q.id=a.question_id WHERE q.ticket_id=? ORDER BY a.rowid",
             (result["id"],))]
@@ -813,6 +830,8 @@ class Center:
                        " LEFT JOIN tickets t ON t.id=l.from_ticket"
                        " WHERE l.to_ticket=? ORDER BY l.kind,l.from_ticket", (result["id"],))],
         }
+        if warnings:
+            result["decode_warnings"] = warnings
         return result
 
     def _list_tickets(self, conn, data):
@@ -908,6 +927,11 @@ class Center:
 
     def _claim_ticket(self, conn, data):
         ticket = self._ticket(conn, data)
+        # 取消先判，排在 revision 之前（AW-159）：读到旧 revision 时报的 STALE_REVISION 说的是
+        # 「重读一次再来」，可在取消之后重读多少次都过不去。先报那个让重试失去意义的事实。
+        # 闸门写在这里而不是抽成一个函数，是因为要读的人在第一眼就问「这张单能不能领」，
+        # 不该先跳一次定义；三处的判据同一句、断语同一句（`cancelled_message`）。
+        require(ticket["state"] != "cancelled", "TICKET_CANCELLED", cancelled_message(ticket, "claim_ticket"))
         self._expected_revision(ticket, data)
         require(ticket["state"] in CLAIMABLE_STATES, "INVALID_STATE",
                 "Ticket is not ready to be claimed (planned, ready and rework can be claimed)")
@@ -1047,26 +1071,48 @@ class Center:
                 "state": "running", "host_identity_verified": False}
 
     def _submit_result(self, conn, data):
+        # 取消闸门排在 `_active` 之前（AW-159）：取消会把 `current_attempt` 置空，所以
+        # `_active` 在这里报的是 STALE_ATTEMPT——「这不是当前那次尝试」，听起来像换一个
+        # attempt_id 就能提交。工单已经取消时先说取消。
+        ticket = self._ticket(conn, data)
+        require(ticket["state"] != "cancelled", "TICKET_CANCELLED", cancelled_message(ticket, "submit_result"))
         ticket, attempt = self._active(conn, data, check_session=True)
         require(ticket["state"] == "running", "INVALID_STATE", "Ticket is not accepting execution results")
         project = self._unchanged_prd(conn, ticket, attempt)
         # 两棵树都必填：`head_sha` 说「交的是哪一棵」，`base_sha` 说「它从哪分出来的」。
-        # 五个形状字段一次校完、一条说全（AWK-118）：先校它们再驳文件，缺字段时不至于因为
-        # 另一个原因报出 FILE_NOT_FOUND。三个数组的上下限（1-20 / 1-100 / 0-100）与每条
-        # 「非空且 ≤4000 字符」只在 `submit_shape` 里写了一遍；这里只拿结果，不重复判。
-        # 行数保持不变：`PRD/` 里有指向本文件的 `:<行号>` 引用。
-        head_sha, base_sha, paths, evidence, risks = submit_shape(data)
+        # 但业务项目根不是 git 仓库时没有可填的树（AW-151）：执行会话显式声明
+        # `repo_kind="non_git"`，两棵树留 NULL——不拿空树值（da39a3ee…）之类的占位 sha
+        # 顶替，那会把「没有树」写成「有一棵树」。非 git 项目没有提交可合，验收后由
+        # 协调会话 `archive_ticket` 归位，`tools/unmerged_scan.py` 也按项目根是不是
+        # git 仓库把它归进「仓库无改动」，不进「真待合并」。
+        repo_kind = data.get("repo_kind", "git")
+        require(repo_kind in ("git", "non_git"), "INVALID_INPUT",
+                'repo_kind must be "git" or "non_git"')
+        if repo_kind == "non_git":
+            require("head_sha" not in data and "base_sha" not in data, "INVALID_INPUT",
+                    "repo_kind=non_git submissions must omit head_sha and base_sha")
+            head_sha = base_sha = None
+        else:
+            # 先校它们再碰文件：缺字段时不至于因为另一个原因报出 FILE_NOT_FOUND。
+            head_sha = sha_text(data, "head_sha")
+            base_sha = sha_text(data, "base_sha")
+        paths = string_list(data, "artifacts", minimum=1, maximum=20)
         artifacts = [fingerprint(project["root"], path) for path in paths]
+        # 第一道键集合校验（AW-159）：提交侧自己生成了什么，就在这里按同一把尺查什么。
+        # 它正常情况下永远不会红（`fingerprint()` 只写三个键），价值在「将来有人给它加
+        # 一个键」那一刻当场报出字段名，而不是等到验收时才表现成一句无解的 ARTIFACT_CHANGED。
+        for index, artifact in enumerate(artifacts):
+            check_artifact(artifact, f"submit_result 生成的 artifacts[{index}]")
         require(len({str(Path(a["path"])).casefold() for a in artifacts}) == len(artifacts),
                 "INVALID_INPUT", "Duplicate artifact paths")
         summary = text(data, "summary")
-        # 形状不对时 `submit_shape` 已经抛了；到这里三个数组都是干净的字符串数组。
+        evidence, risks = string_list(data, "evidence", minimum=1), string_list(data, "risks")
         # 这次尝试是按哪一版判据派发的：低于工单当前的版本，就说明它在开工后被改过，
         # 验收得按新条件重看一遍。这一句不回写任何行（PRD-013 R6）。
         criteria_changed = attempt["criteria_version"] < ticket["criteria_version"]
         # 冲突预演在提交写入之前算：它是一份现场事实，不是闸门——算不出来就存 NULL，
-        # 会撞也照收（PRD-015 R2）。
-        preview = conflict_preview(project["root"], head_sha)
+        # 会撞也照收（PRD-015 R2）。没有树（non_git）就没有可预演的提交。
+        preview = conflict_preview(project["root"], head_sha) if head_sha else None
         sid = str(uuid4())
         conn.execute("INSERT INTO submissions(id,attempt_id,summary,artifacts,evidence,risks,created_at,head_sha,"
                      "base_sha,conflict_preview) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -1076,6 +1122,7 @@ class Center:
         conn.execute("UPDATE tickets SET state='awaiting_review' WHERE id=?", (ticket["id"],))
         return {"submission_id": sid, "attempt_id": attempt["id"], "state": "awaiting_review",
                 "artifacts": artifacts, "head_sha": head_sha, "base_sha": base_sha,
+                "repo_kind": repo_kind,
                 "conflict_preview": preview,
                 "criteria_changed": criteria_changed,
                 "criteria_version": {"attempt": attempt["criteria_version"],
@@ -1397,6 +1444,8 @@ class Center:
 
     def _recover_ticket(self, conn, data):
         ticket = self._ticket(conn, data)
+        # 与 claim 同一道闸、同一个判序（AW-159）：取消后的单不能被恢复，先报取消再报版本。
+        require(ticket["state"] != "cancelled", "TICKET_CANCELLED", cancelled_message(ticket, "recover_ticket"))
         self._expected_revision(ticket, data)
         reason = text(data, "reason")
         require(ticket["state"] in ("blocked", "dispatching", "running", "awaiting_review"), "INVALID_STATE",
@@ -1553,13 +1602,20 @@ class Center:
                 "Accept cannot carry a failed check; a check nobody could verify is unverified, not failed")
         require(verdict != "reject" or tally["fail"], "INVALID_INPUT",
                 "Reject requires at least one failed (fail) check; unverified is not a failure")
-        for saved in json.loads(submission["artifacts"]):
+        for index, saved in enumerate(json.loads(submission["artifacts"])):
+            # 第二道键集合校验（AW-159）：先确认这一行的形状，再去比指纹。顺序反过来的话，
+            # 多一个键只会走到 `ARTIFACT_CHANGED`——那句话说的是「成果变了」，而事实是
+            # 「这一行的形状不是提交时那个形状」，两件事要的处置完全不同。
+            check_artifact(saved, f"submission {submission['id']} 的 artifacts[{index}]")
             try:
                 current = fingerprint(project["root"], saved["path"])
             except Problem as exc:
                 require(False, "ARTIFACT_CHANGED",
-                        f"Submitted artifact is no longer verifiable ({exc.code}); recover and resubmit before reviewing")
-            require(current == saved, "ARTIFACT_CHANGED", "Submitted artifact changed; recover and resubmit before reviewing")
+                        f"提交的成果文件 {saved['path']} 现在核对不了（{exc.code}：{exc}）；"
+                        "恢复后重新提交再验收")
+            require(current == saved, "ARTIFACT_CHANGED",
+                    f"提交的成果文件 {saved['path']} 与提交时不一致：{artifact_drift(saved, current)}；"
+                    "恢复后重新提交，按新指纹再验收")
         review_id, state = str(uuid4()), "done" if verdict == "accept" else "rework"
         conn.execute("INSERT INTO reviews VALUES (?,?,?,?,?,?,?)",
                      (review_id, submission["id"], reviewer, verdict, packed(checks), reason, now()))
@@ -1724,8 +1780,38 @@ class Center:
         rows = conn.execute("SELECT * FROM events WHERE ticket_id=? ORDER BY id LIMIT ? OFFSET ?", (ticket["id"], limit, offset))
         items = [dict(row) for row in rows]
         for row in items:
-            row["detail"] = json.loads(row["detail"])
+            row["detail"] = json_column(row["detail"], "detail", f"event {row['id']}")
         return {"items": items, "limit": limit, "offset": offset}
+
+    def _relocate_project(self, conn, data):
+        """换根不改身份：`project_id`、发号盘与名下工单一律不动，只改 `projects.root`（AW-154）。
+
+        改路径以前只能「`unregister_project` → `register_project`」，而前者对名下有工单的
+        项目直接报 `PROJECT_HAS_TICKETS`——两条叠起来等于「有工单的项目永远改不了根」。
+        2026-11-24 要把 heartopia-script-evolution 从 C: 搬到 D:，走的就是这条路。
+
+        非法输入一律在写入之前拒，被拒时一行不写：空值与相对路径由 `project_root()` 判
+        INVALID_INPUT，新根不存在判 FILE_NOT_FOUND，不存在的 project_id 由 `_project` 判
+        NOT_FOUND，新根已经被另一个项目占着报 CONFLICT（root 是身份，一个目录只能有一个项目）。
+        `projects.root` 带唯一约束，所以这一条在库面上也不会被绕过。
+        新旧根相同不算迁移：回执 `relocated: false`，一行不写。
+
+        为什么放在类末尾：文件末尾那段注释已经说过——在文件中间插函数会把 `PRD/` 与
+        `AGENTS.md` 里 `core.py:<行号>` 的引用整体推走，ref_gate 会红。
+        """
+        project = self._project(conn, text(data, "project_id", 200))
+        root = project_root(data.get("new_root"))
+        owner = conn.execute("SELECT * FROM projects WHERE root=?", (root,)).fetchone()
+        if owner is not None and owner["id"] != project["id"]:
+            raise Problem("CONFLICT", f"Root {root} is already registered as project {owner['id']}; "
+                                      "root is identity, so one directory cannot host two projects "
+                                      "and neither record is changed")
+        if root == project["root"]:
+            return {"project_id": project["id"], "old_root": project["root"], "root": root,
+                    "relocated": False}
+        conn.execute("UPDATE projects SET root=? WHERE id=?", (root, project["id"]))
+        return {"project_id": project["id"], "old_root": project["root"], "root": root,
+                "relocated": True}
 
 
 # 验收记录的三档（AW-132）。放在文件末尾是有原因的：`PRD/` 与 `AGENTS.md` 里有
@@ -1784,25 +1870,28 @@ def review_checks(criteria_items, checks):
     return normalized
 
 
-def stored_checks(raw_checks):
+def stored_checks(raw_checks, warnings=None, where="review"):
     """读取时的兼容层：schema 16 以前的 review 只存了 `passed`，读出来补一个 status。
 
     这里不校验、不拒绝：历史行的形状是既成事实，`get_ticket` 的职责是把它读得出来，
-    而不是让一条旧行把整张单的验收历史变成异常。真正的形状闸门在写入侧
-    `review_checks`。
+    而不是让一条旧行把整张单的验收历史变成异常。真正的形状闸门在写入侧 `review_checks`。
+    解不开时走 `json_column` 同一条路（AW-166）：原文留住，where / field / error 进 `decode_warnings`。
     """
-    checks = json.loads(raw_checks)
+    checks = json_column(raw_checks, "checks", where, warnings, as_list=True)
     for item in checks:
+        if not isinstance(item, dict):
+            continue
         if "status" not in item:
             item["status"] = LEGACY_CHECK_STATUS.get(item.get("passed"), "unverified")
     return checks
 
 
 def checks_summary(checks):
-    """按三档数一遍：`total` / `pass` / `unverified` / `fail`。"""
+    """按三档数一遍：`total` / `pass` / `unverified` / `fail`；读不出状态的那条按未验数。"""
     tally = {"total": len(checks), "pass": 0, "unverified": 0, "fail": 0}
     for item in checks:
-        tally[item["status"]] += 1
+        status = item.get("status") if isinstance(item, dict) else None
+        tally[status if status in CHECK_STATUSES else "unverified"] += 1
     return tally
 
 
@@ -1818,67 +1907,68 @@ def review_summary_line(verdict, tally):
     return f"{verdict}：" + ("、".join(parts) if parts else "0 条")
 
 
-def review_snapshot(raw_checks, verdict):
+def review_snapshot(raw_checks, verdict, warnings=None, where="review"):
     """一条 review 的对外视图：checks 反序列化 + 三档计数 + 一行摘要。"""
-    checks = stored_checks(raw_checks)
+    checks = stored_checks(raw_checks, warnings, where)
     tally = checks_summary(checks)
     return {"checks": checks, "checks_summary": tally, "summary": review_summary_line(verdict, tally)}
 
-# `submit_result` 的五个形状字段（AWK-118）：以前逐项 `require`，形状全错的人要试五次才通——
-# 2026-11-24 03:38 的演练实测连撞五次 `INVALID_INPUT`（head_sha → base_sha → artifacts →
-# evidence → risks），每次只报第一条。规则一条没松，改成一次校完、一条说全：`message` 里
-# 既有全部期望形状，也有这一次哪几项不合格。上下限与每条长度上限只在这里写一遍。
-# 放在文件末尾与 `review_checks` 同一个理由：`PRD/` 里有 `task_center/core.py:<行号>` 的引用，
-# ref_gate 核「那一行非空」，插在中间会把它们整体推走（PRD-014 的第 454 行就是这么红的）。
-SUBMIT_ARRAYS = (("artifacts", 1, 20), ("evidence", 1, 100), ("risks", 0, 100))
-SUBMIT_ITEM_MAX = 4000
-SUBMIT_SHAPE_HINT = (
-    "submit_result shape: head_sha / base_sha are 40 hexadecimal characters (a first commit "
-    "with no parent, where `git merge-base HEAD master` fails, takes base_sha = git rev-parse HEAD "
-    "= head_sha); artifacts / evidence / risks are arrays of strings — artifacts 1-20, "
-    "evidence 1-100, risks 0-100 (each string nonempty and at most " + str(SUBMIT_ITEM_MAX) +
-    " characters; not a JSON string, not objects)"
-)
 
+def json_column(raw, field, where, warnings=None, as_list=False):
+    """把库里一列 JSON 读出来；读不出来就留住原文，并记下「哪一列、哪张单、什么异常」。
 
-def _sha_shape_problem(data, key):
-    """这个 sha 字段哪里不对；合格时返回 None。只校形状：本工具不跑 git。"""
-    value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        return f"{key} is missing (want 40 hexadecimal characters)"
-    if len(value) != 40 or any(c not in "0123456789abcdefABCDEF" for c in value):
-        return f"{key} is not 40 hexadecimal characters"
-    return None
+    AW-163 的现场：`HSE-007` 的一条提交把 `evidence` 存成了一句纯文本（早期版本没有形状
+    闸门），`json.loads` 抛的 `JSONDecodeError` 是 `ValueError`，被 `execute()` 的兜底折成
+    一句「Invalid input or inaccessible local path」——**这一张单从此整张读不出来**，
+    而 `work_gate --list` 又按「一张单读不出来就整表不可读」判，于是整份在途清单一起瞎。
+    历史行不会因为代码变好而自愈，所以这里定的是「读得出来多少给多少」：解不开就把原文
+    留住，字段名、位置、异常类型与报文写进 `warnings`，谁能修就照着它去修。
 
-
-def _array_shape_problem(data, key, minimum, maximum):
-    """这个数组字段哪里不对；合格时返回 None。只报第一处错：同一条 message 里还有别项。"""
-    value = data.get(key)
-    if not isinstance(value, list):
-        return f"{key} is {type(value).__name__}, not an array of strings"
-    if not minimum <= len(value) <= maximum:
-        return f"{key} has {len(value)} entries, outside {minimum}-{maximum}"
-    for index, item in enumerate(value):
-        if not isinstance(item, str):
-            return f"{key}[{index}] is {type(item).__name__}, not a string"
-        if not item.strip() or len(item) > SUBMIT_ITEM_MAX:
-            return f"{key}[{index}] is not a nonempty string of at most {SUBMIT_ITEM_MAX} characters"
-    return None
-
-
-def submit_shape(data):
-    """一次取齐 `submit_result` 的五个形状字段，错了就一条 `INVALID_INPUT` 说全。
-
-    为什么不在逐项 require 上改文案：第一条不合格就把后面全遮住，形状错的人得试五次。
-    所以先把每一项「哪里不对」收进列表，最后只抛一次；该拒的一条没少拒（上下限、非空、
-    40 位十六进制都还在），变的只是把话说全这一次。
+    `as_list=True` 的列（`artifacts` / `evidence` / `risks` / `criteria` / `options` / `checks`）
+    兜成一个只装原文的列表：读的人看到的是「这一列存着这段字」，不是一句空数组——空数组
+    会把「这行是坏的」说成「这行没有内容」。`None` 与空白串兜成 `[]`，那是真的没有。
     """
-    problems = [problem for problem in (
-        _sha_shape_problem(data, "head_sha"),
-        _sha_shape_problem(data, "base_sha"),
-        *(_array_shape_problem(data, key, low, high) for key, low, high in SUBMIT_ARRAYS),
-    ) if problem]
-    require(not problems, "INVALID_INPUT", f"{SUBMIT_SHAPE_HINT}. Wrong now: " + "; ".join(problems))
-    head_sha, base_sha = data["head_sha"].lower(), data["base_sha"].lower()
-    values = {key: data[key] for key, _, _ in SUBMIT_ARRAYS}
-    return head_sha, base_sha, values["artifacts"], values["evidence"], values["risks"]
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return [] if as_list else None
+    problem = None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        problem = {"error": type(exc).__name__, "detail": str(exc), "raw": str(raw)[:120]}
+        value = raw
+    if as_list and not isinstance(value, list):
+        if problem is None:
+            problem = {"error": f"NotAList({type(value).__name__})",
+                       "detail": "这一列不是 JSON 数组", "raw": str(raw)[:120]}
+        value = [value]
+    if problem is not None and warnings is not None:
+        warnings.append({**problem, "where": where, "field": field})
+    return value
+
+
+def decode_submission(item, warnings=None):
+    """一条提交的四个 JSON 列就地解码（AW-163）；解不开的按 `json_column` 的口径留住原文。
+
+    预演原样回给验收会话：NULL 仍然是 None（「没跑过／算不出来」），不是 `{"conflicts": []}`
+    （「跑过且干净」）——两者在验收眼里是两件事（PRD-015 R2）。
+    """
+    for key in ("artifacts", "evidence", "risks"):
+        item[key] = json_column(item[key], key, f"submission {item.get('id')}", warnings, as_list=True)
+    item["conflict_preview"] = (None if item["conflict_preview"] is None
+                                else json_column(item["conflict_preview"], "conflict_preview",
+                                                 f"submission {item.get('id')}", warnings))
+
+
+def unreadable_message(operation, exc):
+    """`execute()` 兜底那一句：说清是哪个操作、什么异常、哪个路径。
+
+    以前四种异常（ValueError / TypeError / OSError / RecursionError）共用一句
+    「Invalid input or inaccessible local path」，读的人分不出「参数写错了」与「文件打不开」，
+    只能猜。现在异常类型、报文与路径（OSError 带 filename 时）都写进来——定位得住，
+    才谈得上修。
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    path = getattr(exc, "filename", None)
+    if path:
+        detail += f"（path={path}）"
+    return f"{operation}: Invalid input or inaccessible local path — {detail}"

@@ -9,7 +9,8 @@
 1. 读 `README.md` 了解当前阶段，再读**与本次任务相关的**那份 PRD。现在并列三份，不再有“最新 PRD”这回事：`PRD-001` 是工单体系本体，`PRD-002` 是候选层的推导与演练，`PRD-003` 是全局定位与派发入口（定位规则以它为准）。
 2. 动手改工单状态之前，读 `docs/protocol.md`——调用顺序和错误码在那里，不在本文件。
 3. 不确定某件事属于哪个项目时，跑 `python -m task_center.probe --roots <目录> --db <库> --explain`。它只给候选，不给你答案。
-4. 任何会话开始、以及做到任何一个需要判断的节点时，先读 `.agents/skills/skill-routing/SKILL.md`：它把 29 个判断节点各归到一个 skill 或一条确定性动作；归口缺失或引用了不存在的 skill，会在 `.agents/skills/skill-routing/scripts/check_routing.py` 那里当场失败。
+4. 功能类工作先留会话做深：新功能、PRD、方法论这类价值在「想清楚」的活，默认在当前会话讨论产出方案文档，不开工单；拆得动、判得了的活才进工单管道（分类判据见 skill-routing N03）。
+5. 任何会话开始、以及做到任何一个需要判断的节点时，先读 `.agents/skills/skill-routing/SKILL.md`：它把 31 个判断节点各归到一个 skill 或一条确定性动作（数量以 `check_routing.py` 的 `NODE_COUNT` 为准）；归口缺失或引用了不存在的 skill，会在 `.agents/skills/skill-routing/scripts/check_routing.py` 那里当场失败。
 
 ## 做规划之前
 
@@ -17,12 +18,12 @@
 
 1. 先读 `AGENTS.md` + 相关 PRD，**记下 PRD 编号与版本号**。
 2. 按任务类型挑 skill，并**真的打开 `SKILL.md`** 读，不是只看描述。
-3. 计划写到 `tasks/plan-00N-名称.md`，必须含 `依据 / 所用 skill / 交付物 / 任务 / 不做什么 / 未决` 六个节；`交付物` 要写清**主题**与**不覆盖什么**。
-4. 跑 `python tools/doc_gate.py tasks/plan-00N-名称.md`，不过就改，不许先开工。
+3. 计划写到**服务对象项目**的 `tasks/plan-00N-名称.md`——服务谁就放进谁的 `tasks/`，工作区 `tasks/` 只放工作区自己的计划与轮次；每个项目的文档目录登记在 `tasks/项目文档索引.md`。计划必须含 `依据 / 所用 skill / 交付物 / 任务 / 不做什么 / 未决` 六个节；`交付物` 要写清**主题**与**不覆盖什么**。
+4. 跑 `python tools/doc_gate.py <服务对象项目根>/tasks/plan-00N-名称.md`，不过就改，不许先开工。闸门在哪个仓库里都能对别的项目的计划跑，路径照实写全。
 
 这条之所以配一个脚本而不是一句叮嘱：skill 只有名字和描述会进提示，模型可能该用而没用；脚本退出码是确定性的。
 
-## 六条硬规则
+## 七条硬规则
 
 **一，项目归属不许猜。** 宿主回执里有 `project_root` 就用它；没有就列候选问人。禁止从聊天语义推断「你说的应该是 X 项目」。绑定错项目的代价比多问一句高一个数量级。
 
@@ -55,25 +56,44 @@
 
 **六，消息通道不许乱用。** 三件事都是同一条事实的推论：**「发出去」和「它这一轮看到」是两件事**，入队成功不代表纠错生效。
 
-**固定三句模板。** 每次派发与每次收尾都按这三句写，别临场想：
+**固定三句模板。** 每次派发与每次收尾都按这三句写，别临场想。派单消息分两段，一段机器写、一段人写：骨架段用 `python tools/dispatch_payload.py --ticket <单号> --context <现场段文件>` 打印（五块从库里的 owner、项目根、criteria 版本算出来），现场段（**Why**：这一单为什么这么做、1–2 句且必须能改变执行中的判断；**How**：已定的路径与不许重新决定的事；**What**：交付物；**最容易做歪的地方**：派单前三条质询的落点）由协调会话写成文件用 `--context` 传进去、工具原样接在后面。**机器只判三圈在不在、空不空、是不是纯指针**；缺任何一节就一条都不打印。三圈各管什么、Why 为什么不能写成「见 PRD」，见 `docs/无人值守派单.md` 的「派单消息照这份写」：
 
 - **我自己是谁，自取。** 执行会话用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id`，取到什么写什么，不拼、不缩写、不从路径猜。
 - **协调会话是谁，只能由它在派发消息里给。** 它无法自取；拿到后先用 `list_sessions` 反查 title 与 workingDir，对不上就不用。
 - **做完要回一条，不是两条。** 完成或提交后主动发回执给协调会话：一条消息写工单号 + 状态 + 提交 sha 或 review_id，不写 `wake_kind`，也不为它另发一条；不要等对方来问。协调会话收到后 `record_notice` 落库（`wake_kind` 填 `unknown` 并注明是占位），再跑一次 `list_sessions` 核对会话列表，没有多出新任务即算送达。为什么一条就够、终态为什么不唤醒，见下面的 b 条。
 
 1. **派发消息里不许写死 session id。** 消息先于会话存在——协调会话写派发消息时，执行会话还没被创建，写进去的任何 id 都是猜的（AW-007 拼临时目录名就是一个）。执行会话自己用 `cindy_helper` 的 `call_tool` 调 `get_current_session_id` 取（参数 `{"name":"get_current_session_id","args":{}}`），取到之后原样写进 `bind_session`。**它按名字在 `list_tools` 里搜不到（返回空或 `UNKNOWN_TOOL`），但 `call_tool` 能调**——搜不到不等于不存在。取到之后照样要 `list_sessions` 反查一次，见第五条。
-2. **纠错或补充之后必须核一遍队列。** `send_to_session` 只是入队：目标在跑就把你的话排在这一轮之后，这一轮已经按旧指令做完了。所以发完要用 `list_session_queue(session_id)` 看自己那条还在不在 `queue` 里；**目标已经过了一轮而它还在 = 「该插没插」**，立刻 `steer_session_queued_message({session_id, queued_message_id})`，回执要 `delivery=steered`。仍是 `delivery=queued` 说明这一轮已收尾、插不进去了，不要再反复 steer。要改当前这一轮，也可以用 `steer_session({session_id, message})` 直接注入。
+2. **发之前先看队列，发之后核队列。** `send_to_session` 只是入队：目标在跑就把你的话排在这一轮之后，这一轮已经按旧指令做完了。所以这一条分四步，每一步都能当场判一次：
+   - **发前看队列。** 带 `target_session_id` 投递之前，先跑 `list_session_queue({session_id})`（或读 `list_sessions` 里那条的 `queuedCount`）。队列里已经有未被消费的消息时不再叠加，改走三选一：`update_session_queued_message` 原地改写、`steer_session_queued_message` 提进当前轮、或等它消费完。**判据：投递之前查过一次队列；查到 `queued_count` 大于 0 时，队列里没有多出新的一条。**
+   - **正文只写指针。** 判一个字符串能不能进消息正文，只看它会不会在几小时内失效：`attempt_id`、commit sha、分支 head、`revision` 号、行号，以及已被 supersede 的旧编号，这些只能留在库里；正文改成指向说法，例如「以 `get_ticket` 的当前 attempt 为准」。**判据：正文里搜不到这六类会过期的字符串，指令在目标会话重新读一次 `get_ticket` 之后仍然成立。**
+   - **发后核队列。** 发完要用 `list_session_queue(session_id)` 看自己那条还在不在 `queue` 里；**目标已经过了一轮而它还在 = 「该插没插」**，立刻 `steer_session_queued_message({session_id, queued_message_id})`，回执要 `delivery=steered`。仍是 `delivery=queued` 说明这一轮已收尾、插不进去了，不要再反复 steer。要改当前这一轮，也可以用 `steer_session({session_id, message})` 直接注入。**无人值守时这条换成可满足的写法**：那时没有另一条活会话可以核队列、可以插话，`delivery=steered` 与「`wake_kind` 必须是 `queued` / `already-active`」都做不到，要求的是「`notices` 里有一行写清去向」——回执发不出去就 `report_notice_failure` 落 `failed` 并写清目标已归档（宿主原话照抄），推进交给下一轮 `next_action`；派单侧则在 `claim` 之后先把 owner 接到一条活着的常驻会话（`python tools/handover_owner.py --ticket <单号> --to <会话 id> --reason <一句>`），别让回执天生就没有收件人。
+   - **同类消息合并成一条。** 只有三条同时成立才合并：同一事项（同一张工单或同一个待办，不是同一个项目）、该条尚未开始投递（`consuming=false`）、这条是你自己用 `send_to_session` 投递的。合并是覆盖式改写——用 `update_session_queued_message({session_id, queued_message_id, message})` 把整段正文换成最新那一版，不是把新话拼在旧话后面。**判据：合并后目标队列里没有第二份关于同一事项的排队消息，且被改写的那条正文里不含旧版本残留。** 三条缺一条就不合并，宁可另发一条，或者等它消费完再发。
+   - **dispatch 完就结束本轮，禁止轮内 sleep 等下游。** 派完就交回这一轮，**唯一续跑点是回执到达时起的新一轮**：回执到了，新的一轮自然醒来处理它；回执没到，这一轮就该结束，而不是在本轮里 `sleep` 一阵再查一次库，把一条活轮押在「回执一定会到」上——睡的时候不能纠错、不能响应队列里的消息，睡过头就是盲等（实测一条会话日志里 31 次 `sleep`，`sleep 1700` 四次、`sleep 1800` 三次、`sleep 1500` 三次，动作都是「睡完再查一次库」）。而且回执本来就不保证送达：`review_result` / `done` / 合并都只落库不外发，唯一的外发是评审会话自己发的一条回执，那是礼貌不是保证；`send_to_session` 又是入队语义，还可能被宿主当成新任务误建。所以**回执没到时由 `python tools/wait_audit.py` 报出**，不靠轮内 sleep 或轮内轮询发现：它只读两个库，列出五类——等在验收超过 4 小时且没有 review 行、待在验收且提交超过 20 分钟而 `notices` 一行都没有（S3 的分钟级前哨：20 = 巡检 10 分钟 × 2，两轮没人接才报）、`done` 但 `notices` 为空、`done` 但 `merges` 无行、`running` 但执行会话 10 分钟没有活动（阈值出处 `PRD-010` §4.3 S3a / S3 / S4），有命中退出 1，库有问题退出 2。**轮内 sleep 与轮内轮询本身**则由 `python tools/sleep_audit.py` 报：它扫 `%APPDATA%/Cindy/pi-agent-home/sessions/*.jsonl` 里每一条 shell 命令，把 ≥30 秒的 `sleep` 连同同一命令的后半段按时间倒序列出，有命中退出 1、目录不存在退出 2。两者分工是死的：**回执没到由 `wait_audit` 报，睡眠与轮询由 `sleep_audit` 报；`sleep_audit` 检出什么就是违规**，不是提示，也不是「尽量别睡」。**判据：这一轮里搜不到「sleep 一段时间再查库」这种写法；「下游还没回」这个结论来自一次 `wait_audit` 或下一轮到达的回执，不来自本轮内的等待。**
 3. **工作区流程内的决策不准用同步提问卡片。** 卡片占住本轮，别的会话连排队都进不去（队列没有消费时机），问题也不落库——协调会话和验收会话都看不到这张单在等什么。要人拍板就走 `ask_ticket` 落库 + 结束本轮，靠新消息唤起（见 `PRD-005` §4.1 / §4.5）。
 
 三档的选择判据（按「影响哪一轮产出」问）在 `PRD/PRD-005-决策通道.md` §8。
 
+**七，永远禁止同步提问卡。** 永远禁止同步提问卡（不带 `async-question:` 前缀的那种）：它只有人能点，消息只会在队列里空排，整条链就停在那张卡上——无人值守的派发、执行、巡检、验收全都跟着停。
+
+- **替代做法：无人值守只能用 `ask_user_question_async`。** 每张卡都必须在问题里同时给出「没人时走哪条默认路」，正文写「无人值守继续走默认值」，且那条默认路必须是能直接照着做的一步，不是「请人工确认」。能不问就不问：把默认值与理由写进文档的待决策节，让人事后看得到分歧在哪，而不是当场被卡住。要人拍板的正式决策走 `ask_ticket` 落库（见第六条三）。
+- **派发侧：** 协调会话派单时把这句话写进派发消息——「不许发同步提问卡；无人值守只用 `ask_user_question_async` + 默认值」。执行会话拿到这句话，就不能再用一张同步卡把整轮挂住。
+- **巡检侧：** 巡检遇到同步卡按违规上报，不替它点、也不等它被点。识别依据是 `requestId` 有没有 `async-question:` 前缀：没有这个前缀的就是同步卡。
+
+**八，主任务收尾不许用「要不要我做 X」结句。** 第八条管的是句子的落点，不管卡片：主任务（不绑工单的对话）收尾时不得以「要不要我做 X」「等你一句话」「你定」这类问句结句，那是把一件本来该自己走完的事变成别人必须开口才能往下走。合法的出路只有三条，每条都当场可判：①已经做了——能做的直接做完，收尾给的是结论不是征询；②写进当轮 `tasks/plan-0NN-*.md` 的「未决」节，同时写明默认值与恢复条件，默认值是没人回话时照着走的那一条，恢复条件是出现什么情况才回来改它，让人事后看得到分歧在哪，而不是当场被卡住；③要人拍板的正式决策走 `ask_ticket` 落库，工单进「在等答案」，靠新消息唤起。三条之外没有第四条，尤其不许用一句「你定」把默认值省掉——省掉的是一次决定，不是一次提问。
+
+这一条是从白等里长出来的：2026-11-21 审计出 8 次主任务以问句收尾，主人在 15 分钟到 5 小时后才自己回，其中 4 次主人的回复本身就是在说「别问了」。时间还只是明面上那一半，另一半在那期间更糟：巡检每轮都报「全部静默」，因为旧巡检只认提问卡片和 open question，散文问句在这几个信号上一个都不响——于是「有人在等一句话」与「一切正常」在巡检眼里长得一模一样。
+
+检出面是 `python tools/idle_watch.py`，巡检每 15 分钟跑一次（已写进「常用命令」），它按「最后谁在说话」判会话悬空：末条是自问句而无人回就报 WAIT。被它报出来不是让你去问，是这条规矩没做到——看见自己在那份名单里，先按上面三条把它改掉，再看下一条。
+
+与第七条不是一个入口，两条都要留。第七条禁的是同步提问卡片：人必须在界面上点，卡片在那里，整轮就挂死，别的会话连排队都进不去。这一条禁的是散文问句收尾：没有卡片，会话自己正常收尾了，只是在等一句话才继续。两者后果同形——都得等人开口才往下走；入口不同——一个卡在轮次里，一个卡在轮次外，删掉哪一条，另一半照样停。
+
 ### 三条可判定动作（2026-11-17 补，前六条未改；b 于 2026-11-19 由 AW-073 改成「一条回执 + 一次落库 + 一次会话列表核对」）
 
-**a）在 `.worktrees/<工单号>/` 里干活时，`artifacts` 的路径必须带 `.worktrees/<工单号>/` 前缀。** `submit_result` 按**已登记项目根**解析路径：`task_center/core.py:247` 的 `fingerprint(project["root"], path)` 交给 `task_center/artifacts.py:23-24` 的 `base = Path(root).resolve()` / `target = (base / raw).resolve()`。不带前缀，解析到的是主检出里的同名文件。**为什么**：AW-031 第一轮提交的四条 artifacts 全不带前缀，库里的 sha256 与大小是主检出那几份的，按它去分支文件核一个也对不上；返工后四条都带 `.worktrees/AW-031/` 前缀，sha 才逐一对应分支上的文件。
+**a）在 `.worktrees/<工单号>/` 里干活时，`artifacts` 的路径必须带 `.worktrees/<工单号>/` 前缀。** `submit_result` 按**已登记项目根**解析路径：`task_center/core.py:1065` 的 `fingerprint(project["root"], path)` 交给 `task_center/artifacts.py:23-24` 的 `base = Path(root).resolve()` / `target = (base / raw).resolve()`。不带前缀，解析到的是主检出里的同名文件。**为什么**：AW-031 第一轮提交的四条 artifacts 全不带前缀，库里的 sha256 与大小是主检出那几份的，按它去分支文件核一个也对不上；返工后四条都带 `.worktrees/AW-031/` 前缀，sha 才逐一对应分支上的文件。
 
 **b）回执只发一条；送达由协调会话查一次 `list_sessions` 判定，不看投递回执里的 `wake_kind`。** 执行会话交回成果时只发一条正文——工单号 + 状态 + 提交 sha 或 review_id，正文里不写 `wake_kind`，也不为它另发一条消息。理由与做法一起换了：那个值只出现在发送回执里，一条消息写不出自己这一条的发送结果，所以这条消息本就不承担报送原值的职责；以前那条只写原值的第二条，每发一次就要多唤醒一次、多读一遍上下文，收益不抵成本。协调会话收到回执后照旧 `record_notice` 落库，`wake_kind` 填 `unknown`（只校验形状、不按白名单收，所以它合规矩也能入库），并在 `record_notice` 的 `detail` 里写明「本次 `wake_kind` 未取到，`unknown` 是占位」——这一列留不下「这是推定」的标记，不写进 `detail` 就再也分不出库里的值与宿主原话。
 
-**送达怎么判：查会话列表，不查投递回执。** 协调会话收到回执后跑 `cindy_helper` 的 `list_sessions`（按 `workdir`），确认没有多出标题就是这份回执正文的新任务——**没有多出新任务即算送达**。只看有操作后果的那一类：`queued` / `resumed` / `already-active` 都只表示消息进了原会话、没有副作用；唯一有后果的是宿主把回执当成新建任务，而这件事在会话列表里看得见。2026-11-18 实测同一会话、同样入参与 `target_session_id` 连投三条消息，`wake_kind` 依次是 `already-active`、`created`、`queued`——三值同框，所以「上一条投中了」推不出「这一条也投中了」，能推的只有当场查一遍列表。查见多出的那条就停掉它（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发。派发时别忘了带 `target_session_id`：不传时 `send_to_session` 的语义是「新建任务并立刻跑一轮」，不是「投递到某个会话」（工具 schema 对它的原话是「要发给已有任务时必传……省略 → create」，见 `docs/protocol.md` 的「派发的载体」一节）。口径以 `docs/protocol.md` 的「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节为准。
+**送达怎么判：查会话列表，不查投递回执。** 协调会话收到回执后跑 `cindy_helper` 的 `list_sessions`（按 `workdir`），确认没有多出标题就是这份回执正文的新任务——**没有多出新任务即算送达**。只看有操作后果的那一类：`queued` / `resumed` / `already-active` 都只表示消息进了原会话、没有副作用；唯一有后果的是宿主把回执当成新建任务，而这件事在会话列表里看得见。2026-11-18 实测同一会话、同样入参与 `target_session_id` 连投三条消息，`wake_kind` 依次是 `already-active`、`created`、`queued`——三值同框，所以「上一条投中了」推不出「这一条也投中了」，能推的只有当场查一遍列表。查见多出的那条就停掉它（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发。派发时别忘了带 `target_session_id`：不传时 `send_to_session` 的语义是「新建任务并立刻跑一轮」，不是「投递到某个会话」（工具 schema 对它的原话是「要发给已有任务时必传……省略 → create」，见 `docs/protocol.md` 的「派发的载体」一节）。**收件人只有一个定义：`tickets.owner_session_id`（现在负责收尾的那条会话）**，`attempts.coordinator_session_id` 只作 origin 审计；`python tools/receipt_payload.py` 与 `python tools/notice_payload.py` 打印的 `target_session_id` 都是它。无人值守时这条链上没有活着的收件人可核，「送达」就改判「`notices` 有一行写清去向（`sent` 一条，或 `failed` 带原因）」，不要求 `wake_kind` / `delivery` 落在某个值上。口径以 `docs/protocol.md` 的「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节为准。
 
 **终态只落库不唤醒。** `done` / `rework` 只落库不唤醒：提交、验收、`record_notice` 都记进库，不为通知再发消息，否则每张单都要多一次唤醒、多一遍上下文重读；唤醒只留给三种情况——`created` 误建了任务、工单 `blocked` 在等人一句话、`ask_ticket` 已经落了问题。判据按「这件事要不要让别的会话现在改变动作」问，不按「有没有新状态」问。
 
@@ -83,20 +103,25 @@
 
 ## 收尾（一轮怎么算说完）
 
-**一轮的收尾是一件能被判定的事，不是一句「做完了」。** `tasks/round.md` 顶部两行写 `轮次：R-00N` 与 `状态：…`（进行中 / 等一句答复 / 已收尾 / 需重开），历史轮次在 `tasks/rounds.md` 各占一行；要说这一轮完了，就按 `docs/closing.md` 写七节的包到 `tasks/closing-<轮次>.md`。
+**一轮的收尾是一件能被判定的事，不是一句「做完了」。** `round.md` 与收尾包都写在**这一轮所属项目**的 `tasks/` 下（服务对象是别的项目，就不写在工作区）：`round.md` 顶部（第一个 `## ` 之前那几行）写 `轮次：R-00N`、`状态：…`（进行中 / 等一句答复 / 已收尾 / 需重开）与 `项目：<项目标识>`，要说这一轮完了，就按 `docs/closing.md` 写七节的包到那个项目的 `tasks/closing-<轮次>.md`。
+
+**轮次编号全库唯一、不重号；账本只有一份，在 `{{WORKSPACE}}/tasks/rounds.md`。** 业务项目的轮（例如 `heartopia-script-evolution` 的 `R-018`、`R-019`）也在这张表里各占一行，行里注明它归哪个项目——编号是一条线往下数的，不是每个项目各数一遍。所以 `round.md` 顶部的 `项目：` 那行不是装饰：`python tools/work_gate.py --list` 的「本轮未收尾」按它判**这一轮属于谁、该看哪个项目的在途集合与合并记录**；没有这一行时按当前检出的项目判（老文件），轮次归别的项目时会打一句旁注说明不归本项目。口径正文见 `docs/closing.md` 的「轮次编号与账本」。
 
 **说「这一轮结束」之前先跑一次闸门。** 两条命令各管一层，别只跑一条：
 
 ```bash
 python tools/close_gate.py            # 七节齐全、第 3 节不是裸「无」、结论是三档之一、状态位与收尾包配套
 python tools/close_gate.py --check    # 再加三条现场事实：工作区干净、无在途工单、状态与结论一致
+python tools/close_gate.py --root <服务对象项目根> --project <项目标识> --check  # 收尾包不在工作区时用这条
 ```
+
+两条命令默认读本仓库的 `tasks/round.md`；收尾包在**服务对象项目**里时用第三条：`--root` 指向那个项目的根、`--project` 写它的项目标识。那个项目不是 git 检出时，git 面会打一行「git 面跳过」并继续判状态位，不因此判红；它也没有自己的内库时，库面同样打一行「库面跳过」，要真判库就 `--db` 指到项目登记在那份库上。
 
 **非零就不许说「这一轮结束」**：照着输出补齐再跑一次，不许绕过。`doc_gate` 管计划与轮的格式，`close_gate` 管收尾，两者不互相替代。
 
-**收尾包单独提交就行，不需要工单。** 暂存区只含 `tasks/closing-*.md`、`tasks/round.md` 的状态行、`tasks/rounds.md` 的历史行，且本项目没有在途工单时，commit 钩子把它认成「收尾提交：R-00N」放行；三条前提与越界会怎样见 `docs/closing.md` 的「谁来提交收尾包」。
+**收尾包单独提交就行，不需要工单。** 暂存区只含 `tasks/closing-*.md`、`tasks/round.md` 的状态行、`tasks/rounds.md` 的历史行，且本项目没有在途工单时，commit 钩子把它认成「收尾提交：R-00N」放行；三条前提与越界会怎样见 `docs/closing.md` 的「谁来提交收尾包」。**只改收尾包、状态位没改成三档之一时不算收尾提交**：那是一条普通改动，要一张当前尝试在 `running` 的工单背书，没有就拒——别用 `--no-verify` 把它落盘。
 
-**`python tools/work_gate.py --list` 报「本轮 R-00N 未收尾」时，先收尾再开新单。** 它意味着库里已经没有在途单、这一轮也有已验收并合并的成果，但 `tasks/round.md` 还写着 `状态：进行中`；照它给的三步补完收尾包再动下一张单。
+**`python tools/work_gate.py --list` 报「本轮 R-00N 未收尾」时，先收尾再开新单。** 它意味着库里已经没有在途单、这一轮也有已验收并合并的成果，但 `tasks/round.md` 还写着 `状态：进行中`；照它给的三步补完收尾包再动下一张单。它还有另一种非零：库里留着 `ready` / `rework` 单没人领（那是没干完的活，收尾闸门与钩子都会拦），它会点名是哪几张；池子里的 `planned` 不算在途、不会让它非零，这份集合的定义只有一处，见 `docs/closing.md` 的「在途集合只有一份定义」。
 
 **回复的第一行写结论**：`本轮：已收尾` / `本轮：等你一句答复——<那一句>` / `本轮：需重开`，与收尾包第 7 节的三档一一对应；欠人的那条写成可执行动作（打开哪个文件改哪一行、跑哪条命令），写「需要你确认」不算。
 
@@ -121,37 +146,43 @@ git branch -d ticket/AW-0xx                                    # 同样在合并
 
 不要切主检出的分支：主检出停在 `ticket/AW-021` 时跑合并，`git merge --no-ff <源分支>` 会把 master 合进那条工单分支，方向反了，两边都被改，看起来还像一次成功的合并。`tools/auto_merge.py` 第 2 步先查这件事，不是目标分支就拒绝并让你 `git switch master`，`master` 与当前分支的 commit 都不动。
 
-**验收通过后由协调会话合并，执行会话不自己合。** 合并只用这一条命令，它按顺序做八件事：工单必须 `done` 且没有合并记录 → 必须已走过回执（`notices` 为空就一步不动地拒，`failed` 也算走过） → 当前检出必须在目标分支上、检出干净、源分支领先目标、合并要新增的路径不与工作区的未跟踪文件同名 → `merge-tree` 预演无冲突 → 打回退点 `pre-merge-<工单号>` → 临时 worktree 里先合一次并跑 `python tools/run_tests.py` → 绿了才 `git merge --no-ff` → 合并后再跑一次测试，通过才调 `merge_ticket` 写回记录。`--dry-run` 把第二件降成一条警告，其余照跑到底（冲突预演 + 临时 worktree 测试），不打 tag、不碰 master、不写记录。
+**验收通过后由协调会话合并，执行会话不自己合。** 合并只用这一条命令，它按顺序做九件事：工单必须 `done` 且没有合并记录 → 必须已走过回执（`notices` 为空就一步不动地拒，`failed` 也算走过） → 当前检出必须在目标分支上、没有收尾包以外的未提交改动（`tasks/closing-*.md` / `tasks/round.md` / `tasks/rounds.md` 这三个路径放行，见 `docs/closing.md`）、源分支领先目标、合并要新增的路径不与工作区的未跟踪文件同名 → `merge-tree` 预演无冲突 → 打回退点 `pre-merge-<工单号>` → 临时 worktree 里先合一次并跑**这个项目的测试命令**（按 `project_id` 查 `tools/merge-projects.json`，查不到就用缺省的 `python tools/run_tests.py`；缺省也跑不起来时报 `NO_TEST_COMMAND`「这个项目没配测试命令」，不当成测试红） → 绿了才 `git merge --no-ff` → 合并后再跑一次测试 → 通过后先过写记录前的 schema 闸门（合并把 `SCHEMA_VERSION` 推高就先做文件层快照、用合并后的代码 `migrate`、再按磁盘重新载入 `task_center`；迁移失败报 `SCHEMA_MIGRATE_FAILED`、不写记录、不回滚代码、打印快照路径），对上了才调 `merge_ticket` 写回记录。`--dry-run` 把第二件降成一条警告，其余照跑到底（冲突预演 + 临时 worktree 测试），不打 tag、不碰 master、不写记录、也不迁移库。
 
 ```bash
 python tools/auto_merge.py --list                    # 每轮开工先看：已验收但没合并的工单
 python tools/auto_merge.py --ticket AW-xxx           # 合并（默认源分支 ticket/AW-xxx、目标 master）
 python tools/auto_merge.py --ticket AW-xxx --dry-run # 只预演与跑测试，不碰目标分支、不写记录
-python tools/auto_merge.py --ticket AW-xxx --record-only # 已合并且无记录时收口：测试 → 补记录 → 清理
+python tools/auto_merge.py --ticket AW-xxx --record-only  # 只用于「合并已成功、只差记录」：测试 → 补记录 → 清理
 ```
 
 任何一步不满足都以非零退出，并写明是哪一步、怎么补。**测试红的时候目标分支一动未动**——预演在临时 worktree 里做，失败只删 worktree，不留合并提交。
 
-**合并断在半路时用 `--record-only` 收口，不要手工补记录。** 「`git merge` 已经成功、合并记录还没写」这种现场，普通路径一步都走不动：第 2 步要求源分支领先目标，而它已经被合进去了，领先数正好是 0。`--record-only` 把那道判据反过来问（`merge-base --is-ancestor` 成立且 `rev-list --count <目标>..<源>` 为 0），在目标的祖先里按 `parent2 == 源分支 tip` 找到那次合并提交，跑全绿才写记录，写成功才清工作树与分支。已有记录报 `ALREADY_MERGED`；找不到合并提交（快进）、测试红、分支还领先，都非零退出且什么都不写、什么都不清。正常合并路径还会在 `.data/merge-journal/<工单号>.json` 记下做到第几步，写记录成功后删掉。
+**合并断在半路时用 `--record-only` 收口，不要手工补记录。** 「`git merge` 已经成功、合并记录还没写」这种现场，普通路径一步都走不动：第 2 步要求源分支领先目标，而它已经被合进去了，领先数正好是 0。`--record-only` 把那道判据反过来问（`merge-base --is-ancestor` 成立且 `rev-list --count <目标>..<源>` 为 0），在目标的祖先里按 `parent2 == 源分支 tip` 找到那次合并提交，跑全绿才写记录，写成功才清工作树与分支。**「`done` 但没有合并记录」有两种，它只管后一种：** 合并已经成功、只差记录（分支已全在目标里）→ `--record-only`；合并根本没发生、分支还领先（真失败）→ 走 `--ticket`，先在分支上把问题修好再合。已有记录报 `ALREADY_MERGED`；找不到合并提交（快进）、测试红、分支还领先，都非零退出且什么都不写、什么都不清。正常合并路径还会在 `.data/merge-journal/<工单号>.json` 记下做到第几步（迁移失败时停在 `migrate-failed`），写记录成功后删掉。
 
 **未跟踪文件撞上这次合并要新增的路径时，第 2 步就停下并指名文件，不进 merge。** 判断按 Windows 口径归一（`/` 与 `\` 不分、大小写不分），**内容与分支逐字节相同也一样**：git 要以 `untracked working tree file would be overwritten` 拒绝，因为写这个路径就得先删掉工作区里那个它不认识的同名文件。补救是把文件挪到 `.data/` 下（例如 `.data/untracked/<工单号>/`）、路径写进 `submit_result` 的 `evidence`，**不要挪去系统 Temp**（会被系统清理，验收时想核对就找不回来）。工具只看只报，不替你删也不替你搬。
 
-**回滚**：真实合并后测试再红，工具会自己 `git reset --hard pre-merge-AW-xxx`。人工回滚用同一条命令。回退点已存在时工具拒绝合并，不覆盖旧回退点——否则两次合并会混成一个回退位置。
+**回滚**：真实合并后测试再红，工具会自己 `git reset --hard pre-merge-AW-xxx`。人工回滚用同一条命令。回退点已存在时看它指向哪里：指向**当前目标分支 head**（上一轮停在第 5 步测试红或第 6 步回滚，目标分支一指头没动）就沿用，直接重跑即可；指向别处才拒绝，不覆盖旧回退点——否则两次合并会混成一个回退位置。
+
+**`--repo` 指向工作树时，清理与进程记录都按主检出根算。** 清理要删的是主检出的 `.worktrees/<工单号>` 与分支，不是 `<那个工作树>/.worktrees/<工单号>`（后者不存在，会让清理报「跳过」、`git branch -d` 又被占着分支的工作树挡住）；`.data/merge-journal/` 也落在主检出那一层，事后去那里 `cat`。
 
 **每轮开工先查清单**：`python tools/auto_merge.py --list`（读 `list_unmerged`）。清单里的历史工单（AW-004~AW-017）是直接在 master 上做的，没有合并记录，这是事实，不要替它们补记录；要处理的是「刚验收的那张合没合」。
+
+**清单分三栏，不要用同一条命令处理三件事。** 「真待合并」才有可合的树；「仓库无改动」的单（本次尝试没造出提交——提交的 `head_sha` 与 `base_sha` 相同，且没有 `ticket/<单号>` 分支——只改了本机配置、仓库一个文件没动的那种）既不能用 `--ticket` 合，也不写合并记录、不进 `archived`，它的账位就是那一栏本身；「历史豁免」见 `docs/unmerged-exemptions.json`。判据与依据就在每一行里，不要凭印象把某一栏的结论搬到另一栏。判据不拿 `head_sha` 与 master 的 head 比：那个值随每张单合并往前移动，当时判对的单会在下一张单合并之后又退回去（AW-146 / AW-148）。
 
 ## 目录约定
 
 | 路径 | 内容 |
 | --- | --- |
 | `PRD/` | 需求文档，`PRD-00N-名称.md`，历史版本不得无记录覆盖 |
-| `tasks/` | 计划与执行记录，`plan.md` 是启动计划，进度以 `tasks/progress.md` 为准 |
+| `tasks/` | **只放本项目（工作区自己）**的计划与执行记录，`plan.md` 是启动计划，进度以 `tasks/progress.md` 为准；服务对象是别的项目时，文档放那个项目的 `tasks/` |
+| `tasks/项目文档索引.md` | 哪个项目的文档在哪个目录；只登记落点，不复述任何计划的正文 |
 | `.agents/skills/` | 本项目专用 skill：`prd-authoring` / `pdsa-workflow` / `ticket-dispatch` |
 | `task_center/` `tests/` `docs/` `examples/` | 工单核心代码与测试。已合入 master，仓库根就能跑，不用先 `cd` |
 | `.worktrees/<工单号>/` | 当前工单的工作树，检出 `ticket/<工单号>`；主检出不切分支 |
 | `.worktrees/ticket-core/` | 同一仓库的 `feat/ticket-core` 工作树。master 上也能跑，这份留着给下一个分支单独开发，别删 |
 | `.githooks/` | commit 钩子；两个仓库的 `core.hooksPath` 都指向它 |
 | `.data/` | 本地数据库，不入库 |
+| `.data/untracked/<工单号>/` | **会话临时文件的落点**：请求/回执 JSON、命令输出、闸门输出、跑一次就完的脚本。按工单号分子目录；确实归不到单的按写入它的会话分（`_session-<会话号>/`）。放在这里是因为 `.data/` 已在 `.gitignore` 里，git 看不见、`git status --short` 也不会脏 |
 | `_sandbox/` | 隔离试点用的测试材料，不入库 |
 
 ## 常用命令
@@ -166,7 +197,11 @@ python -m task_center --db <绝对路径> <操作> --request-id <唯一编号> -
 python -m task_center.probe --roots D:/ --depth 2 --explain   # 只读项目探测
 python tools/auto_merge.py --list                 # 已验收但还没合并的工单
 python tools/auto_merge.py --ticket AW-xxx        # 预演 → 测试 → --no-ff 合入 master；失败回滚
-python tools/auto_merge.py --ticket AW-xxx --record-only  # 已合并且无记录：测试 → 补记录 → 清理
+python tools/auto_merge.py --ticket AW-xxx --record-only  # 只用于「合并已成功、只差记录」：测试 → 补记录 → 清理
+python tools/idle_watch.py                       # 巡检第 0 步：谁在等我一句话；非零（有 WAIT）就先处理它列出的会话
+python tools/invariants.py                       # 不变量自检：有 attempts/revision 查不到来源、artifacts 形状不对就非零并逐条点名
+python tools/sleep_audit.py                      # 轮内 sleep 检出：谁在本轮里睡等下游；有命中退出 1
+python tools/sleep_audit.py --hours 72 --json    # 换窗口、结构化输出；--hours 0 不限窗口
 ```
 
 上面的命令在仓库根就能跑（代码已合入 master，AW-011）。只有要在单独分支上开发时才进 `.worktrees/ticket-core`——那边检出的是 `feat/ticket-core`，可能落后于 master，别拿它当运行基准。
@@ -194,6 +229,7 @@ git -C {{WORKSPACE}}/.worktrees/ticket-core config core.hooksPath {{WORKSPACE}}/
 - 不让各会话自行写 SQL 或各自维护一份 JSON/Markdown 进度——中心数据库是唯一进度来源。
 - 不把模拟会话的测试结果说成「真实会话已接通」。
 - 不在没有用户确认时推送。本机没有远端，合并只走 `tools/auto_merge.py`：验收通过、测试绿、无冲突才合，且只在目标分支的检出上做，合并后留一条可查询的记录。
+- **不把临时文件写进仓库根，尤其不建 `tmp/`。** 落点是 `.data/untracked/<工单号>/`：`tools/close_gate.py --check` 把仓库根任何未跟踪目录都算「工作区不干净（tmp/）」，一张单的收尾就这么被拦住（AW-161 里堆了 270 个文件）。也**不许**为了让它看不见就把 `tmp/` 加进 `.gitignore`——文件仍堆在仓库根，只是把闸门骗过去了；`.data/` 早就在 `.gitignore` 第 4 行，挪进去不需要动忽略规则。别的会话留下的取证文件不许直接删，挪进去并在清单里写清来源，例：`.data/untracked/MANIFEST-tmp-20261125.md`。
 - 分支按工单走：`git worktree add .worktrees/<工单号> -b ticket/<工单号> master` 开工，**先合并、后清理**——验收通过、`tools/auto_merge.py` 合并成功之后，再 `git worktree remove .worktrees/<工单号>` 与 `git branch -d ticket/<工单号>`；没合就删分支 git 会拒绝（`not fully merged`），被拒不要用 `-D` 硬删。主检出永远保持在 master 上，`master` 始终可运行；`.worktrees/ticket-core/` 是 `feat/ticket-core` 的旧工作树，留作参考，不要拿它当运行基准。
 
 ## 已知未实现（别当成已具备）
@@ -201,6 +237,6 @@ git -C {{WORKSPACE}}/.worktrees/ticket-core config core.hooksPath {{WORKSPACE}}/
 - **九个概念态里只有七个能在库里表达**：`待规划`、`验收中`、`受阻或待决策` 没有对应状态，阻塞原因与解除条件只能写在 reason 与事件里。详见 `.agents/skills/pdsa-workflow`。
 
 - **没有 `workflow_runs` 表，且已裁定不建**：PDSA 由工单状态、尝试与验收记录表达，暂停原因写 `recover_ticket` 的 reason。不要再写成「待实现」——这是已决口径（PRD §7、§15 D3）。
-- **项目登记面已具备** `list_projects` 与 `unregister_project`（有工单时拒绝撤销）；`projects.root` 仍不能改，修正路径走「撤销 → 重新登记」。
+- **项目登记面已具备** `list_projects`、`unregister_project`（有工单时拒绝撤销）与 `relocate_project`（换根不改身份，有工单也能迁）：`projects.root` 用 `relocate_project` 改，不必再走「撤销 → 重新登记」——那条路只在项目下一张工单都没有时才走得通，`unregister_project` 对名下有工单的项目直接拒（`PROJECT_HAS_TICKETS`）。它只改登记，不搬磁盘文件。
 - **项目级事件写得出读不出**：`register_project` 写的事件 `ticket_id` 为 NULL，`events` 操作要求工单号。
 - **真实派发适配层不存在**：`claim` 之后调用 Cindy 创建会话这一步仍是手工的。

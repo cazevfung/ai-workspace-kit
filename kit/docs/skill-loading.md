@@ -1,6 +1,6 @@
 # 技能内容入库：两条加载路径实测
 
-- 依据：工单 AW-036；路径与结论均为当场跑过的实测，不再依赖包外的需求文档。
+- 依据：`PRD/PRD-007-技能内容入库与加载验证.md` v0.1（sha256 `5a1e12a5…`），工单 AW-036
 - 执行会话：`<session-id>`（工作目录 `{{WORKSPACE}}/.worktrees/AW-036`）
 - 记录时间：2026-11-17
 
@@ -23,9 +23,9 @@ P2 不生效这件事**不是这单能修的**：它取决于 Cindy 的启动参
 
 ```text
 pi.exe --mode rpc --no-approve --no-extensions
-       --session-dir X:/示例项目/AppData/Roaming/Cindy/pi-agent-home/sessions
+       --session-dir %USERPROFILE%\AppData\Roaming\Cindy\pi-agent-home/sessions
        --provider cindy --model deepseek/deepseek-v4.1-flash
-       --skill X:/示例项目/AppData/Roaming/Cindy/pi-agent-home/run-tmp/<hash>/cindy-managed-skills
+       --skill %USERPROFILE%\AppData\Roaming\Cindy\pi-agent-home\run-tmp\<hash>\cindy-managed-skills
        --append-system-prompt ...\append-system-prompt.md
        --extension ...\internal-extensions\cindy-bridge.ts
        --extension ...\internal-extensions\cindy-subagent.ts
@@ -55,7 +55,7 @@ Pi 的 RPC 模式有个 `get_commands` 命令，返回「扩展命令 + 模板 +
 ```python
 # 用 pi --mode rpc 的 get_commands 列技能，不调模型
 import json, subprocess, threading, time
-PI = r"X:/示例项目/AppData/Roaming/Cindy/pi/1.5.2/pi.exe"
+PI = r"%USERPROFILE%\AppData\Roaming\Cindy\pi\1.5.2\pi.exe"
 
 def probe(workdir, extra):
     p = subprocess.Popen([PI, "--mode", "rpc", "--no-session", "--no-extensions", *extra],
@@ -115,7 +115,7 @@ C–F 是第二处断环：在有信任的前提下，`+路径` 三种写法（�
 - `+path` 的语义是「在已有扫描结果里精确地保留这个路径」，不是「新增一个扫描根」——它没法把仓库 `skills/` 这种默认不被扫描的目录拉进来；
 - 项目设置的路径**从 `.pi` 目录解析**（`docs/settings.md`「Resources」），想指到 `<仓库>/skills` 应写 `../skills`；PRD 原文的 `+skills/` 即使去掉 `+` 也会指到 `.pi/skills`。
 
-另有一条对照事实：`--no-approve` 下用户级目录照常扫描（A 的 37 条全部 `scope=user`，路径都在 `X:/示例项目/.agents/skills/`），被 trust 挡住的只有「项目级」这一档。
+另有一条对照事实：`--no-approve` 下用户级目录照常扫描（A 的 37 条全部 `scope=user`，路径都在 `%USERPROFILE%\.agents\skills\`），被 trust 挡住的只有「项目级」这一档。
 
 ### 3.3 探测会话（真实会话，原话）
 
@@ -158,13 +158,13 @@ cmd //c "mklink /J zz-load-probe {{WORKSPACE}}\\.worktrees\\AW-036\\skills\\zz-l
 
 ### 4.2 机制前提：用户级目录不受 trust 约束
 
-`~/.agents/skills` 是用户级扫描目录（`source=auto`、`scope=user`），**不经过 project trust**。这一点在动手前就已在数据里：`--no-approve` 下 37 条 user 技能照常加载，其中 15 条本身就是 junction（10 条指向 `D:\agent-skills\installed\`、5 条指向 `X:/示例项目/.codex/skills/`）。所以「junction 这个机制通不通」不需要新建就能看出来；新建这一步要验的是**能不能指进仓库**。
+`~/.agents/skills` 是用户级扫描目录（`source=auto`、`scope=user`），**不经过 project trust**。这一点在动手前就已在数据里：`--no-approve` 下 37 条 user 技能照常加载，其中 15 条本身就是 junction（10 条指向 `D:\agent-skills\installed\`、5 条指向 `%USERPROFILE%\.codex\skills\`）。所以「junction 这个机制通不通」不需要新建就能看出来；新建这一步要验的是**能不能指进仓库**。
 
 ### 4.3 本地验证（junction 建好、`--no-approve` 下）
 
 ```text
 === skills in list: 38
-  - skill:zz-load-probe  scope=user source=auto path=X:/示例项目/.agents/skills/zz-load-probe/SKILL.md
+  - skill:zz-load-probe  scope=user source=auto path=%USERPROFILE%\.agents\skills\zz-load-probe\SKILL.md
 === PROBE HIT: True
 ```
 
@@ -243,7 +243,7 @@ skills/** -text
 ### 5.5 迁后验证
 
 - `check_index.py`（协调会话指定的主检出路径 `{{WORKSPACE}}/.agents/skills/skill-routing/scripts/check_index.py`）：`19 个 skill 全部符合期望（mode=all）`，rc=0。**这条正好证明迁移没弄坏那 19 个 description**：脚本会比对 live `description` 与快照、并要求正文逐字节一致，junction 之后读到的仍是同一份字节。
-- 本地探针：`merge-latest-branches` 仍在列表里，`scope=user`，路径报的是 `X:/示例项目/.agents/skills/merge-latest-branches/SKILL.md`（junction）。
+- 本地探针：`merge-latest-branches` 仍在列表里，`scope=user`，路径报的是 `%USERPROFILE%\.agents\skills\merge-latest-branches\SKILL.md`（junction）。
 
 ## 6. 回滚（真跑过一次，再恢复）
 
@@ -251,10 +251,10 @@ skills/** -text
 
 ```bash
 # 1) 先删链接（rmdir 对 junction 只删链接，不动目标目录）
-cmd //c "rmdir X:/示例项目//.agents//skills//merge-latest-branches"
+cmd //c "rmdir %USERPROFILE%\\.agents\\skills\\merge-latest-branches"
 # 2) 再把原目录放回原位
 mv {{WORKSPACE}}/.data/aw-036-backup/merge-latest-branches-orig-20261117 \
-   X:/示例项目/.agents/skills/merge-latest-branches
+   %USERPROFILE%/.agents/skills/merge-latest-branches
 ```
 
 本次实测的六步与输出：
@@ -277,15 +277,15 @@ mv {{WORKSPACE}}/.data/aw-036-backup/merge-latest-branches-orig-20261117 \
 junction 现在指向**工作树**路径：
 
 ```text
-X:/示例项目/.agents/skills/merge-latest-branches
+%USERPROFILE%\.agents\skills\merge-latest-branches
   → {{WORKSPACE}}\.worktrees\AW-036\skills\merge-latest-branches
 ```
 
 合完 master 按规矩要 `git worktree remove .worktrees/AW-036`，那一刻 junction 就指向一个不存在的目录，技能随之消失（且不报错，只是列表里没了）。**合并后必须重指一次**：
 
 ```bash
-cmd //c "rmdir X:/示例项目//.agents//skills//merge-latest-branches"
-cmd //c "mklink /J X:/示例项目//.agents//skills//merge-latest-branches {{WORKSPACE}}\\skills\\merge-latest-branches"
+cmd //c "rmdir %USERPROFILE%\\.agents\\skills\\merge-latest-branches"
+cmd //c "mklink /J %USERPROFILE%\\.agents\\skills\\merge-latest-branches {{WORKSPACE}}\\skills\\merge-latest-branches"
 ```
 
 重指后内容不变（合入的就是同一份字节），但必须先确认 `{{WORKSPACE}}\skills\merge-latest-branches` 已经在主检出里（即合并已完成）。同样，回滚时 `.data/aw-036-backup/` 那份原目录还在，随时可取回。
@@ -294,7 +294,7 @@ cmd //c "mklink /J X:/示例项目//.agents//skills//merge-latest-branches {{WOR
 
 ### 8.1 探针技能
 
-`skills/zz-load-probe/SKILL.md`（sha256 摘要存于同目录下的 `evidence/aw-036-probe.sha256`，`sha256sum -c` 格式；探针验证完成后已删除）：
+`skills/zz-load-probe/SKILL.md`（sha256 `ce042f2fcfbaa48a380507f477bafec69fc878a24019f4b394ea453c5cc8636d`，验证完成后已删除）：
 
 ```markdown
 ---
@@ -318,6 +318,6 @@ description: 本技能仅用于加载探测（AW-036 一次性探针），不含
 ```bash
 rm -rf {{WORKSPACE}}/.worktrees/AW-036/skills/zz-load-probe   # 仓库内
 rm -rf {{WORKSPACE}}/.worktrees/AW-036/.pi                     # 项目配置（P2 用的）
-cmd //c "rmdir X:/示例项目//.agents//skills//zz-load-probe"   # live junction
-rm -rf X:/示例项目/AppData/Local/Temp/aw036-probe     # 本地探针脚本
+cmd //c "rmdir %USERPROFILE%\\.agents\\skills\\zz-load-probe"   # live junction
+rm -rf %USERPROFILE%/AppData/Local/Temp/aw036-probe     # 本地探针脚本
 ```

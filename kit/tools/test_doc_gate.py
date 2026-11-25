@@ -166,9 +166,27 @@ class GateTest(unittest.TestCase):
         plan.write_text(GOOD, encoding="utf-8")
         self.assertEqual([], doc_gate.check(plan))
 
-    def test_prd_existence_is_not_checked_without_a_prd_directory(self):
-        """没有 PRD 目录的项目（比如只引用外部需求）不报这个错，避免误伤。"""
-        self.assertEqual([], self.write(GOOD.replace("PRD-001", "PRD-999")))
+    def test_prd_existence_is_checked_against_the_tool_repo_too(self):
+        """工具仓库的 `PRD/` 始终算一处目录，所以「本项目没有 PRD 目录」不再是免检理由。
+
+        原来这一条是「没有 PRD 目录就不报」，那时编号只能沿计划文件的祖先核对。
+        计划搬进服务对象项目后（AW-153），它会照样引用工作区的 `PRD-001` / `PRD-003`
+        这类过程依据，而项目自己的 `PRD/` 下没有这些文件——不把工具仓库的目录算进来，
+        搬过去的计划全部假红。代价是：编一个任何已知目录里都不存在的编号，在这里
+        一定报出来。反例（曾经通过）：`PRD-999` 在没有 PRD 目录的文件里一路放行。
+        """
+        self.assertMentions(self.write(GOOD.replace("PRD-001", "PRD-999")), "PRD-999")
+
+    def test_plan_moved_into_another_project_still_finds_workspace_prds(self):
+        """计划搬进服务对象项目后，仍能引用工作区的 `PRD/PRD-001-*.md`（AW-153）。"""
+        other = Path(self.tmp.name) / "另一个项目"
+        prd = other / "PRD"
+        prd.mkdir(parents=True)
+        (prd / "PRD-002-业务需求.md").write_text("# 业务 PRD\n", encoding="utf-8")
+        plan = other / "tasks" / "plan-001.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text(GOOD.replace("PRD-001 版本 0.4", "PRD-001 版本 0.4、PRD-002 版本 1.1"), encoding="utf-8")
+        self.assertEqual([], doc_gate.check(plan))
 
     def evidence_plan(self, block):
         """把任务块换成给定正文的合规计划，用来单独试「完成证据能不能判」。"""
@@ -324,6 +342,39 @@ class RoundTest(unittest.TestCase):
         targets, problems = doc_gate.scan(root)
         self.assertEqual([], problems)
         self.assertIn(root / "tasks" / "round.md", targets)
+
+    def test_all_root_reads_another_project(self):
+        """`--all --root` 能对另一个项目的根跑：计划搬过去之后闸门要跟得过去（AW-153）。"""
+        root = Path(self.tmp.name) / "另一个项目"
+        (root / "tasks").mkdir(parents=True)
+        (root / "tasks" / "plan-001.md").write_text(GOOD, encoding="utf-8")
+        (root / "tasks" / "round.md").write_text(ROUND_GOOD, encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = doc_gate.main(["--all", "--root", str(root)])
+        self.assertEqual(0, code, out.getvalue())
+        self.assertIn("闸门通过", out.getvalue())
+
+    def test_all_root_without_tasks_names_the_path(self):
+        """`--root` 指错地方时点名那个 `tasks/`，不报成「没有找到 plan 文件」（AW-153）。"""
+        root = Path(self.tmp.name) / "空项目"
+        root.mkdir()
+        targets, problems = doc_gate.scan(root)
+        self.assertEqual([], targets)
+        self.assertMentions(problems, str(root / "tasks"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(1, doc_gate.main(["--all", "--root", str(root)]))
+        self.assertIn("这个目录不存在", out.getvalue())
+
+    def test_all_rejects_unknown_arguments(self):
+        """`--all` 多写一个不认识的参数是用法错误（退出码 2），不许静默忽略。"""
+        err = io.StringIO()
+        code = None
+        with contextlib.redirect_stderr(err):
+            code = doc_gate.main(["--all", "--path", "tasks"])
+        self.assertEqual(2, code)
+        self.assertIn("用法错误", err.getvalue())
 
     def test_real_round_file_passes(self):
         """仓库根那份 round 文件（**提交过的**那一版）要过闸门。

@@ -1,6 +1,6 @@
 # 缺口清单：没有 skill 可归口的节点
 
-这 7 个节点的归口是一条动作，不是 skill。**本轮不新建方法类 skill**——理由逐个写在下面，不是「以后再补」一句了事。
+这 8 个节点的归口是一条动作，不是 skill。**本轮不新建方法类 skill**——理由逐个写在下面，不是「以后再补」一句了事。
 
 ## 缺口节点（无 skill 可归口）
 
@@ -13,6 +13,7 @@
 | N23 | 进度记录与收口 | `python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 events --input -`（`project_id`、`ticket_id` 必填） | 中心库是唯一进度来源。把它包装成 skill 会暗示「按 skill 记一遍也行」，恰好是 AGENTS.md 明令禁止的「各会话各自维护一份进度」 |
 | N24 | 写记忆（user / feedback / project / reference） | 规则：走 `cindy_memory` 的 `memory_write`；一条 description 写不出来就不写 | 记忆系统的写入规则由宿主常驻提示直接给出，逐类别与反例都在里面。skill 只会复制一份，且复制品会比原件先过期 |
 | N29 | 把一条消息送进一个正在跑的会话：投还是插、发完怎么确认打中了 | 先 `list_session_queue` 看目标在不在跑；要改目标当前这一轮的产出就 `steer_session`，否则 `send_to_session` 并带 `target_session_id`；发完读回执 `wake_kind`，`created` 就是发错了目标 | 它是一次「看队列再选哪一档」的当场判断，判断依据已经定版在 `PRD/PRD-005-决策通道.md` §8（三档能力边界、四条判据、队列滞留信号）。为了两列好看另开一个只有三句话的 skill，只会多出一份与 §8 各自过期的副本 |
+| N31 | 发现的问题落在哪个项目的哪张单 | 当场 `create_ticket`（`project_id` 用 N01 定的那个、`state=planned`、`deliverable` 一句话），回执里的 `ticket_id` 就是落点；不 claim、不派发、不 bind；定不了项目先跑 `python -m task_center.probe --roots D:/ --depth 2 --explain` 拿候选问人 | 判据只有一句「登记没登记」：回执里有 `ticket_id` 就是登记了。`planned` 的语义已定版在 `PRD/PRD-014-计划队列与依赖.md`（不产生尝试、不占 `active_session`、不接受 `bind_session`），为两句话开一个 skill 只会多一份与 `AGENTS.md` 、`docs/protocol.md` 各自过期的副本 |
 
 ## 半接的三个节点（有 skill，但 skill 不覆盖全部判断）
 
@@ -31,3 +32,5 @@
 本目录就是按这个口径建的：6 个无 skill 的节点逐一列在上面三列里；那 6 个装了没接的 skill 已全部接进 N15/N22/N26/N27（见 `installed-skills.md`）。本轮没有出现新的口径偏差。
 
 **N29 的归口为何写成 action 而不是 skill（2026-11-17 定，对 `PRD-004` 0.3 生效）。** N29「把一条消息送进一个正在跑的会话」确实是一次判断，但它比其他动作节点多一步「看状态再选集」：先 `list_session_queue`，在跑且要改本轮就 `steer_session`，否则 `send_to_session`，发完看回执 `wake_kind`。这三步都能当场答「做到了没有」，判据也已定版在 `PRD/PRD-005-决策通道.md` §8.2 与 §8.3（三档边界、四条判据、队列滞留信号），因此归口写 `action:`，不新建 skill——另开一个只包三句话的 skill 会多出一份与 §8 各自过期的副本。加它之后缺口节点由 6 个变为 7 个，`PRD-004` 0.3 已同步这个数。
+
+**N31 的归口为何写成 action 而不是 skill（2026-11-22 定，对 `PRD-004` 0.6 生效）。** N31「发现的问题落在哪个项目的哪张单」要的就是一次动作：当场 `create_ticket`（`state=planned`、`deliverable` 一句话），回执里有 `ticket_id` 就是登记了，没有就是没登记——当场可判，没有方法可言。它容易出的错不是「方法不够深」，而是「发现了却只在回复里说一句」：2026-11-22 之前这条路只能靠记性，`AGENTS.md` 里那句「落成 planned 单，不写散文」没有任何节点管它。加它之后缺口节点由 7 个变为 8 个，`PRD-004` 0.6 已同步这个数。

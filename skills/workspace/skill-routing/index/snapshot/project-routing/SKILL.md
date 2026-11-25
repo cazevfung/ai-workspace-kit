@@ -25,7 +25,7 @@ python "$env:USERPROFILE\.agents\skills\project-routing\scripts\probe.py" --root
 
 ## 四条硬规则
 
-1. **任何已存在的目录都能直接开单，不必先登记项目。** `root` 是身份、`project_id` 是标签：`create_ticket` 带 `root`（该目录的绝对路径）时，未登记的目录会顺手记一行再开单（`name` 取目录名），`project_id` 由发起会话给。同一个 `root` 换个 `project_id` 会报 `ROOT_MISMATCH`：用它已登记的那个 `project_id`，或先 `unregister_project` 再重登（`projects.root` 不能改，写错登记的修法就是撤销重登）。标签重复（多个目录都叫 `workspace`）不阻断派发。口径见 `PRD/PRD-009-项目接入面.md` §4.4。
+1. **任何已存在的目录都能直接开单，不必先登记项目。** `root` 是身份、`project_id` 是标签：`create_ticket` 带 `root`（该目录的绝对路径）时，未登记的目录会顺手记一行再开单（`name` 取目录名），`project_id` 由发起会话给。同一个 `root` 换个 `project_id` 会报 `ROOT_MISMATCH`：用它已登记的那个 `project_id`。登记写错要改：项目下没有工单时 `unregister_project` 再重登，有工单时用 `relocate_project` 换根（只改 `projects.root`，身份与工单不动）。标签重复（多个目录都叫 `workspace`）不阻断派发。口径见 `PRD/PRD-009-项目接入面.md` §4.4。
 2. **归属真不确定时就问人，不要挑一个最近的顶替。** 探针不知道你在说什么，这一步只能靠判断；列 2–3 个带路径的候选让人选。
 3. **与项目无关的请求不要硬塞进项目。** 一次问答、一句解释不需要归属，也不需要工单。
 4. **执行与验收必须是不同会话。** 执行者对自己的工单调用 `review_result` 会被核心拒绝（`SELF_REVIEW`）。

@@ -31,13 +31,10 @@ def main():
         tickets = {}
         for pid, path in projects.items():
             run(center, "register_project", {"project_id": pid, "name": pid, "root": str(path)})
-            # 号由库里发（schema 11 起）：各项目的号从自己的发号盘出，回执里才是真号。
-            created = run(center, "create_ticket", {"project_id": pid, "title": "整理检查清单",
-                                                    "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
-                                                    "criteria": [{"id": "C1",
-                                                                  "text": "判断类：清单每一步都能勾；"
-                                                                          "反例：只有一句「按 PRD 核对」不算"}]})
-            tickets[pid] = created["id"]
+            # 工单号由库里发（schema 11 起）：按项目记下发到的号，后面按号寻址。
+            tickets[pid] = run(center, "create_ticket", {"project_id": pid, "title": "整理检查清单",
+                                          "deliverable": "一份逐项可勾选的检查清单", "prd_path": "PRD.md",
+                                          "criteria": [{"id": "C1", "text": "包含明确的检查步骤"}]})["id"]
         barrier = threading.Barrier(2)
 
         def work(pid):
@@ -54,8 +51,7 @@ def main():
                                           "attempt_id": claim["attempt_id"], "session_id": session,
                                           "artifacts": ["result.md"], "summary": f"{pid} 的清单",
                                           "evidence": ["按 PRD 逐条核对"], "risks": [],
-                                          "head_sha": "0000000000000000000000000000000000000000",
-                                          "base_sha": "1111111111111111111111111111111111111111"})
+                                          "head_sha": "0000000000000000000000000000000000000000"})
 
         threads = [threading.Thread(target=work, args=(pid,)) for pid in projects]
         for thread in threads:

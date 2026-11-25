@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UI 设计语言 · 单文件模板</title>
+<style>
+  /* 一，token：本文件唯一的色值来源，浅色在 :root，深色在 :root[data-theme="dark"]。
+     页面其余部分只写 var(--color-*)，不写十六进制。 */
+  :root {
+    --color-surface: #F9F9F6;
+    --color-surface-elevated: #FFFFFC;
+    --color-surface-chip: #EAEAE6;
+    --color-surface-chip-strong: #E2E2DC;
+    --color-surface-sunken: #F1F1EC;
+    --color-selected-surface: #FFFFFF;
+    --color-bubble-own-surface: rgba(29, 78, 216, 0.10);
+    --color-divider: rgba(60, 60, 60, 0.14);
+    --color-press-tint: rgba(0, 0, 0, 0.045);
+    --color-border: #CCCCC8;
+    --color-border-strong: #858581;
+    --color-text-primary: #0F0F0F;
+    --color-text-secondary: #4D4D4A;
+    --color-text-tertiary: #686864;
+    --color-link: #1D4ED8;
+    --color-cta: #0F0F0F;
+    --color-cta-text: #FFFFFF;
+    --color-inverse-surface: #0F0F0F;
+    --color-inverse-ink: #FFFFFF;
+    --color-inverse-border: rgba(255, 255, 255, 0.18);
+    --color-success: #2AAE5B;
+    --color-warning: #F3A115;
+    --color-danger: #D91F37;
+    --color-running: #EA6B17;
+    --color-danger-text: #D91F37;
+    --color-danger-surface: rgba(217, 31, 55, 0.08);
+    --color-warning-surface: rgba(243, 161, 21, 0.14);
+    --color-overlay: rgba(38, 38, 38, 0.35);
+    --color-glass-surface: rgba(249, 249, 246, 0.86);
+    --color-glass-sheet: rgba(250, 250, 247, 0.86);
+    --color-glass-highlight: rgba(255, 255, 255, 0.92);
+    --color-bar-solid: #F9F9F6;
+    --color-grabber: #C2C2BE;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --space-6: 32px;
+
+    --radius-micro: 4px;
+    --radius-card: 16px;
+    --radius-bubble: 20px;
+    --radius-sheet: 24px;
+    --radius-pill: 9999px;
+
+    --text-11: 11px;
+    --text-12: 12px;
+    --text-13: 13px;
+    --text-15: 15px;
+    --text-16: 16px;
+    --text-17: 17px;
+    --text-18: 18px;
+    --text-20: 20px;
+    --text-24: 24px;
+
+    --leading-h1: 30px;
+    --leading-h2: 26px;
+    --leading-body: 22px;
+    --leading-caption: 18px;
+    --leading-conversation: 26px;
+
+    --duration-tap: 120ms;
+    --duration-standard: 250ms;
+    --duration-panel: 320ms;
+    --duration-shimmer: 1100ms;
+    --ease-out: cubic-bezier(0.2, 0, 0, 1);
+    --spring-soft: cubic-bezier(0.22, 1.12, 0.36, 1);
+
+    --z-bar: 20;
+    --z-sheet: 30;
+    --z-toast: 40;
+  }
+
+  :root[data-theme="dark"] {
+    --color-surface: #121212;
+    --color-surface-elevated: #1E1E1E;
+    --color-surface-chip: #2A2A2A;
+    --color-surface-chip-strong: #2E2E2E;
+    --color-surface-sunken: #1A1A1A;
+    --color-selected-surface: #3A3A3A;
+    --color-bubble-own-surface: rgba(147, 197, 253, 0.20);
+    --color-divider: rgba(255, 255, 255, 0.12);
+    --color-press-tint: rgba(255, 255, 255, 0.06);
+    --color-border: #383838;
+    --color-border-strong: #8A8A8A;
+    --color-text-primary: #EDEDED;
+    --color-text-secondary: #BDBDBD;
+    --color-text-tertiary: #999999;
+    --color-link: #93C5FD;
+    --color-cta: #EDEDED;
+    --color-cta-text: #121212;
+    --color-inverse-surface: #EDEDED;
+    --color-inverse-ink: #121212;
+    --color-inverse-border: rgba(0, 0, 0, 0.10);
+    --color-danger-text: #FF667A;
+    --color-danger-surface: rgba(217, 31, 55, 0.18);
+    --color-warning-surface: rgba(243, 161, 21, 0.20);
+    --color-overlay: rgba(0, 0, 0, 0.45);
+    --color-glass-surface: rgba(24, 24, 24, 0.62);
+    --color-glass-sheet: rgba(30, 30, 30, 0.80);
+    --color-glass-highlight: rgba(255, 255, 255, 0.14);
+    --color-bar-solid: #121212;
+    --color-grabber: #5C5C5C;
+  }
+
+  /* 二，基础：字号、行高、控件热区都从 token 取 */
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; }
+
+  body {
+    min-height: 100vh;
+    background: var(--color-surface);
+    color: var(--color-text-primary);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: var(--text-16);
+    line-height: var(--leading-body);
+  }
+
+  button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+
+  .icon {
+    width: 20px;
+    height: 20px;
+    flex: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    fill: none;
+  }
+
+  /* 三，顶部玻璃栏：模糊 + 1px 高光底边 + 栏下渐隐，三件齐全才算玻璃 */
+  .bar {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-bar);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 56px;
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-glass-surface);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    backdrop-filter: blur(18px) saturate(140%);
+    border-bottom: 1px solid var(--color-glass-highlight);
+  }
+
+  .bar-title {
+    margin-right: auto;
+    font-size: var(--text-18);
+    line-height: var(--leading-h2);
+    font-weight: 500;
+  }
+
+  .icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: var(--radius-pill);
+    color: var(--color-text-secondary);
+    transition: transform var(--duration-tap) var(--ease-out), background-color var(--duration-tap) var(--ease-out);
+  }
+
+  .icon-button:active {
+    transform: scale(0.96);
+    background: var(--color-press-tint);
+  }
+
+  .icon-button:focus-visible,
+  .button:focus-visible,
+  .row:focus-visible,
+  .toggle:focus-visible {
+    outline: 2px solid var(--color-link);
+    outline-offset: 2px;
+  }
+
+  /* 四，内容列：页面左右 16，区块之间 24 */
+  main {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+
+  main > section + section { margin-top: var(--space-5); }
+
+  h2 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-16);
+    line-height: var(--leading-body);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+  }
+
+  /* 五，列表：透明底 + 发丝分隔线 + 按压底色，行内边距 16，热区 44 起 */
+  .rows { background: none; }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--space-3) var(--space-4);
+    text-align: left;
+    color: var(--color-text-primary);
+    border-radius: var(--radius-card);
+    transition: background-color var(--duration-tap) var(--ease-out);
+  }
+
+  .row:active { background: var(--color-press-tint); }
+
+  .row + .row { position: relative; }
+
+  .row + .row::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: var(--space-4);
+    inset-inline-end: 0;
+    top: 0;
+    height: 1px;
+    background: var(--color-divider);
+  }
+
+  .row-main { min-width: 0; margin-right: auto; }
+
+  .row-title { font-size: var(--text-16); line-height: var(--leading-body); }
+
+  .row-sub {
+    margin-top: var(--space-1);
+    font-size: var(--text-12);
+    line-height: var(--leading-caption);
+    color: var(--color-text-secondary);
+  }
+
+  .row-meta {
+    font-size: var(--text-12);
+    line-height: var(--leading-caption);
+    color: var(--color-text-tertiary);
+  }
+
+  /* 六，卡片：淡底分层，没有描边也没有投影；副标题提到 textSecondary 才够对比度 */
+  .card {
+    padding: var(--space-4);
+    border-radius: var(--radius-card);
+    background: var(--color-surface-chip-strong);
+  }
+
+  .card-title { font-size: var(--text-16); line-height: var(--leading-body); }
+
+  .card-text {
+    margin-top: var(--space-1);
+    font-size: var(--text-12);
+    line-height: var(--leading-caption);
+    color: var(--color-text-secondary);
+  }
+
+  /* 七，按钮：主 / 次 / 幽灵，都是胶囊，热区 44 */
+  .button-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-16);
+    transition: transform var(--duration-tap) var(--spring-soft), background-color var(--duration-tap) var(--ease-out);
+  }
+
+  .button:active { transform: scale(0.96); }
+
+  .button-primary { background: var(--color-cta); color: var(--color-cta-text); }
+
+  .button-secondary { background: var(--color-surface-chip); color: var(--color-text-primary); }
+
+  .button-ghost { color: var(--color-text-secondary); }
+
+  /* 八，对话：自己的短句胶囊、长句 20 圆角，助手正文没有气泡 */
+  .conversation { display: flex; flex-direction: column; gap: var(--space-3); }
+
+  .bubble-own {
+    align-self: flex-end;
+    max-width: 86%;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-bubble);
+    background: var(--color-bubble-own-surface);
+    color: var(--color-text-primary);
+    font-size: var(--text-17);
+    line-height: var(--leading-conversation);
+  }
+
+  .bubble-own.is-short { border-radius: var(--radius-pill); }
+
+  .assistant-text {
+    font-size: var(--text-17);
+    line-height: var(--leading-conversation);
+    color: var(--color-text-primary);
+  }
+
+  /* 九，空态：淡底圆 + 一句标题 + 一句说明 + 一个能点的下一步 */
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-6) var(--space-4);
+    text-align: center;
+  }
+
+  .empty-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-pill);
+    background: var(--color-surface-chip);
+    color: var(--color-text-tertiary);
+  }
+
+  .empty-title { font-size: var(--text-16); line-height: var(--leading-body); }
+
+  .empty-text {
+    max-width: 320px;
+    font-size: var(--text-12);
+    line-height: var(--leading-caption);
+    color: var(--color-text-secondary);
+  }
+
+  /* 十，底部面板：面板顶角 24、抓手、玻璃比栏更实一档 */
+  .sheet-layer {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-sheet);
+    display: flex;
+    align-items: flex-end;
+    background: var(--color-overlay);
+  }
+
+  .sheet-layer[hidden] { display: none; }
+
+  .sheet {
+    width: 100%;
+    padding: var(--space-2) var(--space-4) var(--space-5);
+    border-radius: var(--radius-sheet) var(--radius-sheet) 0 0;
+    border-top: 1px solid var(--color-glass-highlight);
+    background: var(--color-glass-sheet);
+    -webkit-backdrop-filter: blur(28px) saturate(150%);
+    backdrop-filter: blur(28px) saturate(150%);
+    color: var(--color-text-primary);
+  }
+
+  .grabber {
+    width: 44px;
+    height: 4px;
+    margin: 0 auto var(--space-3);
+    border-radius: var(--radius-pill);
+    background: var(--color-grabber);
+  }
+
+  .sheet-title { font-size: var(--text-18); line-height: var(--leading-h2); }
+
+  .sheet-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 44px;
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-card);
+    font-size: var(--text-16);
+    transition: background-color var(--duration-tap) var(--ease-out);
+  }
+
+  .sheet-row:active { background: var(--color-press-tint); }
+
+  /* 十一，轻提示：反色底，别做成弹窗 */
+  .toast {
+    position: fixed;
+    inset-inline: 0;
+    bottom: var(--space-6);
+    z-index: var(--z-toast);
+    width: fit-content;
+    margin: 0 auto;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-inverse-border);
+    background: var(--color-inverse-surface);
+    color: var(--color-inverse-ink);
+    font-size: var(--text-13);
+  }
+
+  .toast[hidden] { display: none; }
+
+  /* 十二，指针设备才给 hover：触屏上 hover 会粘住 */
+  @media (hover: hover) {
+    .icon-button:hover { color: var(--color-text-primary); }
+    .row:hover { background: var(--color-press-tint); }
+    .button-ghost:hover { background: var(--color-surface-chip); }
+  }
+
+  /* 十三，减弱动效：动画关掉，状态一步到位 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+    .button:active,
+    .icon-button:active { transform: none; }
+  }
+</style>
+</head>
+<body>
+  <header class="bar">
+    <span class="bar-title">设计语言</span>
+    <button class="icon-button" type="button" aria-label="刷新列表">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M21 3v6h-6"/></svg>
+    </button>
+    <button class="icon-button" type="button" id="themeToggle" aria-label="切换到深色">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <section aria-labelledby="listTitle">
+      <h2 id="listTitle">列表行</h2>
+      <div class="rows">
+        <button class="row" type="button" id="openSheet">
+          <span class="row-main">
+            <span class="row-title">mac-mini 家里</span>
+            <span class="row-sub">在线 · 3 个进行中的会话</span>
+          </span>
+          <span class="row-meta">2 分钟前</span>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <button class="row" type="button">
+          <span class="row-main">
+            <span class="row-title">cindy-harmony-app</span>
+            <span class="row-sub">执行中 · 设计系统收口</span>
+          </span>
+          <span class="row-meta">刚刚</span>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+    </section>
+
+    <section aria-labelledby="cardTitle">
+      <h2 id="cardTitle">卡片</h2>
+      <div class="card">
+        <div class="card-title" id="cardTitle">明暗模式</div>
+        <div class="card-text">卡片靠淡底与页面对比度分层，不加描边也不加投影；副标题因此从弱文字提到次文字。</div>
+      </div>
+    </section>
+
+    <section aria-labelledby="buttonTitle">
+      <h2 id="buttonTitle">按钮</h2>
+      <div class="button-group">
+        <button class="button button-primary" type="button" id="showToast">发送</button>
+        <button class="button button-secondary" type="button">取消</button>
+        <button class="button button-ghost" type="button">了解更多</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="convTitle">
+      <h2 id="convTitle">对话</h2>
+      <div class="conversation">
+        <div class="bubble-own is-short">好</div>
+        <div class="bubble-own">把这个页面的间距全部改成六档里的值，圆角只用卡片和胶囊两种，别再加描边了。</div>
+        <div class="assistant-text">收到。我先把列表行的 16 认成页面外边距那一档，行内改用 12；卡片换回淡底，发丝分隔线左端缩进到文字起点。</div>
+      </div>
+    </section>
+
+    <section aria-labelledby="emptyTitle">
+      <h2 id="emptyTitle">空态</h2>
+      <div class="empty">
+        <div class="empty-mark">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 11h18"/></svg>
+        </div>
+        <div class="empty-title" id="emptyTitle">还没有设备</div>
+        <div class="empty-text">在另一台电脑上打开 Cindy 并登录同一个账号，它会出现在这里。</div>
+        <button class="button button-primary" type="button">看看怎么连</button>
+      </div>
+    </section>
+  </main>
+
+  <div class="sheet-layer" id="sheetLayer" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <div class="grabber"></div>
+      <div class="sheet-title" id="sheetTitle">会话操作</div>
+      <button class="sheet-row" type="button" id="closeSheet">
+        关闭面板
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      <button class="sheet-row" type="button">重命名</button>
+      <button class="sheet-row" type="button">归档</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden>已发送</div>
+
+  <script>
+    (function () {
+      var root = document.documentElement;
+      var toggle = document.getElementById('themeToggle');
+      toggle.addEventListener('click', function () {
+        var dark = root.getAttribute('data-theme') === 'dark';
+        root.setAttribute('data-theme', dark ? 'light' : 'dark');
+        toggle.setAttribute('aria-label', dark ? '切换到深色' : '切换到浅色');
+      });
+
+      var layer = document.getElementById('sheetLayer');
+      document.getElementById('openSheet').addEventListener('click', function () {
+        layer.hidden = false;
+      });
+      document.getElementById('closeSheet').addEventListener('click', function () {
+        layer.hidden = true;
+      });
+
+      var toast = document.getElementById('toast');
+      var timer = null;
+      document.getElementById('showToast').addEventListener('click', function () {
+        toast.hidden = false;
+        if (timer) { clearTimeout(timer); }
+        timer = setTimeout(function () { toast.hidden = true; }, 2000);
+      });
+    })();
+  </script>
+</body>
+</html>

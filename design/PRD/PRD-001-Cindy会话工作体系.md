@@ -1,8 +1,8 @@
 # PRD-001：基于 Cindy 对话框的 AI 工作体系
 
-- 状态：总体方向与集中工单方案已获用户认可，按阶段推进；本机工单核心与项目候选层已实现并测试，真实会话适配未开始
-- 版本：0.10
-- 日期：2026-11-17
+- 状态：总体方向与集中工单方案已获用户认可，按阶段推进；本机工单核心与项目候选层已实现并测试，真实会话适配未开始。0.12 只把「回执的收件人是谁、他不在时怎么办、谁有权收尾」定下来：收件人 = 当前 owner、`claim` 之后由派单器接替到常驻会话、`answer_ticket` 与 `record_notice` 同一把尺，并追加 AC15 / AC16 与文末变更记录一行
+- 版本：0.12
+- 日期：2026-11-23
 - 所属项目：{{WORKSPACE}}
 - 当前实施范围：先建设和测试本机工单核心，再接入真实 Cindy 会话。不开启定时自动化，不修改其他业务项目。
 
@@ -78,11 +78,13 @@ PRD 可以修订和归档，但历史版本不得被无记录地覆盖。文件�
 | --- | --- |
 | 项目 | 稳定标识、名称、Cindy 项目路径、说明文档入口；登记错了可撤销（有工单时拒绝撤销） |
 | PRD | 稳定标识、版本、文档位置、状态与变更说明 |
-| 工单 | 标识、项目、PRD 版本、目标、交付物（主题与形状）、排除项、依赖、验收条件、当前状态 |
+| 工单 | 标识、项目、PRD 版本、目标、交付物（主题与形状）、排除项、依赖、验收条件、当前状态、责任人 owner（现在负责收尾的那条会话，可接替） |
 | 执行尝试 | 标识、步骤、session、实际目录、模型配置、开始时间、最后活动、结束原因 |
 | 成果 | 文件或其他可验证对象的位置、版本或摘要校验信息、检查证据 |
 | 验收 | 对应成果版本、检查项、结论、理由、验收 session 与时间 |
 | 事件 | 谁在何时触发了什么状态变化，以及依据和关联执行 |
+
+**「谁派的」与「现在谁负责」是两个字段，不是一个。** 执行尝试上的 `coordinator_session_id` 是 *origin*——谁派的这条尝试，历史事实，永不改写；工单上的 `owner_session_id` 是 *owner*——现在谁负责把它收尾，人换了就换（`take_over_ticket`）。`claim_ticket` 同时写下两者（此刻相等）。分开的理由是一条已经付过代价的死锁：派发这张单的会话会被宿主归档，而以前回执的授权就绑在它身上，于是「派发者不在了」直接等于「这张单再没有人能负责」，一张已验收的单永远合不进去（AW-106）。
 
 工单、执行记录、验收结论与事件集中存储在 AI 工作区的 SQLite 数据库，由统一入口更新。PRD 和成果留在各业务项目，中心通过标识、位置与版本关联；项目任务列表是中心数据的视图，不建立第二份可修改状态。
 
@@ -136,6 +138,35 @@ session 状态和工单状态必须区分：会话运行结束不代表成果已
 
 具体结果提交入口、并发领取和失败恢复机制必须在实现前验证，不能把提示词约定当成程序保证。
 
+### 回执授权：写 owner，不写 origin
+
+回执（`record_notice`）是「做完发一条」这条链的收口。它以前只许「派发这张单的会话」调，而那条会话会消失：
+
+- **消失是可观测的，也是不可预测的。** 宿主会话库 `sessions` 表的 `status` 与 `last_turn_ended_at` / `updated_at` 说得清这件事：2026-11-22 实测，AW-106 的协调会话 `<session-id>` 在 `last_turn_ended_at`（08:04:08.244Z）之后 22 ms 被写成 `status=archived`；同一天另两条调度会话结束了本轮却仍是 `active`。所以规矩是「不要假设一轮结束后的会话还能收信」，不是「它一定归档」。
+- **归档之后没有任何东西能替它**：`record_notice` 报 `NOT_COORDINATOR`，`merge_ticket` 报 `NO_NOTICE`，成果在库里、合并进不去。不许让人冒充那条会话的 id——那是在库里写一句假话。
+
+**结论：授权读 owner，审计读 origin。**
+
+| 谁 | 读哪个字段 | 为什么 |
+| --- | --- | --- |
+| `record_notice` 的 `session_id` 与 `target_session_id` | `tickets.owner_session_id`（当前 owner） | 「谁说这声『发了』、发给谁」是当下的事，人换了就该跟着换 |
+| `answer_ticket` 的 `answered_by_session_id`（代答一个问题） | `tickets.owner_session_id`（当前 owner） | 「谁来替人落这句结论」与「谁来记回执」是同一件事：都该是现在负责收尾的那条会话。0.11 漏了这一行，于是接替之后回执能补、问题却谁都答不了（AW-118 在 `blocked` 里挂了 7 个多小时）。
+| `report_notice_failure`（执行会话记自己那次失败） | 该尝试绑定的执行会话；目标读 `attempts.coordinator_session_id` | 它说的不是「送达」，而是「我发不出去、发给谁失败了」；它没有 `status` 字段，造不出 `sent` |
+| `merge_ticket` 能不能过 `NO_NOTICE`（合并授权的判定） | `tickets.owner_session_id`（**间接**：那道门只看 `notices` 非空，而 `notices` 的行只有当前 owner 有权写） | 「这张单能不能合」最终由现在负责收尾的人决定；origin 不参与。想合一张没人能补回执的单，先把 owner 接替过来 |
+| `take_over_ticket` 的 `new_owner_session_id` | 写 `tickets.owner_session_id` | 换的是「现在谁负责」，`revision`、尝试、提交、验收都不动 |
+| 验收与事后追查（回执发给了谁、谁派的单） | `attempts.coordinator_session_id` | 这是历史事实，改掉就再也查不出当初是谁派的 |
+
+**代价。** 接替是自报声明不是认证（`new_owner_session_id` 仍是字符串，工具没有宿主访问权）：早接替会让原 owner 随后的 `record_notice` 变成 `NOT_COORDINATOR`——一次可见的失败，不是两条同时成立的真相；`events` 里那次接替带着旧 owner、新 owner 与理由。执行会话不能给自己接替（`TAKEOVER_BY_EXECUTOR`），否则 `SELF_DISPATCH` 从后门失效。`failed` 让合并放行不等于送达：库里「一条 `sent`」与「若干条写清原因的 `failed`」是两种不同的事实。
+
+**收件人是 owner，接替发生在派单那一刻（0.12）。** 上面那张表说的是「谁能写」，这一段说「发给谁、什么时候换人」：
+
+- **回执的收件人只有一个定义：`tickets.owner_session_id`。** `attempts.coordinator_session_id` 只作 origin 审计，不再参与投递。两个只读工具（`tools/receipt_payload.py`、`tools/notice_payload.py`）打印的 `target_session_id` 都取 owner，所以「发给谁」与「谁有权记」永远是同一条会话——两者不相等时，`record_notice` 的 `NOT_TARGET` 就是必然的。
+- **接替是派单流程的一步，不是回执失败之后的补救。** 调度建的那种派单会话 claim 完、这一轮结束就归档，「等回执到了再接替」在无人值守下永远晚一步。所以顺序改成：`claim_ticket` → **接替 owner 到一条常驻会话**（`python tools/handover_owner.py --ticket <单号> --to <常驻会话 id> --reason <一句>`，它先核「当前 owner 已不在、目标会话活着、这张单还有收尾动作可做、目标不是执行会话」）→ 才发派单消息。目标会话由人指名，**不是自动接替**；工具只拒绝那些后来会变成死锁或双重收尾的接法（owner 还活着时不许接管、目标已归档不许接、只剩合并时接替没有意义）。
+- **没有常驻会话可选时不编一个。** 回执照常发，发不出去就走 `report_notice_failure` 落 `failed` 并写清「目标已归档」；推进交给下一轮 `next_action`，悬空由 `tools/wait_audit.py` 报出。「不知道收件人是谁」与「收件人不在」都落成库里的一行，不落成一句推测。
+- **无人值守下不要求回执的 `wake_kind` 落在某个值上。** 没有另一条活会话可读投递回执、可核队列、可插话，所以「`wake_kind` 必须是 `queued` / `already-active`」「回执要 `delivery=steered`」这类条件在无人时不可达成。可满足的写法是：**`notices` 里有一行写清去向与原因**（一条 `sent`，或若干条 `failed` 带宿主原话），`wake_kind` 有原值就照记、没有就记 `unknown` 并在 `detail` 里注明是占位。
+
+**不做什么。** 不拆 `NO_NOTICE`、不改 `send_to_session` 的入参、不做自动接替或自动重派、不冒充已归档会话的标识。操作细节与 AW-106 的复算命令在 `docs/protocol.md` 的「协调会话归档之后：owner 与 origin 不是一个字段」。
+
 ### 派发的载体
 
 2026-11-17 的那几轮真实演练（`tasks/real-session-drill.md`）用的是**项目里的普通会话**：`cindy_helper` 的 handoff 类 `send_to_session` 不传 `target_session_id` 时新建任务，指定 `project_path` 与 `title`，新会话出现在该项目会话列表里，可以点开、追问、自己回传结果。
@@ -184,6 +215,11 @@ session 状态和工单状态必须区分：会话运行结束不代表成果已
 | AC10 | 缺权限、范围冲突或超过返工限制时停止并请求决策 | 部分验证 | `cancel_ticket` / `recover_ticket` 可用；返工上限计数未实现，阻塞无专用状态 |
 | AC11 | 没有工单与已绑定尝试时，改动无法落盘 | 部分验证 | `tools/test_work_gate.py` 13 项全列：放行 1（已绑定 running）；拒绝 8（`ready`、只 claim 未绑定、未知工单、跨项目反查、指定他项目、已提交待验收、库缺失、未给工单号）；`--list` 只列活跃尝试 1；无隐身开关 1；真正跑一次 `git commit` 的端到端 2（拦截、放行各一）。未覆盖：`--no-verify` 可绕过，直接写文件不经 git 的路径也拦不住 |
 | AC12 | 协调会话不能把工单派给自己：同一会话 claim 与 bind 被拒 | 部分验证 | 0.9 要求：`claim_ticket` 必填 `coordinator_session_id`，`bind_session` 同标识返回 `SELF_DISPATCH`；证据与实现同批交付（AW-006），测试在 `tests/` 里可复跑。未覆盖：标识仍是自报字符串，换一个字符串就绕过了；只能拦住「忘了开新会话」这一类 |
+| AC13 | 回执授权读 owner（`tickets.owner_session_id`），审计读 origin（`attempts.coordinator_session_id`）：未接替时非 owner 记回执报 `NOT_COORDINATOR` 且不写行；`take_over_ticket` 之后新 owner 能记回执、`merge_ticket` 能写合并记录，origin 一个字不改 | 已验证 | 证据：`python -m unittest discover -s tests -p "test_owner.py"` 9 项全绿（含未接替时 `NO_NOTICE`、接替后合并通过、origin 不变、四条拒绝路径）；schema 15（14 → 15 加 `tickets.owner_session_id` 并按当前尝试回填；13 → 14 是 AW-106 先落地的 `requester_session_id` 与 `notices.message_id`）见 `test_migrate.py` 的 `test_upgrade_from_v13_adds_owner_session_id_and_backfills_it`。反例：加了 owner 之后变成谁都能写回执，或仍让一个字段同时承担「谁派的」与「谁负责」 |
+| AC14 | 执行会话在目标会话归档时有一条落 `failed` 的路径，且造不出 `sent`：`report_notice_failure` 没有 `status` 字段，`session_id` 必须是该尝试绑定的执行会话，`target_session_id` 必须是该尝试的 origin；记完之后 `merge_ticket` 过得去，记录人写在同一次调用的成功事件里 | 已验证 | 证据：`python -m unittest discover -s tests -p "test_notice_failure.py"` 7 项全绿（含带 `status` 报 `INVALID_INPUT`、只有绑定的执行会话能记、记完能合并）。反例：把失败回执记成 `sent`，或放开 `record_notice` 让执行会话宣告送达 |
+
+| AC15 | 无人值守时回执的收件人是当前 owner，且派单器 `claim` 之后能把 owner 接替到一条活着的常驻会话：接替之后 `python tools/coordinator_state.py --ticket <单号>` 打印 `verdict: OWNER_ACTIVE`，新 owner 的 `record_notice` 落得下去；`answer_ticket` 的代答授权读 owner，与 `record_notice` 同一把尺 | 已验证 | 证据：`python tools/test_handover_owner.py` 10 项全绿（含副本库上「协调会话已归档」的完整现场：`claim` → 接替 → `get_ticket` 的 `owner_session_id` 指向活会话 → 新 owner 的 `record_notice` 成功）；`python -m unittest discover -s tests -p "test_answer_owner.py"` 6 项全绿（接替后新 owner 能代答、origin 被拒、执行会话仍 `SELF_ANSWER`）。反例：接替之后回执能补、问题仍谁都答不了（两把尺）；或为了认归档会话语再加一个白名单 |
+| AC16 | 「该不该接替」有前置判据，不是谁想接就能接：当前 owner 在宿主里还活着时拒绝（`OWNER_STILL_ACTIVE`）、目标会话已归档或查不到时拒绝（`TARGET_NOT_ALIVE`）、`done` 且已有合并记录或回执时拒绝（`NOTHING_TO_TAKE_OVER`，合并不认会话）、查不出宿主状态时退出 2（`UNKNOWN`）；每条都一行不写 | 已验证 | 证据：`python tools/test_handover_owner.py` 里四条拒绝用例与 `test_unknown_is_not_a_yes` 各断言退出码与 owner 未变。反例：让一个会话在 owner 还活着时把 owner 接到自己身上，两个会话都以为自己该写合并记录（AWK-103 的现场，靠 `ALREADY_MERGED` 才没写成两条） |
 
 AC01、AC03、AC10 尚未满足，不得据此宣称全流程可用。
 
@@ -234,6 +270,8 @@ AC01、AC03、AC10 尚未满足，不得据此宣称全流程可用。
 ## 变更记录
 
 | 版本 | 日期 | 变更 |
+| 0.12 | 2026-11-23 | 把「回执的收件人是谁、他不在时怎么办、谁有权收尾」定下来（AW-122）：①收件人只有一个定义——`tickets.owner_session_id`，两个只读工具打印的 `target_session_id` 都取它，origin 只作审计；②接替从「回执失败后的补救」改成「派单流程的一步」：`claim_ticket` 之后、发派单消息之前，派单器用 `tools/handover_owner.py` 把 owner 接到一条活着的常驻会话（工具先核「当前 owner 已不在、目标会话活着、这张单还有收尾动作可做、目标不是执行会话」，owner 还活着或目标已归档都拒绝），不新增宿主能力、不自动接替；③`answer_ticket` 的代答授权从 origin 改成 owner，与 `record_notice` 同一把尺（0.11 的表格漏了这一行，结果接替之后回执能补、问题谁都答不了）；④无人值守下不再要求 `wake_kind` 落在 `queued` / `already-active`，改成「`notices` 有一行写清去向」。新增 §9 的四条说明与 AC15 / AC16；§1–§8、§10–§15 与 AC01–AC14 零改动。`docs/protocol.md`、`docs/无人值守派单.md`、`AGENTS.md` 与代码同一工单同步 |
+| 0.11 | 2026-11-22 | 把「授权」与「审计」拆成两个字段（AW-114）：`attempts.coordinator_session_id` 只表示 origin（谁派的，历史事实，永不改写），新增 `tickets.owner_session_id` 表示 owner（现在谁负责收尾，`take_over_ticket` 可接替）。schema 顺延到 15：AW-106 先落地、已占用 14（`tickets.requester_session_id` 与 `notices.message_id`），14 → 15 才加 owner 并按当前尝试回填。`record_notice` 的授权与投递目标、合并的闭环判定读 owner；执行会话自己那次没送到的回执走 `report_notice_failure`（只落 `failed`，没有 `status` 字段所以造不出 `sent`）。起因是 AW-106：`done` + `accept` + `notices` 0 + `merges` 0，派发它的协调会话被宿主归档，`NOT_COORDINATOR` 与 `NO_NOTICE` 合起来把这张单锁死。新增 §9 子节「回执授权：写 owner，不写 origin」、§7 的一段说明与 AC13 / AC14；§1–§6、§8、§10–§15 与 AC01–AC12 零改动（原 §9 其余内容一字未改）。`docs/protocol.md` 与代码归 AW-114，同一工单同步 |
 | --- | --- | --- |
 | 0.1 | 2026-11-17 | 按用户确定的 Cindy 普通会话架构创建首版；明确排除 OmniFlow 和伙伴。 |
 | 0.2 | 2026-11-17 | 用户认可集中工单、分项目资料、统一提交、独立验收并要求推进；确定 SQLite 单机核心优先，明确可信协作及后续真实会话验证边界。 |

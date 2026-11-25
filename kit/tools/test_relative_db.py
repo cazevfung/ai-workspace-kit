@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import close_gate
 import coordinator_state
 import idle_watch
+import invariants
 import next_action
 import notice_payload
 import session_roster
@@ -58,6 +59,9 @@ TOOLS = (
     ("close_gate", close_gate),
     ("session_roster", session_roster),
     ("coordinator_state", coordinator_state),
+    # AW-159：不变量自检也是只读工具，它最不能容忍的就是「给相对路径就 traceback」——
+    # 自检跑不起来的时候，被检查的库里本来就有可疑行。
+    ("invariants", invariants),
 )
 
 # 返回 `(conn, how)` 的那一类。形状不同，断言也不同：见模块说明。

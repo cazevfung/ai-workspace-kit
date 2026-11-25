@@ -11,10 +11,11 @@
 2. **故障不许变成「没活」。** 库读不开、库版本不对、项目归属查不出——这些是
    不知道，不是空闲。两者混在一起最糟：调度侧会安安静静地不干活，而现场是坏
    的。所以本脚本的退出码与同目录的 `wait_audit.py` 相反：`wait_audit` 用 2 表示
-   「库有问题」，这里 2 表示「没活」，**出错一律 1**（`PRD/PRD-010` §4.3 的那套
-   阈值与本脚本无关：这里没有任何时间阈值，判据全在库里的状态上）。
+   「库有问题」，这里 2 表示「没活」，**出错一律 1**。本脚本的时间阈值只有两个，都在下面：
+   验收在飞的 `REVIEW_IN_FLIGHT_SECONDS`（从 `task_center` 取）与空判据单的
+   `BLANK_CRITERIA_GRACE_SECONDS`（本文件里）。
 
-四个结果，一次只给一个（互斥）：
+五个结果，一次只给一个（互斥）：
 
     dispatch_execute  池子里有可领的单 —— 派执行会话
     dispatch_review   有单在等验收、且还没有验收会话在飞 —— 派验收会话
@@ -22,23 +23,24 @@
     fix_pool          池子里只剩躺了很久的空判据单 —— 点名它，人补判据或取消
     nothing           以上都没有 / 有在途单挡着 / 暂停中 / 验收在飞
 
-**`fix_pool` 属于「有活」而不是「没活」。** 在这之前，池子里只剩空判据的 `planned`
-单时，它只是 `skipped` 里的一行、`action` 仍是 `nothing`——而那种单永远领不走
-（`claim_ticket` 报 `CRITERIA_NOT_JUDGEABLE`），于是「池子里有活、只是没人能领」
-被报成了「没活」。现在只要这种单的 `created_at` 已经超过
-`BLANK_CRITERIA_GRACE_SECONDS`（一天），它就单独成一档被点名。**阈值只有那一个来源**，
+**`fix_pool` 是 AW-138 补的第五档，它属于「有活」而不是「没活」。** 在这之前，
+池子里只剩空判据的 `planned` 单时，它只是 `skipped` 里的一行、`action` 仍是 `nothing`——
+而那种单永远领不走（`claim_ticket` 报 `CRITERIA_NOT_JUDGEABLE`），于是「池子里有活、
+只是没人能领」被报成了「没活」，两张空判据单在池子里躺了一整天没人知道。现在只要
+这种单的 `created_at` 已经超过 `BLANK_CRITERIA_GRACE_SECONDS`（一天），
+它就单独成一档被点名。**阈值只有那一个来源**（本脚本的 `BLANK_CRITERIA_GRACE_SECONDS`），
 本脚本与文档都不许各写一个数。
 
 **它是「只报不改」的最后一档。** 两条出路都要人或协调会话动手：`revise_ticket` 补上
 至少一条可判定条件，或 `cancel_ticket` 承认不做了。本脚本既不写判据也不取消单——
 库仍然是 `mode=ro`，一行都不写；替人做决定会让「这张单为什么没了」无迹可查。
 
-**报过之后要退避，报到第 N 轮要升级。** 这一档「有活」的代价是「没人处理就每轮再报
-一次」：同一张单、同一句话，一天下来烧掉几十轮，而输出一字不变。现在每一次点名都要先
-落一条 `record_pool_report` 事件（`task_center` 的同名写操作，或走
-`tools/pool_report.py`；本脚本只读），读侧按这张单已经报过几次决定三件事：
+**报过之后要退避，报到第 N 轮要升级（AW-140）。** AW-138 让这一档「有活」，代价是
+「没人处理就每轮再报一次」：同一张单、同一句话，一天下来烧掉几十轮，而输出一字不变。
+现在每一次点名都要先落一条 `record_pool_report` 事件（`task_center` 的同名写操作，
+本脚本只读），读侧按这张单已经报过几次决定三件事：
 
-- **还没报过 → 原样点名**（第 1 轮）；
+- **还没报过 → 原样点名**（第 1 轮，行为与 AW-138 一致）；
 - **报过、但还没到下一次的时间 → 这一轮不点名**（`reason_code=blank_criteria_backoff`，
   退出 2）。退避阶梯是 `POOL_REPORT_BACKOFF_SECONDS`：第 1 次之后 2 小时、第 2 次之后
   6 小时、第 3 次之后 24 小时，此后一直 24 小时；
@@ -49,7 +51,7 @@
 **「报过几次」只存在库里，不靠会话记忆。** 一条 `record_pool_report` 事件 = 这张单被
 点名一次；换一个会话、换一台机器读同一个库，算出来的轮次与下一次时间一模一样。
 本脚本不写这条记录（它只读），所以空判据档的人话里会把要落的记录名写出来：不落，
-下一轮就会从头再报一遍。
+下一轮就会从头再报一遍——这一点也写在 `docs/无人值守派单.md` §3.2。
 
 **优先级：验收 > 合并 > 派执行 > 补池子。** 前三个的理由不是偏好：`awaiting_review` 在
 `DISPATCH_BUSY` 的口径里算在途（`task_center/core.py` 的 `ACTIVE_TICKET_STATES`），
@@ -80,24 +82,11 @@
 
 **合并候选的两条限制，都写在输出里，不悄悄丢掉。**
 
-- 只认「能拿出来合的东西」：最新提交记了分支头（`submissions.head_sha`），或者仓库里还有
-  `ticket/<单号>` 分支（分支不在、也没有分支头 → 库里与 git 里都没有可合的树）。
+- 只认「提交里记了分支头（`submissions.head_sha`）」的单。合并要合的是一棵树；
+  没记分支头的提交是合并流程建立之前直接做在 master 上的，库里没有任何可合的
+  东西（`AW-004`~`AW-022` 就是这一类，`docs/closing.md` 与 `AGENTS.md` 都写着
+  不要替它们补记录）。它们进 `skipped`，带条数与单号，人看得见要不要处理。
 - 已有 `merges` 行的单不算未合并。
-
-**「历史直做」这一层与 `tools/auto_merge.py --list` 同源，不在这里另判一套。**
-两件工具对同一现场给矛盾的下一步，是 2026-11-23 当晚真实发生过三次的事
-（`AW-139`、`AWK-113`、`AWK-106`：单已经 `done`、`merges` 里没有行，`auto_merge --list`
-把它列进「真待合并」，本脚本却照旧报 `dispatch_execute` 去派新单，每次都要人或巡检
-把它抳回来）。根因不是顺位，是判据少了一层——本脚本只看了 `head_sha` 一个事实。
-所以豁免清单（`<项目根>/docs/unmerged-exemptions.json`，`tools/backfill_merges.py --apply`
-写的）的读法、`ticket/<单号>` 分支在不在的判法，全部直接调 `auto_merge` 那几个函数：
-重写一遍就等于给同一现场留两个答案。两类不算待合并的单进 `skipped` 并带单号：
-
-    exempted       已在豁免清单里（backfill 判过它们没有可核对的证据）
-    no_branch_head 没有分支头、也没有 ticket/<单号> 分支（清单里也没有它 → 快照该刷新了）
-
-**这一个路径只读**：不 `claim`、不写库、不改工单状态、也不自动补合并记录——补记录
-只有 `tools/auto_merge.py --record-only` 一个入口（`PRD-013` R10）。
 
 **一个没有任何提交的 `done` 单不进 `skipped`，进 `stop`**：那是数据不自洽（验收
 必须基于一次提交），不是「历史遗留」，得当故障报出来。
@@ -109,8 +98,7 @@
     python tools/next_action.py --project ai-workspace
     python tools/next_action.py --pause-file <路径>   # 换暂停标记的位置
 
-退出码：**0 = 有活（四个动作之一，含 `fix_pool`）；2 = 没活（含暂停中、有在途单挡着、
-全在退避窗口里）；1 = 出错**
+退出码：**0 = 有活（三个动作之一）；2 = 没活（含暂停中、有在途单挡着）；1 = 出错**
 （库不存在/读不开/版本不对/缺表、项目归属查不出、参数写错）。1 与 2 分得开，
 是这个脚本存在的理由之一。
 
@@ -137,10 +125,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 分栏判据（真待合并 / 仓库无改动）与 `auto_merge --list` 同源：两处各写一份，
+# 就会在同一条现场上给出两个结论，而「哪一栏」决定的是「派不派合并」。
 TOOLS = Path(__file__).resolve().parent
 if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
+import unmerged_scan  # noqa: E402  (先补 sys.path 再导入)
 from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
     ACTIVE_TICKET_STATES,
     CLAIMABLE_STATES,
@@ -150,43 +141,18 @@ from task_center.core import (  # noqa: E402  (先补 sys.path 再导入)
     pending_blockers,
 )
 from task_center.db import SCHEMA_VERSION  # noqa: E402
-# 合并口径的权威在 `auto_merge --list`：豁免清单怎么读、`ticket/<单号>` 分支在不在怎么判，
-# 都用它那一套函数。只调这两个函数、不改它一个字节——同一现场只能有一个答案（AWK-114）。
-import auto_merge  # noqa: E402
 
-# 四个结果的名字之外还有第五档：`fix_pool`（池子里只剩领不走的空判据单）。
+# 五个结果的名字：人读输出、--json、退出码共用这一份，不另起别名。
 DISPATCH_EXECUTE = "dispatch_execute"
 DISPATCH_REVIEW = "dispatch_review"
 MERGE = "merge"
 FIX_POOL = "fix_pool"
 NOTHING = "nothing"
 ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, FIX_POOL, NOTHING)
-# 有活的那四个。`nothing` 不在里面：退出码 0 只给「这一轮有事可做」。
+# 有活的四个。`nothing` 不在里面：退出码 0 只给「这一轮有事可做」。
 # `fix_pool` 在里面：它要人（或协调会话）去补判据或取消单，调度侧必须开一轮去看它——
-# 报成 2 就又回到了「池子里有活、而循环安静地不动」那个现场。
+# 报成 2 就又回到了「池子里有活、而循环安静地不动」那个现场（AW-138）。
 WORKING_ACTIONS = (DISPATCH_EXECUTE, DISPATCH_REVIEW, MERGE, FIX_POOL)
-
-# 空判据单「躺多久之后才值得点名」的宽限期限（与上游 AW-138 同一个数与同一个理由）：
-# `planned` 允许 0 条验收条件（那是「已经知道要补什么、还写不出条件」的念头），但
-# `claim_ticket` 读到空列表就报 `CRITERIA_NOT_JUDGEABLE`，所以这种单永远领不走。给它一天
-# 不会把正常流程报成故障；而「躺了一整天」正是会被漏掉的现场。
-#
-# 调这个数只有本文件这一处：文档写的是「一个来源」，不跟着改数。
-BLANK_CRITERIA_GRACE_SECONDS = 24 * 60 * 60
-
-# 点名报过一次之后，下一轮再点到它之前要等多久。
-#
-# 起因：把空判据单升成一档「有活」之后，代价是「没人处理就每轮再报一次」——同一张单、
-# 同一句话，每轮醒来烧一轮，既没有升级也没有退避。节奏要跟着「人可能还没看见」变慢。
-#
-# 形状：「第 i 次点名之后等 POOL_REPORT_BACKOFF_SECONDS[i-1] 秒」。第 1 次之后 2 小时、
-# 第 2 次之后 6 小时、第 3 次之后 24 小时，此后再叫就按最后一个（24 小时）。
-POOL_REPORT_BACKOFF_SECONDS = (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
-
-# 报到第几轮就升级（不再原样重报）：这一轮的人话换成「建一张 planned 单 / ask_ticket」。
-# 取值是退避阶梯走完一轮的点：1 次原价 + 两次退避之后再叫一次，所以它跟
-# `POOL_REPORT_BACKOFF_SECONDS` 的长度对得上；改阶梯时这里一起看。
-POOL_REPORT_ESCALATE_AFTER = 3
 
 # 挡住派发的三个状态：`ACTIVE_TICKET_STATES` 去掉 `awaiting_review`（理由见模块头）。
 BLOCKING_STATES = tuple(
@@ -197,6 +163,46 @@ BLOCKING_STATES = tuple(
 EXIT_WORK = 0
 EXIT_ERROR = 1
 EXIT_IDLE = 2
+
+# 空判据的 `planned` 单在池子里躺多久之后要被人点名（AW-138）。
+#
+# 背景：`planned` 允许 0 条判据（那是「已经知道要补什么、还写不出验收条件」的念头），
+# 但 `claim_ticket` 会报 `CRITERIA_NOT_JUDGEABLE`，所以这种单永远领不走。在 AW-138 之前
+# 它只是 `skipped` 里的一行、`action` 仍是 `nothing`——池子里只剩这种单时，无人值守
+# 派单器每轮醒来都看见「没活」，于是 AW-134 与 AW-135 两张空判据单在池子里躺了
+# 一整天没人知道。
+#
+# 为什么是 24 小时：建单与补判据本来就可能是两次动作（先记下来、再想清楚），给它一天
+# 不会把正常流程报成故障；而「躺了一整天」正是这次被漏掉的现场——一天还没补上，就不该
+# 再假定「有人正在补」，该点名了。
+#
+# 为什么住在这里而不是 `task_center/core.py`：只有本脚本读它（`core.py` 那边没有消费方）。
+# 放 core 会让整个文件下移十几行，PRD-014 / PRD-015 / `tasks/independent-review.md` 里
+# 那些 `core.py:NNN` 行号引用会当场错位（`tools/ref_gate.py` 会红）——为一个阈值把它们
+# 全改一遍，把一个阈值的事变成改了三个文档的事，不值得。
+#
+# 调这个数只有一个地方：本常量。文档（`docs/无人值守派单.md` §3.1）写的是「一个来源」，
+# 不跟着改数；到改的时候两边只改这一个值。
+BLANK_CRITERIA_GRACE_SECONDS = 24 * 60 * 60
+
+# 点名报过一次之后，下一轮再点到它之前要等多久（AW-140）。
+#
+# 起因：AW-138 把空判据单升成一档「有活」，代价是「没人处理就每轮再报一次」——同一张单、
+# 同一句话，每轮醒来烧一轮，既没有升级也没有退避。节奏要跟着「人可能还没看见」变慢，
+# 不是跟着轮次变多。
+#
+# 形状：「第 i 次点名之后等 POOL_REPORT_BACKOFF_SECONDS[i-1] 秒」。第 1 次之后 2 小时、
+# 第 2 次之后 6 小时、第 3 次之后 24 小时，此后再叫就按最后一个（24 小时）。最后一步与
+# 宽限期同量级是有意的：一天一次就够，再密就是在替人记着。
+#
+# 只在本文件写一次：文档（`docs/无人值守派单.md` §3.2）写的是「一个来源」与当前值，
+# 不跟着改数；要调就改这一个元组，两处不必各改一遍。
+POOL_REPORT_BACKOFF_SECONDS = (2 * 60 * 60, 6 * 60 * 60, 24 * 60 * 60)
+
+# 报到第几轮就升级（不再原样重报）：这一轮的人话换成「建一张 planned 单 / ask_ticket」。
+# 取值不是另一个拍脑袋的数，而是退避阶梯走完一轮的点：1 次原价 + 两次退避之后再叫一次，
+# 所以它跟 `POOL_REPORT_BACKOFF_SECONDS` 的长度对得上；改阶梯时这里一起看。
+POOL_REPORT_ESCALATE_AFTER = 3
 
 # 每个状态「停在哪一步」的一句人话。加新状态时要在这里补一句，否则会被报成
 # 一句泛泛的「在途」——无人值守最不需要的就是这种话。
@@ -214,13 +220,6 @@ REQUIRED_TABLES = (
 # 「验收已经派出去了」这件事在 `events` 里的 operation 名，与 `task_center` 的那个写操作同名。
 # 同一个名字两种行都会出现：成功那次带 `result`，被拒那次带 `rejected`——只有前者算「已派」。
 REVIEW_DISPATCHED = "review_dispatched"
-
-# 「done 但没有合并记录」里那两类**不算待合并**的行，名字进 `skipped`，人读那一行也用它。
-SKIP_NO_BRANCH_HEAD = "no_branch_head"
-SKIP_EXEMPTED = "exempted"
-# 历史豁免清单位置：与 `auto_merge.py --list` 同一份文件，按项目根算（工具与项目可能不在
-# 同一个检出里，按工具自己的位置算就会读到别人的清单）。
-EXEMPTIONS_RELPATH = Path("docs") / "unmerged-exemptions.json"
 
 
 class PlannerError(RuntimeError):
@@ -466,7 +465,7 @@ def review_in_flight(conn, ticket_id, submission_id, now, stop) -> dict | None:
 
 
 def pool_report_events(conn, ticket_id) -> list[dict]:
-    """这张单「已经被点名报过」的事实，按时间从新到旧。
+    """这张单「已经被点名报过」的事实，按时间从新到旧（AW-140）。
 
     只认带 `result` 的事件行：同一个 operation 名也会出现在被拒的调用里（条件不合时
     `execute()` 写的那行带 `rejected`），它说的是「想记但没记成」，不是「已经报过」。
@@ -508,7 +507,7 @@ def pool_report_status(conn, ticket_id, now) -> dict:
         "backoff_seconds": None,
         "next_report_at": None,
         "seconds_until_next_report": 0,
-        # 与「建单时间读不出来」（`timestamp_unreadable`）分开一个键：
+        # 与「建单时间读不出来」（AW-138 的 `timestamp_unreadable`）分开一个键：
         # 后者说的是「这张单多大了」，这里说的是「上一次点名是什么时候」。
         "report_timestamp_unreadable": False,
         "due": True,
@@ -535,10 +534,10 @@ def pool_report_status(conn, ticket_id, now) -> dict:
 
 
 def attach_pool_report(conn, entries, now) -> list[dict]:
-    """给空判据那一档的每张单补上「报过几次 / 该不该再报 / 是不是该升级」。
+    """给空判据那一档的每张单补上「报过几次 / 该不该再报 / 是不是该升级」（AW-140）。
 
     只读：本脚本一行都不写，「报过了」由协调会话或巡检调 `task_center` 的
-    `record_pool_report` 落库（或走 `tools/pool_report.py`）——读侧只能读台账，不能自己盖章。
+    `record_pool_report` 落库——读侧只能读台账，不能自己盖章。
 
     `escalate` 只在「这一轮确实要报」且「这一轮就是第 N 轮」时为真：窗口内本来就不叫，
     不该在那里提升级——否则一天能看到很多次「请升级」，而那正是要消掉的噪音。
@@ -648,53 +647,26 @@ def review_candidates(conn, project_id, stop, in_flight=None, now=None) -> list[
     return items
 
 
-def default_exemptions_path(project_root) -> Path:
-    """历史豁免清单在哪：跟着**项目根**走。
+def merge_candidates(conn, project_id, skipped, stop, repo_root=None) -> list[dict]:
+    """已验收但库里没有合并记录的单。
 
-    与 `auto_merge.py --list` 读的是同一份文件（`docs/unmerged-exemptions.json`，由
-    `tools/backfill_merges.py --apply` 写）。但那一份按工具自己的仓库根定位，本脚本按
-    `projects.root` 定位：一个工具可能被从套件检出里跑，判的却是另一个项目的单。
-    """
-    return Path(project_root) / EXEMPTIONS_RELPATH
+    只认提交里记了分支头的：合并要合的是一棵树，没记分支头的提交是合并流程之前
+    直接做在 master 上的，库里没有可合的东西。这一类进 `skipped` 并带条数，不悄悄
+    丢掉（`docs/无人值守派单.md`「merge 的前置与拒绝条件」）。
 
-
-def ticket_branch_exists(project_root, ticket_id):
-    """`ticket/<单号>` 分支还在不在；**查不了返回 None**（不知道 ≠ 没有）。
-
-    为什么要问 git：`done` + 没有 `merges` 行 + 提交里没有分支头，依然可能是真待合并
-    ——只看库里这两列会把「分支还躺着、只差记录」的单当成历史单。反过来，库里永远
-    看不出「没有分支」，所以这条事实只能向 git 要。
-
-    判法与 `auto_merge` 完全一样（它的 `exists` 就是 `git rev-parse --verify --quiet`）：
-    git 不在、卡住、或目录不是仓库时它不返回 False 而是抛 `Fail`——那两件事分别是「没装」
-    与「不是仓库」，一律不当成「分支不在」；这里转成 None 交给调用方当故障报出来。
-    """
-    try:
-        return auto_merge.exists(Path(project_root), f"refs/heads/ticket/{ticket_id}")
-    except auto_merge.Fail:
-        return None
-
-
-def merge_candidates(conn, project_id, project_root, skipped, stop) -> list[dict]:
-    """已验收但库里没有合并记录的单，口径与 `auto_merge.py --list` 逐字同源。
-
-    三档判据，每一步都只用已经存在的事实（不在这里发明新规则）：
-
-    1. 最新提交记了 `head_sha` → 待合并。有没有分支头只有库知道，它是最好的一条证据。
-    2. 没有分支头、但单号在 `<项目根>/docs/unmerged-exemptions.json` 里 → 历史豁免。
-       清单是 `tools/backfill_merges.py --apply` 判出来的，本脚本不重判。
-    3. 没有分支头、清单里也没有它 → 问 git `ticket/<单号>` 分支还在不在：在 → 待合并
-       （分支还躺着，只差记录，`auto_merge --record-only` 就是为这种现场写的）；
-       不在 → 历史直做（库里与 git 里都没有可合的树）；查不了 → 当故障进 `stop`。
-
-    分不开的代价是具体的：2026-11-23 当晚 `AW-139` / `AWK-113` / `AWK-106` 三张已经验收
-    的单被当成「下张单可以派了」，每次都要人或巡检把合并这一步抳回来。
+    第二类不进候选也不算「没活」：**仓库无改动**的单（`head_sha` 与 `base_sha` 相同，
+    说明这次尝试没造出提交；且仓库里没有 `ticket/<单号>` 分支）。它的改动本来就不在
+    仓库里，没有可合的树，`auto_merge --ticket` 第 2 步就跑不动；把它当 `merge` 报
+    出来，就是每轮派一件永远做不成的事，后面排着的单全被堵住（AW-147 的现场）。
+    **项目根不是 git 仓库**（AW-151）也归这一类：那里从来没有仓库，提交的两棵树是
+    NULL 而不是某个占位 sha，更没有分支可合。
+    判据与 `auto_merge --list` 的「仓库无改动」一栏同源（`tools/unmerged_scan.py`）；
+    判不确定就归回真待合并。
     """
     items = []
-    historical, exempted = [], []
-    entries, exemptions_path, have_exemptions = auto_merge.load_exemptions(
-        default_exemptions_path(project_root)
-    )
+    historical = []
+    no_change = []
+    probe = unmerged_scan.RepoProbe()
     for row in project_tickets(conn, project_id, ("done",)):
         if has_merge(conn, row["id"]):
             continue
@@ -705,21 +677,15 @@ def merge_candidates(conn, project_id, project_root, skipped, stop) -> list[dict
             )
             continue
         head = submission["head_sha"]
+        # 先问「有没有可合的树」再问「有没有分支头」：非 git 项目（AW-151）的提交
+        # `head_sha` 是 NULL，但它不属于「合并流程之前的直接提交」，它本来就没有仓库可合。
+        found = probe.no_repo_change(repo_root, row["id"], head, submission["base_sha"])
+        if found is not None:
+            no_change.append({"ticket_id": row["id"], "basis": found["basis"]})
+            continue
         if not head:
-            if row["id"] in entries:
-                exempted.append(row["id"])
-                continue
-            branch = ticket_branch_exists(project_root, row["id"])
-            if branch is None:
-                stop.append(
-                    f"{row['id']} 是 done、没有合并记录、提交里也没有分支头；"
-                    f"而且查不到 ticket/{row['id']} 分支在不在（git 不可用或超时）——"
-                    "分不出它是历史单还是待合并，需要人看"
-                )
-                continue
-            if not branch:
-                historical.append(row["id"])
-                continue
+            historical.append(row["id"])
+            continue
         items.append({
             "ticket_id": row["id"],
             "title": row["title"],
@@ -733,21 +699,20 @@ def merge_candidates(conn, project_id, project_root, skipped, stop) -> list[dict
         })
     if historical:
         skipped.append({
-            "reason": SKIP_NO_BRANCH_HEAD,
-            "detail": "done 且无合并记录，但提交里没有分支头、仓库里也没有 ticket/<单号> 分支"
-                      "（合并流程之前的直接提交，库里没有可合的东西）；清单里也没有它们，"
-                      "所以豁免快照该刷新了：跑 `python tools/backfill_merges.py --apply`。"
-                      "要不要补记录由人决定，本脚本不代做。",
+            "reason": "no_branch_head",
+            "detail": "done 且无合并记录，但提交里没有分支头（合并流程之前的直接提交，"
+                      "库里没有可合的东西；要不要补记录由人决定）",
             "ticket_ids": historical,
         })
-    if exempted:
-        source = str(exemptions_path) if have_exemptions else f"{exemptions_path}（文件不存在）"
+    if no_change:
         skipped.append({
-            "reason": SKIP_EXEMPTED,
-            "detail": f"done 且无合并记录，但已在历史豁免清单里（{source}）："
-                      "backfill 判过它们没有可核对的证据，补一条记录等于把没人记过写成已经合了。"
-                      "它们不是等待合并的单。",
-            "ticket_ids": exempted,
+            "reason": unmerged_scan.NO_REPO_CHANGE,
+            "detail": "done 且无合并记录，但没有可合的树：本次尝试没造出提交"
+                      "（head_sha 与 base_sha 相同）、仓库里也没有 ticket/<单号> 分支"
+                      "（改动本来就不在仓库里）。不是待合并，也不进 archived；" + "；".join(
+                          f"{item['ticket_id']}：{item['basis']}" for item in no_change),
+            "ticket_ids": [item["ticket_id"] for item in no_change],
+            "bases": no_change,
         })
     # 先验收的先合：同一份 master 上少积一层。排序按 created_at，与池子视图的
     # 「同层按 created_at」一个习惯，不按单号字符串比大小（AW-9 与 AW-10 会排反）。
@@ -767,12 +732,12 @@ def execute_candidates(conn, project_id, skipped, stale=None, now=None) -> list[
     什么、还写不出验收条件」的念头；`claim_ticket` 会报 `CRITERIA_NOT_JUDGEABLE`。
     不在这里筛掉的话，无人值守派单器会一圈一圈地派一张永远领不走的单。
 
-    **躺太久的还给一份到 `stale`**：它永远是 `skipped` 里的 `no_criteria`，但只写
-    这一行不够——`action` 仍是 `nothing`，于是这种单被「没活」替它报平安。所以
-    `created_at` 超过 `BLANK_CRITERIA_GRACE_SECONDS` 的那些另进 `stale`，由 `scan()`
-    升成 `fix_pool` 点名。阈值不在这里再写一个数：本文件只有上面那一处。时间读不出来时
-    **按超期处理并标 `timestamp_unreadable`**：宁可多报一次（成本是一轮会话），
-    也不要因为一行脏时间把一张永远领不走的单静默筛掉。
+    **躺太久的还给一份到 `stale`**（AW-138）：它永远是 `skipped` 里的 `no_criteria`，
+    但只写这一行不够——`action` 仍是 `nothing`，于是这种单被「没活」替它报平安。
+    所以 `created_at` 超过 `BLANK_CRITERIA_GRACE_SECONDS` 的那些另进 `stale`，由
+    `scan()` 升成 `fix_pool` 点名。阈值不在这里再写一个数：本文件只有上面那一处。
+    时间读不出来时**按超期处理并标 `timestamp_unreadable`**：宁可多报一次（成本是一轮
+    会话），也不要因为一行脏时间把一张永远领不走的单静默筛掉。
     """
     stale = stale if stale is not None else []
     now = now or datetime.datetime.now(datetime.timezone.utc)
@@ -844,10 +809,12 @@ def execute_candidates(conn, project_id, skipped, stale=None, now=None) -> list[
 def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
     """扫一遍，返回结构化结果（人读输出与 --json 都从这里出）。
 
-    只有一个时间阈值：**验收在飞**的 30 分钟窗口（`REVIEW_IN_FLIGHT_SECONDS`）。它必须
-    存在，否则「已派出去」这句话永远不会失效；所以 `now` 可以显式传入（用例靠它把
-    事件摆到 31 分钟前），不传就是此刻。其余四个结果全靠库里的状态与依赖边算出来，
-    同一个库同一个 `now` 跑两次结论必然一样（`generated_at` 除外）。
+    两个时间阈值：**验收在飞**的 30 分钟窗口（`REVIEW_IN_FLIGHT_SECONDS`）与
+    **空判据单**的一天期限（`BLANK_CRITERIA_GRACE_SECONDS`）。它们必须存在，否则
+    「已派出去」永远不会失效、而「没人能领的念头」永远不会被点名。`now` 可以显式
+    传入（用例靠它把事件摆到 31 分钟前、把建单时间摆到两天前），不传就是此刻。
+    其余结果全靠库里的状态与依赖边算出来，同一个库同一个 `now` 跑两次结论必然
+    一样（`generated_at` 除外）。
     """
     if conn.row_factory is not sqlite3.Row:
         # 调用方拿到的是普通连接（夹具、嵌入式使用）时补上，下面的 row["列名"] 才成立。
@@ -902,12 +869,10 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
         return result
 
     reviews = review_candidates(conn, pid, stop, result["review_in_flight"], current)
-    # 合并候选先算、也先给：「done 但没合并」的单一旦被「池子里还有可领单」遮住，这一轮
-    # 就会去开下一张单，而上一张的成果还躺在分支上（AWK-114 的三次现场）。
-    merges = merge_candidates(conn, pid, project["root"], skipped, stop)
+    merges = merge_candidates(conn, pid, skipped, stop, repo_root=project["root"])
     executes = execute_candidates(conn, pid, skipped, result["fix_pool"], current)
-    # 空判据那一档先管「躺得够久就点名」，再补上「报过几次、该不该再报、是不是该升级」
-    # ——只读台账，不写。
+    # 空判据那一档在 AW-138 只管「躺得够久就点名」；AW-140 在这里补上「报过几次、
+    # 该不该再报、是不是该升级」——只读台账，不写。
     if result["fix_pool"]:
         attach_pool_report(conn, result["fix_pool"], current)
     result["candidates"] = {
@@ -954,21 +919,10 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
                 f"{pick['ticket_id']} 的 notices 为空：auto_merge 第 2 步会拒，"
                 "先由协调会话 record_notice 再合并"
             )
-        if not pick["head_sha"]:
-            # 没有分支头也是待合并（分支还躺着），但验收过的那棵树记不下来：
-            # auto_merge 第 2 步只警告不拦，记录按 `unverified` 落库。这句要说出来。
-            stop.append(
-                f"{pick['ticket_id']} 的提交里没有分支头：auto_merge 第 2 步只能警告，"
-                "合并记录会按 unverified 落库（被验收的那棵树无法核对）"
-            )
         result["human"] = (
             f"{MERGE}：合并 {pick['ticket_id']}"
             f"（已验收未合并，head {_short(pick['head_sha'])}）"
         )
-        if len(merges) > 1:
-            result["human"] += f"；另有 {len(merges) - 1} 张也已验收未合并：" + "、".join(
-                item["ticket_id"] for item in merges[1:]
-            )
         return _finish(result)
 
     if executes:
@@ -1015,17 +969,17 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
         return _finish(result)
 
     if result["fix_pool"]:
-        # 池子里只剩「永远领不走」的单。它排在三档派发动作之后、`nothing` 之前：
+        # 池子里只剩「永远领不走」的单（AW-138）。它排在三档派发动作之后、`nothing` 之前：
         # 有真能往前走的动作时那个优先，但一旦只剩它们，就不许再说「没活」——
         # 池子里明明有单，只是没人能领。两条出路都要人动手，本脚本一个都不替它做。
         #
-        # 这里还要问两件事：这一轮该不该再叫（退避）、叫到第几轮了（升级）。
+        # AW-140 在这里多问两件事：这一轮该不该再叫（退避）、叫到第几轮了（升级）。
         # 两者都只从 `record_pool_report` 台账算，不看会话记忆。
         due = [item for item in result["fix_pool"] if item["due"]]
         if not due:
-            # 全在退避窗口里：这一轮不点名，退出 2（调度侧不开会话）。这不是「静默」：
-            # 每一张单都已经被点名过至少一次，名字、轮次与下一次时间都在 `fix_pool`
-            # 数组里，人跑一次 `--json` 就看得到；不落库记录才是真静默。
+            # 全在退避窗口里：这一轮不点名，退出 2（调度侧不开会话）。这不是 AW-138 之前的
+            # 「静默」：每一张单都已经被点名过至少一次，名字、轮次与下一次时间都在
+            # `fix_pool` 数组里，人跑一次 `--json` 就看得到；不落库记录才是真静默。
             waiting = "；".join(
                 f"{item['ticket_id']}（已报 {item['reported_rounds']} 轮，"
                 f"还剩 {_span_text(item['seconds_until_next_report'])}）"
@@ -1057,8 +1011,8 @@ def scan(conn, project_id, pause_path=None, cwd=None, now=None) -> dict:
                     item["ticket_id"]: item["reported_rounds"] for item in due
                 },
                 "escalate_after": POOL_REPORT_ESCALATE_AFTER,
-                # 升级的两条路，与「不许同步提问卡」不冲突：`ask_ticket` 是落库的问题，
-                # 不是卡片。
+                # 升级的两条路，与 `AGENTS.md` 硬规则七（不许同步提问卡）不冲突：
+                # `ask_ticket` 是落库的问题，不是卡片。
                 "escalation": {
                     "ticket_ids": [item["ticket_id"] for item in escalating],
                     "options": ["create_ticket:planned", "ask_ticket"],
@@ -1141,18 +1095,18 @@ def _finish(result: dict) -> dict:
                 f"已等 {_waited_text(item['waited_seconds'])}），不再重复派"
             )
     for item in result.get("skipped") or []:
-        ids = item.get("ticket_ids") or []
-        if not ids:
-            continue
-        if item.get("reason") == SKIP_NO_BRANCH_HEAD:
+        if item.get("reason") == "no_branch_head":
+            ids = item.get("ticket_ids") or []
             notes.append(
-                f"另有 {len(ids)} 张 done 且无合并记录，但提交里没有分支头、仓库里也没有"
-                f"ticket/<单号> 分支（合并流程之前的直接提交，见 skipped）：{'、'.join(ids)}"
+                f"另有 {len(ids)} 张 done 且无合并记录，但提交里没有分支头"
+                f"（合并流程之前的直接提交，见 skipped）：{'、'.join(ids)}"
             )
-        elif item.get("reason") == SKIP_EXEMPTED:
+        if item.get("reason") == unmerged_scan.NO_REPO_CHANGE:
+            ids = item.get("ticket_ids") or []
             notes.append(
-                f"另有 {len(ids)} 张 done 且无合并记录，但已在历史豁免清单里"
-                f"（不是等待合并的单，见 skipped）：{'、'.join(ids)}"
+                f"另有 {len(ids)} 张 done 且无合并记录，但没有可合的树（本次尝试没造出"
+                f"提交，head_sha 与 base_sha 相同、仓库里没有 ticket/<单号> 分支，见 skipped）："
+                f"{'、'.join(ids)}——不派合并、也不该进 archived"
             )
     # 已经单列成 `fix_pool` 那一档时不重复：那句话已经把单号与两条出路写全了。
     # 全在退避窗口里的那一档也已经有自己的一句话（带轮次与还剩多久），不再缀一遍。
@@ -1191,7 +1145,7 @@ def _grace_text() -> str:
 
 
 def _rounds_text(item: dict) -> str:
-    """这张单已经被点名报过几次的人话。只从台账算，不猜。"""
+    """这张单已经被点名报过几次的人话（AW-140）。只从台账算，不猜。"""
     rounds = item.get("reported_rounds") or 0
     if not rounds:
         return "还没报过"

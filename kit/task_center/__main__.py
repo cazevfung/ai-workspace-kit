@@ -4,14 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-if __package__ in (None, ""):
-    # `python kit/task_center/__main__.py --db <库> migrate` 这种直接跑文件的写法没有包上下文，
-    # 相对导入会当场 ImportError。把套件根放上 sys.path，再用顶层包名导入同一份 core——
-    # 不是复制一份逻辑，也不是叫人多记一条命令。
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from task_center.core import Center
-else:
-    from .core import Center
+from .core import Center
 
 MAX_INPUT_BYTES = 1024 * 1024
 
@@ -23,7 +16,6 @@ class Parser(argparse.ArgumentParser):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
-    input_path = None
     try:
         parser = Parser(description="Local task center (trusted single-user prototype)")
         parser.add_argument("--db", required=True, help="Absolute path to the one authoritative database")
@@ -42,7 +34,6 @@ def main():
         if args.input == "-":
             raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         else:
-            input_path = args.input
             with Path(args.input).open("rb") as source:
                 raw = source.read(MAX_INPUT_BYTES + 1)
         if len(raw) > MAX_INPUT_BYTES:
@@ -51,13 +42,7 @@ def main():
         if args.planned:
             payload = {**payload, "planned": True}
         response = Center(args.db).execute(args.operation, payload, args.request_id)
-    except OSError as problem:
-        # 「读不到输入文件」与「参数不合格」是两件事：前者要人改路径，后者要人改内容。
-        # 合并成一个 INVALID_INPUT 的话，路径打错时会去翻 JSON，翻不出错在哪里。
-        where = f"读不到输入文件：{input_path}" if input_path else "读不到标准输入"
-        reason = problem.strerror or str(problem)
-        response = {"ok": False, "error": {"code": "INPUT_UNREADABLE", "message": f"{where}（{reason}）"}}
-    except (ValueError, UnicodeError, RecursionError):
+    except (ValueError, OSError, UnicodeError, RecursionError):
         response = {"ok": False, "error": {"code": "INVALID_INPUT", "message": "Invalid arguments, JSON input, or inaccessible input file"}}
     print(json.dumps(response, ensure_ascii=False, allow_nan=False))
     return 0 if response["ok"] else 1

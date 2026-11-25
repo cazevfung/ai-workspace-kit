@@ -28,6 +28,30 @@ python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 list_projects
 
 `.worktrees/ticket-core` 是同一仓库的 `feat/ticket-core` 工作树，仍保留，给下一个分支单独开发用。没有推送远端。正式中心库位于 `.data/task-center.sqlite3`（已登记 `ai-workspace` 与 `xingling-chuan`），运行状态以进度记录为准。
 
+## 行尾口径：文本一律 LF
+
+`.gitattributes` 把全仓文本钉成 LF（`* text=auto eol=lf`）。只有两处例外保持 `-text`
+（连「按 LF 存」都不做，一律原字节进出）：`skills/**`（要与 live 技能目录逐字节一致）
+和 `.agents/skills/skill-routing/index/**`（快照）。二进制文件由 `text=auto` 按内容判定，
+不受转换影响。
+
+这么钉是为了让「检出的字节」等于「库里的 blob」：`task_center/artifacts.py` 记的 sha256
+是**工作树字节**算出来的，同一份内容在 `core.autocrlf=true` 与 `false` 的机器上一个是
+CRLF、一个是 LF，指纹就成了两个数，换台机器复核只能报 `ARTIFACT_CHANGED`（AW-137）。
+
+**这条规则合入后，每个已有的检出都要就地重检出一次**，否则工作区停在半新半旧的 CRLF
+上（`git add` 会一直警告 `CRLF will be replaced by LF`）：
+
+```bash
+git rm --cached -r -q . && git reset --hard
+```
+
+**这一步会丢未提交的改动**：暂存区与工作区里没提交的内容、以及挡在受管路径上的未跟踪
+文件都会被覆盖。先把它们提交，或挪到 `.data/` 下再跑。新克隆不需要这一步——检出即 LF。
+
+自检：`python tools/check_eol.py` 核当前检出（违规时点名路径，退出码 0/1）；
+`python tools/test_eol_check.py` 在临时克隆里核规则本身。
+
 ## 本项目专用 skill
 
 放在 `.agents/skills/`，只对本仓库生效：

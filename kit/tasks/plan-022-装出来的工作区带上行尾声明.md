@@ -89,7 +89,7 @@
 - 不给 eol 用例加 skip 条件、不在装出来的工作区里删断言。
 - 不改安装器的步骤编号与既有输出措辞（`1/7`…`7/7` 原样），只多一行说明。
 - 不动 `kit/task_center/`、不发改版文件、不打 tag、不推送、不自己合并。
-- 不拿真实的 `C:\Users\202108-107\.agents` 做实验：所有安装都带临时 `--agents-home`，git 身份用临时 `GIT_CONFIG_GLOBAL`。
+- 不拿真实的 `X:/示例项目/.agents` 做实验：所有安装都带临时 `--agents-home`，git 身份用临时 `GIT_CONFIG_GLOBAL`。
 
 ## 未决
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,25 +41,35 @@ ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
 
-# 中心库怎么发现只有一处：`tools/center_config.py`（三个闸门与两个巡检工具都从它取）。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import center_config  # noqa: E402
-
 
 def default_ticket_db():
-    """默认工单库：与三个闸门同一处发现（`tools/center_config.py`）。
+    """默认工单库：全仓只有一份，先看本树 `.data`，没有就按 git 公共目录找主检出。
 
-    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 本检出的
-    `.data/task-center.sqlite3` → 主检出（工作树里按 git 公共目录）→
-    `~/.agents/center.json`。在 `.worktrees/<工单号>/` 里跑时本树没有 `.data`
-    （不入库），按 `ROOT/.data` 取会报「中心库不存在」——那不是「这张单没有收件人」，
-    是找错了库，而 C1 给的那条命令本来就不带 `--db`。
-    一条都不中时返回本检出的默认位置，让调用方照常报「库不存在」。
+    在 `.worktrees/<工单号>/` 里跑时本树没有 `.data`（不入库），按 `ROOT/.data` 取会
+    报「中心库不存在」——那不是「这张单没有收件人」，是找错了库。与
+    `tools/next_action.py` 的 `default_ticket_db` 同一条找法（那边的注释写得更细），
+    两个脚本查到不同的库，结论就会打架。
     """
+    local = ROOT / ".data" / "task-center.sqlite3"
+    if local.is_file():
+        return local
     try:
-        return center_config.resolve(repo=ROOT).db
-    except center_config.DiscoveryError:
-        return DEFAULT_DB
+        found = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
+        )
+        output = (found.stdout or "").strip()
+        if found.returncode == 0 and output:
+            common = Path(output)
+            if not common.is_absolute():
+                common = (ROOT / common).resolve()
+            candidate = common.parent / ".data" / "task-center.sqlite3"
+            if candidate.is_file():
+                return candidate
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return local
 
 
 class PayloadError(RuntimeError):

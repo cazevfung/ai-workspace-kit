@@ -9,7 +9,7 @@
 不写判据、不取消单）。本脚本只做一件事：把那一次调用的 payload 拼好，省得每个巡检
 会话自己拼 JSON、自己起 `python -m task_center`。
 
-用法（在工作区根目录，装出来的布局里 `tools/` 就在那儿）：
+用法（在仓库根 {{WORKSPACE}}）：
 
     python tools/pool_report.py --project ai-workspace --ticket AW-990 --request-id pool-AW-990-1
     python tools/pool_report.py --project ai-workspace --ticket AW-990 --session-id <会话 id> --note "第 1 轮点名"
