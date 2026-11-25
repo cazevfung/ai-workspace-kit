@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import locale
 import re
 import shutil
 import subprocess
@@ -29,9 +30,30 @@ sys.path.insert(0, str(ROOT / "kit" / "tools"))
 import install_guard  # noqa: E402  —— 判据只有一处，自检不另写一套
 
 
+def decode(raw: bytes) -> str:
+    """子进程输出的解码：先按 UTF-8，解不干净再按本机编码。
+
+    为什么要两段：`tools/run_tests.py` 这类脚本自己把 stdout 改成 UTF-8，而 `install.py`
+    直接 print——往管道写时 Python 用的是本机编码（中文 Windows 上是 cp936）。只按
+    UTF-8 解会把「本次装了 N 项、跳过 M 项」这句解成带替换字符的乱码，判据里的中文与
+    数字都对不上，看起来像安装文案坏了，其实只是读错了编码。
+    """
+    text = raw.decode("utf-8", errors="replace")
+    if "�" not in text:
+        return text
+    local = locale.getpreferredencoding(False) or "utf-8"
+    try:
+        fallback = raw.decode(local, errors="replace")
+    except LookupError:
+        return text
+    return fallback if fallback.count("�") <= text.count("�") else text
+
+
 def run(cmd, cwd, timeout=600):
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+    completed = subprocess.run(cmd, cwd=str(cwd), capture_output=True, timeout=timeout)
+    completed.stdout = decode(completed.stdout or b"")
+    completed.stderr = decode(completed.stderr or b"")
+    return completed
 
 
 def main(argv=None) -> int:
@@ -60,7 +82,7 @@ def main(argv=None) -> int:
 
         check("工作区核心存在", (ws / "task_center" / "core.py").is_file())
         check("项目内技能 7 个", len([p for p in (ws / ".agents" / "skills").iterdir()]) == 7)
-        check("用户级技能 27 个", len([p for p in (agents / "skills").iterdir()]) == 27)
+        check("用户级技能 29 个", len([p for p in (agents / "skills").iterdir()]) == 29)
         center_path = agents / "center.json"
         center_ok = False
         if center_path.is_file():

@@ -38,7 +38,18 @@ def git_root(path: Path) -> Path:
     )
     if process.returncode != 0:
         raise unittest.SkipTest(f"{path} 不是一个 git 检出，验不了行尾规则：{process.stderr}")
-    return Path(process.stdout.strip()).resolve()
+    root = Path(process.stdout.strip()).resolve()
+    # 刚 `git init` 过、还没提交的仓库：`rev-parse HEAD` 是 unborn HEAD，没有可克隆的树。
+    # 这不是「规则没生效」，是「还没有东西可验」，跳过并写明补法。
+    born = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+    )
+    if born.returncode != 0:
+        raise unittest.SkipTest(
+            f"{root} 还没有任何提交，没有可克隆的树：想真跑先在这里 git add -A && git commit -m init"
+        )
+    return root
 
 
 GIT_ROOT = git_root(REPO)
