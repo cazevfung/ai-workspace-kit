@@ -469,6 +469,45 @@ class DefaultDbTest(unittest.TestCase):
                 close_gate.default_db(worktree).resolve(),
             )
 
+    def test_non_git_root_skips_the_git_face(self):
+        """业务项目根不是 git 检出时，git 面标跳过而不是判红（AW-153）。
+
+        `台词演进研究` 这类项目根本没有版本库，文档直接落盘。原来 `git status`
+        一失败就记一条不通过，那些项目永远卡在收尾闸门外。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tasks").mkdir()
+            (root / "tasks" / "round.md").write_text(GOOD_ROUND, encoding="utf-8")
+            (root / "tasks" / "closing-R-900.md").write_text(GOOD_PACK, encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = close_gate.main(["--root", str(root), "--check"])
+            printed = out.getvalue() + err.getvalue()
+            self.assertIn("git 面跳过", printed)
+            self.assertNotIn("跑不了 `git status`", printed)
+            # 库也不在那边：同样跳过，不当成不通过。
+            self.assertIn("库面跳过", printed)
+            self.assertEqual(0, code, printed)
+
+    def test_git_root_with_missing_db_still_names_the_first_candidate(self):
+        """git 检出上缺库仍然当场报错（退出码 2）：跳过只给不是仓库的项目根。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tasks").mkdir()
+            (root / "tasks" / "round.md").write_text(GOOD_ROUND, encoding="utf-8")
+            (root / "tasks" / "closing-R-900.md").write_text(GOOD_PACK, encoding="utf-8")
+            make_git_repo(root)
+            git(root, "add", "tasks")
+            git(root, "commit", "-q", "-m", "收尾包")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = close_gate.main(["--root", str(root), "--check"])
+            printed = out.getvalue() + err.getvalue()
+            self.assertEqual(2, code, printed)
+            self.assertIn("中心库不存在", printed)
+            self.assertNotIn("库面跳过", printed)
+
     def test_missing_db_names_the_first_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

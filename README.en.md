@@ -205,7 +205,7 @@ After installing, run three commands:
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # the first command of any round
-python tools/run_tests.py            # should pass: tests/ 354 + tools/ 658 = 1012, 0 failures
+python tools/run_tests.py            # should pass: tests/ 396 + tools/ 739 = 1135, 0 failures
 python tools/doc_gate.py --all       # should exit 0
 ```
 
@@ -265,7 +265,7 @@ The order is `create_ticket -> claim_ticket -> open_session -> bind_session -> s
 
 **Run `add_project.py` before anything else.** Every business repository has to be connected first: `python tools/add_project.py D:/my-project` writes `<repo>/.agents/ticket-config.json` (`test_cmd` / `target_branch` / `test_timeout`) and points that repository's `core.hooksPath` at the kit's `.githooks`. `tools/auto_merge.py` resolves the test command in three layers — the entry for that `project_id` in `tools/merge-projects.json` first, then the target repository's own `.agents/ticket-config.json` (the one `add_project.py` writes), then the default `python tools/run_tests.py`. Skipping the step therefore never passes silently: the default layer runs this workspace's entry point, and when the repository has no such script the merge stops with `NO_TEST_COMMAND` ("this project has no test command configured"), not with a green suite. A project whose test entry differs from the default (HarmonyOS runs `node tests/*.test.mjs`, cutout-lab runs `pytest tests`) must be registered; "no tests ran" looking like "tests passed" is the thing this step prevents.
 
-The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 1012 (`tests/` 354, `tools/` 658) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
+The test count is whatever `run_tests.py` reports in its summary line and changes between tags; the current kit installs 1135 (`tests/` 396, `tools/` 739) into an isolated user-level directory (`--agents-home`). That number was measured on an installed copy, not only in the source tree:
 
 ```bash
 # temporary workspace + isolated user-level directory; leaves your own ~/.agents alone

@@ -270,5 +270,103 @@ class RenameProjectTest(RegistryCase):
         self.assertEqual([], [row for row in self.rename_events() if "result" in row])
 
 
+class RelocateProjectTest(RegistryCase):
+    """换根不改身份（AW-154）。
+
+    起因是 2026-11-24 要把 heartopia-script-evolution 从 C: 挪到 D:：`root` 是身份，
+    改它以前只能「撤销 → 重新登记」，而 `unregister_project` 对名下有工单的项目直接报
+    `PROJECT_HAS_TICKETS`——两条叠起来等于「有工单的项目永远改不了根」。这一组锁三件事：
+    有工单时也迁得成、迁完身份与发号盘不动、根被别的项目占着时一行不写。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.moved = self.root / "项目甲（新位置）"
+        self.moved.mkdir()
+        (self.moved / "PRD.md").write_text("需求第二版", encoding="utf-8")
+
+    def project_row(self, project_id="alpha"):
+        conn = sqlite3.connect(str(self.db))
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+
+    def relocate_events(self):
+        conn = sqlite3.connect(str(self.db))
+        self.addCleanup(conn.close)
+        rows = conn.execute("SELECT detail FROM events WHERE operation='relocate_project' ORDER BY id")
+        return [json.loads(detail) for (detail,) in rows]
+
+    def test_relocate_with_tickets_moves_only_the_root(self):
+        # 有工单也迁得成——这正是撤销→重登记走不通的那条路。
+        ticket = self.ticket()
+        before = dict(self.project_row())
+        result = self.ok("relocate_project", {"project_id": "alpha", "new_root": str(self.moved)})
+        self.assertEqual("alpha", result["project_id"])
+        self.assertEqual(Path(self.alpha).resolve(), Path(result["old_root"]).resolve())
+        self.assertEqual(Path(self.moved).resolve(), Path(result["root"]).resolve())
+        self.assertTrue(result["relocated"])
+        # 只有 root 这一列变了：id / name / next_number 逐字不动。
+        after = dict(self.project_row())
+        self.assertEqual(Path(self.moved).resolve(), Path(after["root"]).resolve())
+        self.assertEqual({k: v for k, v in before.items() if k != "root"},
+                         {k: v for k, v in after.items() if k != "root"})
+        # 工单还挂在同一个 project_id 下，历史字段一个没动，读得出来。
+        self.assertEqual(ticket["id"], self.ok("get_ticket", {"project_id": "alpha",
+                                                              "ticket_id": self.tid()})["id"])
+        conn = sqlite3.connect(str(self.db))
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT project_id FROM tickets WHERE id=?", (self.tid(),)).fetchone()
+        self.assertEqual("alpha", row["project_id"])
+
+    def test_relocate_keeps_the_number_plate_and_the_name(self):
+        self.ok("register_project", {"project_id": "beta", "name": "乙", "root": str(self.beta)})
+        self.ticket()
+        plate = self.project_row()["next_number"]
+        self.ok("relocate_project", {"project_id": "alpha", "new_root": str(self.moved)})
+        self.assertEqual(plate, self.project_row()["next_number"])
+        self.assertEqual("甲", self.project_row()["name"])
+        # 发号接着原来的盘子走，不从 1 重来；列表里仍是两行，路径各是新的。
+        second = self.ticket("t2")
+        self.assertEqual(f"ALPHA-{plate:03d}", second["id"])
+        self.assertEqual([("alpha", "甲"), ("beta", "乙")], self.labels())
+
+    def test_relocate_refuses_a_root_owned_by_another_project(self):
+        # 根是身份：两个项目不能指同一个目录，被拒时两边都不动。
+        self.ok("register_project", {"project_id": "beta", "name": "乙", "root": str(self.beta)})
+        before = self.ok("list_projects")["items"]
+        self.error("CONFLICT", "relocate_project", {"project_id": "alpha", "new_root": str(self.beta)})
+        self.assertEqual(before, self.ok("list_projects")["items"])
+        self.assertEqual([], [row for row in self.relocate_events() if "result" in row])
+
+    def test_relocate_to_the_same_root_changes_nothing(self):
+        result = self.ok("relocate_project", {"project_id": "alpha", "new_root": str(self.alpha)})
+        self.assertFalse(result["relocated"])
+        self.assertEqual(Path(self.alpha).resolve(), Path(self.project_row()["root"]).resolve())
+
+    def test_relocate_refuses_a_missing_directory_and_writes_nothing(self):
+        self.ticket()
+        self.error("FILE_NOT_FOUND", "relocate_project",
+                   {"project_id": "alpha", "new_root": str(self.root / "不存在")})
+        self.assertEqual(Path(self.alpha).resolve(), Path(self.project_row()["root"]).resolve())
+        self.assertEqual([], [row for row in self.relocate_events() if "result" in row])
+
+    def test_relocate_refuses_a_relative_root_and_writes_nothing(self):
+        self.error("INVALID_INPUT", "relocate_project", {"project_id": "alpha", "new_root": "相对路径"})
+        self.assertEqual(Path(self.alpha).resolve(), Path(self.project_row()["root"]).resolve())
+
+    def test_unknown_project_is_rejected_and_nothing_is_written(self):
+        self.error("NOT_FOUND", "relocate_project", {"project_id": "ghost", "new_root": str(self.moved)})
+        self.assertEqual([], [row for row in self.relocate_events() if "result" in row])
+
+    def test_relocate_writes_an_event_with_old_and_new_root(self):
+        self.ok("relocate_project", {"project_id": "alpha", "new_root": str(self.moved)})
+        details = [row["result"] for row in self.relocate_events() if "result" in row]
+        self.assertEqual(1, len(details), details)
+        self.assertEqual(Path(self.alpha).resolve(), Path(details[0]["old_root"]).resolve())
+        self.assertEqual(Path(self.moved).resolve(), Path(details[0]["root"]).resolve())
+
+
 if __name__ == "__main__":
     unittest.main()

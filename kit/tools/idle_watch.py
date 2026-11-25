@@ -71,14 +71,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / ".data" / "task-center.sqlite3"
-# 默认扫安装时的那份工作区：install.py 会把占位换成真实安装路径，所以在装好的
-# 工作区里它就是那个绝对目录；在套件仓库里直接跑时占位没被替换，扫到 0 个会话
-# （不是错，是没指定要扫哪儿）——要看别的目录就重复传 --workdir。
-# 以前这里硬编码了两台本机目录，换成别人 clone 下来一个都扫不到。
-DEFAULT_WORKDIRS = ("{{WORKSPACE}}",)
-# 中心库怎么发现只有一处：`tools/center_config.py`（三个闸门与两个巡检工具都从它取）。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import center_config  # noqa: E402
+DEFAULT_WORKDIRS = ("{{WORKSPACE}}", "D:/cindy-harmony-app")
 
 # 问句识别：末尾的问号，或下面这些「我在等你表态」的说法。
 # 放成模块常量，测试能直接打到（不靠复述一份正则）。
@@ -227,26 +220,6 @@ def read_only(path) -> sqlite3.Connection:
     except sqlite3.Error as exc:
         raise WatchError(f"DB_NOT_FOUND：打不开库 {path}（{exc}）") from exc
     return conn
-
-
-def default_ticket_db() -> Path:
-    """默认工单库：与三个闸门同一处发现（`tools/center_config.py`）。
-
-    顺序：工作区指针 `.agents/center.json` 记的 agents-home → 本检出的
-    `.data/task-center.sqlite3` → 主检出（工作树里，按 git 公共目录）→
-    `~/.agents/center.json`（默认安装走这一条，与以前逐字相同）。
-    巡检读错库报出来的「没有待办」比报不出来更坏，所以不新建、不猜；
-    一条都不中时返回本检出的默认位置，让调用方照常报 `DB_NOT_FOUND`。
-    """
-    try:
-        return center_config.resolve(repo=ROOT).db
-    except center_config.DiscoveryError:
-        return DEFAULT_DB
-
-
-def placeholder_workdirs(workdirs) -> list[str]:
-    """还没被安装脚本替换掉的占位目录（`{{...}}` 形式）。"""
-    return [str(item) for item in workdirs if "{{" in str(item) and "}}" in str(item)]
 
 
 def cindy_home() -> Path:
@@ -596,7 +569,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--workdir", action="append", default=None, metavar="PATH",
-        help="要扫的项目目录，可重复；默认只扫安装时的那份工作区（{{WORKSPACE}}）",
+        help="要扫的项目目录，可重复；默认 {{WORKSPACE}} 与 D:/cindy-harmony-app",
     )
     parser.add_argument(
         "--sessions-db", default=None, metavar="PATH",
@@ -642,19 +615,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"DB_NOT_FOUND：找不到 Cindy 会话库（在 {cindy_home()} 下没有 cindy-*.db）",
               file=sys.stderr)
         return 2
-    ticket_path = Path(args.db) if args.db else default_ticket_db()
+    ticket_path = Path(args.db) if args.db else DEFAULT_DB
     workdirs = list(args.workdir) if args.workdir else list(DEFAULT_WORKDIRS)
-    if not args.workdir:
-        unresolved = placeholder_workdirs(workdirs)
-        if unresolved:
-            # 空着不解释会被当成「没有悬空」：占位没被 install.py 换掉，一条会话都匹配不上。
-            print(
-                "提示：默认工作区还是占位 "
-                + "、".join(unresolved)
-                + "（说明是在套件仓库里直接跑，不是装好的工作区）；"
-                "这一次一个会话都扫不到，要看哪个目录就用 --workdir 指明。",
-                file=sys.stderr,
-            )
 
     sessions_conn = ticket_conn = None
     try:

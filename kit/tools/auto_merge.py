@@ -52,11 +52,6 @@
    （分隔符与大小写按 Windows 口径归一，内容相同也算），merge 必然会以
    `untracked working tree file would be overwritten` 拒绝，所以在这里就停下、
    指名文件并给出补救；交集为空时行为与以前完全一样。见 `guard_untracked_overwrite`。
-   第 2 步的「源分支不领先」也分两种现场：改动还没提交，或提交落在了目标分支上。
-   后者的判据只用一个 git 事实——目标分支独有的提交里有没有消息提到这张单
-   （`git log <源>..<目标>` + 工单号）；命中就直说「你可能把提交直接落 <目标> 了」、
-   点名那几个提交，并指向 `docs/protocol.md` 的「发布类工单的提交落在哪里」。
-   命中不了则照旧只报原话，不多说一句。见 `landed_like_this_ticket`。
 3. 冲突预演：`git merge-tree`；有冲突就列出文件并中止，不自动解冲突。
 4. 打回退点 `pre-merge-<ticket>`（已存在**且指向当前目标分支 head** 时沿用：那是上一轮
    停在第 5 步测试红或第 6 步回滚留下的；指向别处才拒，不覆盖旧回退点）。
@@ -92,11 +87,6 @@ AW-058 就断在这里：master 上已经有那次合并提交，`merges` 里没
    但「源分支领先目标」换成「源分支已全在目标里」：
    `git merge-base --is-ancestor <源> <目标>` 为真，且 `rev-list --count <目标>..<源>` 为 0。
    这一步不预检未跟踪文件：这次不再往工作区写任何路径。
-2b. 紧接着比对「分支 tip」与「被验收的 sha」——它比正常路径的同一道判更早说话：
-   不等就点名这两个值、把两个**完整** sha 都打出来。这种现场多半不是「验收之后
-   又提交了」，而是提交直接落在目标分支上、分支停在上一版，所以理由里还要说明
-   落点错了、并指向 `docs/protocol.md` 的「发布类工单的提交落在哪里」。
-   见 `require_record_only_tree`。
 3. 在目标的祖先里找那次合并提交：`rev-list --parents <目标>` 逐行比对，取 `parent2`
    正好等于源分支 tip 的那一个。找不到（例如当时是快进合并，根本没有合并提交）就
    非零退出、不写记录——记录里的 commit 必须是真合过的那一个，不能拿 HEAD 顶替。
@@ -140,10 +130,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # 与 work_gate 共用「中心库只能被发现、不能被新建」的口径，避免两套规则。
-# 发现顺序只写在 `tools/center_config.py` 一处：这里、`work_gate`、`close_gate`
-# 与两个巡检工具都从它取，不各写一遍 `~/.agents/center.json`。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import center_config  # noqa: E402
+import unmerged_scan  # noqa: E402
 import work_gate  # noqa: E402
 
 STEP_LOCK = "第 0 步 · 合并互斥锁"
@@ -278,9 +266,8 @@ def ticket_config_in(repo):
 def test_timeout_in(repo, fallback: int = 1800) -> int:
     """项目自己配的测试超时秒数；没配就用 1800（与 `run_tests_in` 的缺省一致）。
 
-    `add_project.py` 写的 `test_timeout` 就是给这一步用的：鸿蒙那类项目跑一轮
-    `node tests/*.test.mjs` 要几分钟，而抠图实验室的 pytest 更久。不传超时，
-    真实项目会在「测试卡住」与「测试真的很久」之间分不开。
+    `add_project.py` 写的 `test_timeout` 就是给这一步用的：一跑几分钟的项目
+    不传超时，会在「测试卡住」与「测试真的很久」之间分不开。
     """
     local = ticket_config_in(repo) or {}
     value = local.get("test_timeout")
@@ -467,6 +454,30 @@ def exists(repo, ref, env=None) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", ref, step="", check=False, env=env).returncode == 0
 
 
+def landed_like_this_ticket(repo, target, branch, ticket_id, env=None) -> list[tuple[str, str]]:
+    """目标分支独有的提交里，哪些看着像这张单的（消息含工单号）。
+
+    只读，不写任何东西。用来区分「源分支不领先」的两种现场：改动还没提交，还是提交
+    直接落在了目标分支上。判据只用 git 事实与工单号本身，不去猜作者的意图：
+    消息里出现 `AWK-121` 这种字面量才算，命中不了就返回空列表，调用方照旧报原话。
+    返回 [(完整 sha, 首行标题), ...]，按 git log 的顺序（新的在前）。
+    """
+    if not ticket_id:
+        return []
+    proc = git(repo, "log", "--format=%H%x1f%s", f"{branch}..{target}",
+               step=STEP_CHECKS, check=False, env=env)
+    if proc.returncode != 0:
+        # 两个 ref 有一个读不出来时不该把「不领先」变成另一句话：交给上游判。
+        return []
+    needle = str(ticket_id).casefold()
+    hits = []
+    for line in proc.stdout.splitlines():
+        sha, _, subject = line.partition("\x1f")
+        if sha and needle in subject.casefold():
+            hits.append((sha.strip(), subject.strip()))
+    return hits
+
+
 def _summarise(output: str) -> str:
     """从输出里取一行能写进合并记录的汇总：`汇总：` 优先，否则末行。"""
     summary = ""
@@ -602,23 +613,14 @@ def _run_glob(where, plan, matches, *, env, timeout, step):
     return True, f"{plan.glob}：{total}/{total} 个文件通过", output
 
 
-def open_center(db_path=None, step=STEP_TICKET, repo=None):
-    """发现并打开中心库；不新建。发现顺序只有 `tools/center_config.py` 一处。
-
-    `repo` 只给用例指定「问的是哪个工作区」；生产调用方不传，默认就是这份工具所在的工作区。
-    """
-    if db_path:
-        db = Path(db_path)
-    else:
-        try:
-            db = work_gate.discover_db(repo=repo or work_gate.REPO).db
-        except center_config.DiscoveryError as error:
-            raise Fail(step, f"{error.code}：{error.message}", error.fix) from error
+def open_center(db_path=None, step=STEP_TICKET):
+    """发现并打开中心库；不新建。"""
+    db = db_path or work_gate.find_db()
     if db is None or not Path(db).is_file():
         raise Fail(
             step,
-            f"中心库没找到（DB_NOT_FOUND：{db}）。",
-            center_config.ORDER_HINT,
+            "中心库没找到。",
+            "检查 ~/.agents/center.json 的 db 字段指向的库是否存在；不要为了让合并跑起来新建一个库。",
         )
     try:
         center = work_gate.load_center()(db)
@@ -712,13 +714,20 @@ def load_exemptions(path=None):
     return entries, target, True
 
 
-def latest_head_sha(center, item):
-    """这张单最新一条提交记下的 head_sha；读不到就 None。"""
+def latest_submission_shas(center, item):
+    """这张单最新一条提交记下的 `(head_sha, base_sha)`；读不到就是 `(None, None)`。
+
+    两个 sha 一起取、一起用：判「有没有可合的树」靠的是它们之间的关系
+    （`head_sha == base_sha` = 这次尝试没造出提交），分开取只会多跑一次 `get_ticket`。
+    """
     reply = center.execute("get_ticket", {"project_id": item["project_id"], "ticket_id": item["id"]})
     if not reply["ok"]:
-        return None
+        return None, None
     submissions = reply["result"].get("submissions") or []
-    return submissions[-1].get("head_sha") if submissions else None
+    if not submissions:
+        return None, None
+    latest = submissions[-1]
+    return latest.get("head_sha"), latest.get("base_sha")
 
 
 def emit_exemption_column(emit, exemptions, path, have_file, historical):
@@ -751,15 +760,24 @@ def emit_exemption_column(emit, exemptions, path, have_file, historical):
          f"（历史单要么已补记，要么已被 archived 终态覆盖）。")
 
 
-def list_unmerged_rows(center, out=None, exemptions_path=None):
-    """每轮开工先看：已验收但没有合并记录的工单，分成「真待合并」与「历史豁免」两栏。
+def list_unmerged_rows(center, out=None, exemptions_path=None, roots=None):
+    """每轮开工先看：已验收但没有合并记录的工单，分成三栏。
 
-    `list_unmerged` 是原料不是结论：它把 51 张没有 `head_sha` 的历史直做单和真正该合的
-    单混在一起。历史豁免由 `tools/backfill_merges.py --apply` 写成一份可审的清单
-    （`docs/unmerged-exemptions.json`），这里按它分栏并给出理由。
+    `list_unmerged` 是原料不是结论，它把三种完全不同的现场混在一张表里：
+
+    - **真待合并**：仓库里还有一棵没合进去的树（分支在、或者提交的 head 与目标不同）；
+    - **仓库无改动**：这次尝试没有造出提交（`head_sha` 与 `base_sha` 相同），而且仓库里
+      没有这张单的分支——它本来就不在仓库里（AW-146 那种只改本机配置的单），没有可合的
+      树，不该写一条合并记录去冒充，也不该进 archived；
+    - **历史豁免**：合并流程建立之前的直接提交，没有 `head_sha`，这里没有任何可核的
+      东西。由 `tools/backfill_merges.py --apply` 写成一份可审的清单
+      （`docs/unmerged-exemptions.json`），这里按它分栏并给出理由。
 
     清单不是免检：豁免条目若现场已经有 `head_sha`，说明事实变了，照「真待合并」列出
     并告警——拿一份旧清单把真该处理的单藏起来，正是这份清单要防的错。
+
+    `roots` 是项目 id → 项目根，第二栏要在这里跑只读 `git rev-parse`；拿不到就整列
+    是 0 张（退回「真待合并」），不会把任何单藏起来。
     """
     emit = out or print
     reply = center.execute("list_unmerged", {})
@@ -775,18 +793,32 @@ def list_unmerged_rows(center, out=None, exemptions_path=None):
         emit("")
         emit("真待合并（0 张）：")
         emit("  （没有）")
+        emit_no_change_column(emit, [])
         # 豁免那一栏也要打：没有任何待合并单时它才是「还有没有历史单要补记录」的答案。
         exemptions, path, have_file = load_exemptions(exemptions_path)
         emit_exemption_column(emit, exemptions, path, have_file, [])
         emit("合并用：python tools/auto_merge.py --ticket <编号>")
         return []
     exemptions, path, have_file = load_exemptions(exemptions_path)
-    real, historical, suspicious = [], [], []
+    probe = unmerged_scan.RepoProbe()
+    roots = roots or {}
+    real, historical, suspicious, no_change = [], [], [], []
     for item in items:
-        if item["id"] not in exemptions:
-            real.append(item)
+        exemption = exemptions.get(item["id"])
+        repo = roots.get(item["project_id"]) if exemption is None else None
+        # 只有要用到提交时才读工单：项目根拿不到就没有可探测的事实，也就没必要问库。
+        head_sha, base_sha = (latest_submission_shas(center, item)
+                              if repo or exemption is not None else (None, None))
+        if exemption is None:
+            # 拿不到项目根就不去查提交：没有仓库可探测时，结论只能是「真待合并」。
+            found = (probe.no_repo_change(repo, item["id"], head_sha, base_sha)
+                     if repo else None)
+            if found is not None:
+                no_change.append({**item, "basis": found["basis"]})
+            else:
+                real.append(item)
             continue
-        if latest_head_sha(center, item):
+        if head_sha:
             # 清单说它没有证据，现场却有 head_sha：不能靠旧清单把它藏起来。
             real.append(item)
             suspicious.append(item)
@@ -803,6 +835,7 @@ def list_unmerged_rows(center, out=None, exemptions_path=None):
         names = ", ".join(item["id"] for item in suspicious)
         emit(f"  ! 豁免清单与现场不符：{names} 已经有 head_sha，按真待合并处理；"
              f"重跑 python tools/backfill_merges.py --apply 刷新清单。")
+    emit_no_change_column(emit, no_change)
     emit_exemption_column(emit, exemptions, path, have_file, historical)
     emit("合并用：python tools/auto_merge.py --ticket <编号>")
     emit("「没有合并记录」有两种，不要用同一条命令：")
@@ -811,6 +844,27 @@ def list_unmerged_rows(center, out=None, exemptions_path=None):
     emit("  判据：git merge-base --is-ancestor ticket/<编号> master 成立，"
          "且 git rev-list --count master..ticket/<编号> 为 0。")
     return items
+
+
+def emit_no_change_column(emit, rows):
+    """「仓库无改动」那一栏：每行都带自己的依据，不让人再跑一遍命令才知道结论从哪来。
+
+    这一栏不是待办清单，所以它不给 `--ticket` 的用法——对它跑合并只会停在第 2 步
+    （源分支不存在）。它也不该补合并记录：这次尝试没造出提交的单账是清楚的；非 git
+    项目（AW-151）则根本没有仓库，验收后由协调会话 `archive_ticket` 归位。
+    """
+    emit("")
+    emit(f"仓库无改动（{len(rows)} 张）：")
+    for item in rows:
+        # 依据与单号写在同一行：C1 要的就是「这一行为什么不归上面那一栏」当场可核。
+        emit(f"  {item['id']}\t{item['project_id']}\t{item['title']}\t依据：{item['basis']}")
+    if not rows:
+        emit("  （没有）")
+        return
+    emit("  这一栏没有可合的树：改动不在仓库里（这次尝试没有造出提交，"
+         "或项目根根本不是 git 仓库）。不写合并记录：没有可合的东西；"
+         "非 git 项目验收后由协调会话 `archive_ticket`，其余不进 archived。"
+         "它不进真待合并，也就不挡下一张单。")
 
 
 def preview_conflict(repo, target, branch, out, env=None):
@@ -1517,7 +1571,8 @@ def notice_precheck(ticket, ticket_id, emit, dry_run=False) -> None:
     )
 
 
-def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=True) -> dict:
+def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=True,
+                 head_sha=None, base_sha=None) -> dict:
     """第 2 步：前置检查，全部在动目标分支之前完成。
 
     `ticket_id` 只用来拼那句「分支约定是 ticket/<工单号>」的补救话：它必须由上层传进来，
@@ -1595,6 +1650,19 @@ def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=Tr
             "核对 --target；默认是 master。",
         )
     if not exists(repo, f"refs/heads/{branch}", env):
+        # 源分支不存在有两种现场，提醒的事完全不同（AW-147）：真该合的单（分支丢了），
+        # 与「本来就没有可合的树」的单（本次尝试没造出提交，`head_sha == base_sha`）。
+        # 后者在 `--list` 的「仓库无改动」一栏里，对它跑合并永远跑不动。
+        no_change = unmerged_scan.RepoProbe().no_repo_change(
+            repo, ticket_id, head_sha, base_sha, target)
+        if no_change is not None:
+            raise Fail(
+                STEP_CHECKS,
+                f"源分支 {branch} 不存在，且这张单没有可合的树（{no_change['basis']}）。",
+                "这类单不需要合并记录：见 `python tools/auto_merge.py --list` 的"
+                "「仓库无改动」一栏。改动不在仓库里，就没有分支可合；不要为它写一条"
+                "指向别人合并提交的记录，它也不该进 archived。",
+            )
         raise Fail(
             STEP_CHECKS,
             f"源分支 {branch} 不存在。",
@@ -1607,10 +1675,6 @@ def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=Tr
 
     if require_ahead:
         if ahead == 0:
-            # 「源分支不领先」有两种现场，说的是两件不同的事：
-            # ① 改动还没提交（真没做完）；② 提交落在了目标分支上（发布类工单常这么干）。
-            # ②的判别只看一个 git 事实：目标分支独有的提交里有没有消息提到这张单。
-            # 不给这个提醒时，人只能看到「源分支不领先」一句，看不出是自己的落点错了。
             landed = landed_like_this_ticket(repo, target, branch, ticket_id, env=env)
             if landed:
                 detail = "\n".join(f"    {sha[:12]} {subject}" for sha, subject in landed[:5])
@@ -1685,6 +1749,18 @@ def reviewed_head_sha(ticket) -> str | None:
     return (submissions[-1] or {}).get("head_sha")
 
 
+def reviewed_base_sha(ticket) -> str | None:
+    """工单最新一次提交记下的 base sha；旧数据或没有提交时返回 None。
+
+    与 `reviewed_head_sha` 一起用：两个相等说明这次尝试没有造出提交，
+    那是「仓库无改动」这一栏的第一条依据（AW-148）。
+    """
+    submissions = ticket.get("submissions") or []
+    if not submissions:
+        return None
+    return (submissions[-1] or {}).get("base_sha")
+
+
 def guard_reviewed_sha(ticket, ticket_id, branch, tip, emit) -> str:
     """比对「被验收的 sha」与「现在要合的 tip」，返回要交给 `merge_ticket` 的 reviewed_sha。
 
@@ -1713,71 +1789,6 @@ def guard_reviewed_sha(ticket, ticket_id, branch, tip, emit) -> str:
             f"那个提交（{head[:12]}）再合，要么让独立验收会话对现在的 tip 重新验收一次"
             f"（提交一次带 head_sha 的成果，再 review_result）。此刻 {ticket_id} 的合并记录没写、"
             "回退点 tag 没打、临时工作树没建，目标分支一指头没动。",
-        )
-    emit(f"被验收的树：{head}（与 {branch} 的 tip 一致）。")
-    return head
-
-
-def landed_like_this_ticket(repo, target, branch, ticket_id, env=None) -> list[tuple[str, str]]:
-    """目标分支独有的提交里，哪些看着像这张单的（消息含工单号）。
-
-    只读，不写任何东西。用来区分「源分支不领先」的两种现场：改动还没提交，还是提交
-    直接落在了目标分支上。判据只用 git 事实与工单号本身，不去猜作者的意图：
-    消息里出现 `AW-116` 这种字面量才算，命中不了就返回空列表，调用方照旧报原话。
-    返回 [(完整 sha, 首行标题), ...]，按 git log 的顺序（新的在前）。
-    """
-    if not ticket_id:
-        return []
-    proc = git(
-        repo, "log", "--format=%H%x1f%s", f"{branch}..{target}",
-        step=STEP_CHECKS, check=False, env=env,
-    )
-    if proc.returncode != 0:
-        # 两个 ref 有一个读不出来时不该把「不领先」变成另一句话：交给上游判。
-        return []
-    needle = str(ticket_id).casefold()
-    hits = []
-    for line in proc.stdout.splitlines():
-        sha, _, subject = line.partition("\x1f")
-        if sha and needle in subject.casefold():
-            hits.append((sha.strip(), subject.strip()))
-    return hits
-
-
-def require_record_only_tree(ticket, ticket_id, branch, tip, *, repo, target, env, emit) -> str:
-    """`--record-only` 收口时的「那次合并合进来的那一支」比对。
-
-    判的是与 `guard_reviewed_sha` 同一件事（分支 tip == 被验收的 sha），拒绝的话不同：
-    这里的现场几乎都是「提交直接落在目标分支上」，不是「验收之后分支又动了」，照抄那句
-    会把人指向相反的方向。所以拒绝理由点名两个值、把两个**完整** sha 都打出来，让人
-    能直接拿去核；命中「目标分支上有像这张单的提交」时再补一句落点说明。
-
-    老提交（没有 `head_sha`）原样交给 `guard_reviewed_sha`：那一档的处理是警告 + 记
-    `unverified`，不该被这里重写一遍。
-    """
-    head = reviewed_head_sha(ticket)
-    if head is None:
-        return guard_reviewed_sha(ticket, ticket_id, branch, tip, emit)
-    head = str(head).casefold()
-    if head != tip.casefold():
-        landed = landed_like_this_ticket(repo, target, branch, ticket_id, env=env)
-        misplaced = ""
-        if landed:
-            detail = "\n".join(f"    {sha[:12]} {subject}" for sha, subject in landed[:5])
-            misplaced = (
-                f"\n{target} 上已经有看着像这张单的提交：\n{detail}\n"
-                f"这多半就是提交直接落 {target} 了：落点错了，不是验收之后又改了分支。"
-            )
-        raise Fail(
-            STEP_SHA,
-            f"分支 tip 与被验收的 sha 不一致：分支 {branch} 的 tip 是 {tip}，"
-            f"被验收的 sha 是 {head}。--record-only 要收口的是「分支 tip 就是那次合并合进来的"
-            f"那一支」，这两个值不等就没有可比的那棵树，一条记录都不写。{misplaced}",
-            f"两条路：把 {branch} 退回到被验收的 {head[:12]} 再收口，或让独立验收会话对现在的 "
-            f"tip（{tip[:12]}）重新验收一次（提交一次带 head_sha 的成果，再 review_result）。"
-            f"若提交本来就没落在分支上（落到了 {target}），--record-only 帮不上忙——按 "
-            "docs/protocol.md 的「发布类工单的提交落在哪里」把改动重新落在 ticket 分支上再走一次"
-            f"合并。此刻 {ticket_id} 的合并记录没写、工作树与分支都还在、目标分支一指头没动。",
         )
     emit(f"被验收的树：{head}（与 {branch} 的 tip 一致）。")
     return head
@@ -1831,24 +1842,8 @@ SCHEMA_SNAPSHOT_FAILED = "SCHEMA_SNAPSHOT_FAILED"  # 快照写不进去，于是
 SCHEMA_DB_AHEAD = "SCHEMA_DB_AHEAD"            # 库比合并进来的代码还新
 SCHEMA_RELOAD_MISMATCH = "SCHEMA_RELOAD_MISMATCH"  # 重新载入的模块与合并后代码不一致
 
-# 引擎代码的两个公民位置：装好的工作区在仓库根，套件仓库在 `kit/` 下。两处都认，
-# 否则 schema 闸门在其中一个仓库上会静默跳过（ AWK-101 的现场：合它时 schema 从 9 推到 13，
-# 闸门一路打印「没有 db.py，跳过」，一次都没生效）。
-SCHEMA_CANDIDATES = (
-    Path("task_center") / "db.py",
-    Path("kit") / "task_center" / "db.py",
-)
+SCHEMA_FILE = Path("task_center") / "db.py"
 SCHEMA_LINE = re.compile(r"^\s*SCHEMA_VERSION\s*=\s*(\d+)\s*$", re.MULTILINE)
-
-
-def schema_file_in(code_root):
-    """这个树里真正放着引擎代码的那份 `db.py`；一个都没有则 `None`。"""
-    root = Path(code_root)
-    for relative in SCHEMA_CANDIDATES:
-        path = root / relative
-        if path.is_file():
-            return path
-    return None
 
 
 def parse_schema_version(text) -> int | None:
@@ -1861,16 +1856,18 @@ def parse_schema_version(text) -> int | None:
 
 
 def schema_version_on_disk(code_root) -> int | None:
-    """合并后磁盘上这份代码要求哪一代 schema；树里没有引擎代码时为 None。"""
-    path = schema_file_in(code_root)
-    if path is None:
+    """合并后磁盘上这份代码要求哪一代 schema；仓库里没有 `task_center/db.py` 时为 None。"""
+    path = Path(code_root) / SCHEMA_FILE
+    if not path.is_file():
         return None
     return parse_schema_version(path.read_text(encoding="utf-8", errors="replace"))
 
 
 def schema_version_in_database(db_path) -> int:
     """库里现在是哪一代。直读 `PRAGMA user_version`，不经过 task_center（它只认最新一代）。"""
-    db = Path(db_path)
+    # `as_uri()` 不接相对路径：`--db .data/task-center.sqlite3` 会抛 ValueError 而不是一句人话。
+    # 与其余只读工具同口径：先落绝对路径再拼 URI。
+    db = Path(db_path).absolute()
     conn = sqlite3.connect(f"{db.as_uri()}?mode=rw", uri=True, timeout=10)
     try:
         return int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -1944,17 +1941,13 @@ def migrate_database_with_fresh_code(repo, db_path, python, env=None, timeout=60
 
 
 def center_package_root(repo):
-    """树里真的带 `task_center` 包时返回**它所在的那个目录**；否则 None（业务项目改不到 schema）。
+    """仓库里真的带 `task_center` 包时返回仓库根；否则 None（业务项目改不到 schema）。
 
     要 `__init__.py` 而不只是 `db.py`：重新载入模块需要它是个可导入的包，
     光有一个文件时只可能是在考工具（用例里的桩），那时不载。
-    两个位置与 `schema_file_in` 同一套：装好的工作区在仓库根，套件仓库在 `kit/` 下。
     """
     root = Path(repo)
-    for candidate in (root, root / "kit"):
-        if (candidate / "task_center" / "__init__.py").is_file():
-            return candidate
-    return None
+    return root if (root / "task_center" / "__init__.py").is_file() else None
 
 
 def reload_task_center(code_root):
@@ -2272,21 +2265,15 @@ def _record_only_steps(
     tip = checks["tip"]
 
     # 同一道比对：`--record-only` 比的是源分支 tip，也就是那次合并合进来的那一支。
-    # 拒绝的话与正常合并不同：这里的现场多半是落点错了，详见 `require_record_only_tree`。
-    reviewed_sha = require_record_only_tree(
-        ticket, ticket_id, branch, tip, repo=repo, target=target, env=env, emit=emit
-    )
+    reviewed_sha = guard_reviewed_sha(ticket, ticket_id, branch, tip, emit)
 
     commit = find_merge_commit(repo, target, tip, env=env)
     if commit is None:
         raise Fail(
             STEP_FIND,
-            f"在 {target} 的祖先里找不到合并提交：要的是 parent2 == {branch} 的 tip（{tip}），"
-            f"而 {target} 现在在 {checks['base']}。",
+            f"{target} 的祖先里找不到「parent2 == {branch} 的 tip（{tip[:12]}）」的合并提交。",
             "这条路径只收「--no-ff 真合过、但记录没写」的现场。快进合并没有合并提交，"
-            "记录下来会指错提交，所以不写：先核对 git log --graph，再由人决定这张单怎么算。"
-            "若这次改动根本没在分支上合过（直接提交在目标分支上），按 docs/protocol.md 的"
-            "「发布类工单的提交落在哪里」把提交重新落在 ticket 分支上再走一次合并。",
+            "记录下来会指错提交，所以不写：先核对 git log --graph，再由人决定这张单怎么算。",
         )
     emit(f"合并提交：{commit[:12]}（{target} 的祖先；parent2 是 {branch} 的 tip {tip[:12]}）")
     emit(f"测试命令：{plan.describe()}")
@@ -2350,7 +2337,7 @@ def _merge_steps(
     ticket = _step_ticket(ticket_id, ticket_reader, emit)
     # 测试命令按项目定（AW-126）：在这里解一次，第 5 步、第 6 步共用同一份计划，
     # 不在两个地方各解一遍——否则「预演跑的」与「合并后跑的」可以不是同一条命令。
-    plan = test_plan or resolve_test_plan(ticket.get("project_id") or "", config_path=test_config, repo=repo)
+    plan = test_plan or resolve_test_plan(ticket.get("project_id") or "", config_path=test_config)
     emit(f"分支：{branch} → {target}")
 
     # 第 1 步收尾：回执。库里 merge_ticket 也判这一条，但那时合并已经落进目标分支了。
@@ -2359,7 +2346,9 @@ def _merge_steps(
     notice_precheck(ticket, ticket_id, emit, dry_run=dry_run)
 
     # 第 2 步：前置检查，全部在动目标分支之前完成
-    checks = _step_checks(repo, target, branch, env, emit, ticket_id=ticket_id)
+    checks = _step_checks(repo, target, branch, env, emit, ticket_id=ticket_id,
+                          head_sha=reviewed_head_sha(ticket),
+                          base_sha=reviewed_base_sha(ticket))
     base = checks["base"]
 
     # 第 2 步收尾之二：被验收的树是不是要合的那棵树。
@@ -2545,7 +2534,7 @@ def main(argv, out=None):
     parser.add_argument("--ticket", default=os.environ.get("TASK_CENTER_TICKET"))
     parser.add_argument("--branch", default=None, help="源分支，默认 ticket/<ticket>")
     parser.add_argument("--target", default=None,
-                        help="目标分支；不传就取项目配置的 target_branch，再没有就是 master")
+                        help="目标分支；不传就取项目配置的 target_branch，再没有就 master")
     parser.add_argument("--dry-run", action="store_true", help="跑到预演与测试就停，不碰目标分支")
     parser.add_argument(
         "--record-only",
@@ -2555,14 +2544,15 @@ def main(argv, out=None):
     )
     parser.add_argument("--list", action="store_true", help="列出已验收但未合并的工单")
     parser.add_argument("--repo", default=str(REPO))
-    parser.add_argument("--db", default=None, help="中心库路径，默认按 tools/center_config.py 的顺序发现")
+    parser.add_argument("--db", default=None, help="中心库路径，默认按 center.json 发现")
     args = parser.parse_args(argv)
 
     repo = Path(args.repo).resolve()
     try:
         if args.list:
             center, _ = open_center(args.db, STEP_TICKET)
-            list_unmerged_rows(center, emit)
+            # 分类要用项目根跑只读 git：项目表读不动就整列 0 张，退回「真待合并」。
+            list_unmerged_rows(center, emit, roots=unmerged_scan.project_roots(center))
             return 0
         if not args.ticket:
             emit("没有工单号。用法：python tools/auto_merge.py --ticket AW-xxx")
@@ -2570,12 +2560,11 @@ def main(argv, out=None):
         if args.dry_run and args.record_only:
             emit("--dry-run 与 --record-only 不能同时用：一个是「只预演不写」，一个是「不预演只写」。")
             return 2
-        target = args.target or default_target(repo)
         return run_merge(
             repo,
             args.ticket,
             branch=args.branch,
-            target=target,
+            target=args.target or default_target(repo),
             dry_run=args.dry_run,
             record_only=args.record_only,
             out=emit,

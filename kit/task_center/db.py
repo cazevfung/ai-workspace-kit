@@ -333,22 +333,15 @@ def validate_columns(conn, required, tables=None):
 
 
 # 每一步升级：升级前该版本应有的形状、升级语句、以及「声称旧版本却已经有新东西」的识别方式。
-#
-# **键是这一步装配完成后的版本号**（`MIGRATIONS[16]` = 15 → 16 那一步），不是升级前的版本号：
-# 这样 `sorted(MIGRATIONS)` 就是「这份引擎认得的全部版本」，末端那一个必然等于 `SCHEMA_VERSION`，
-# 读到 16 与「16 是当前版本」是同一件事，不必再从 `SCHEMA_VERSION` 反过来猜哪一级是最后一级。
-# 代价是取步时要比库里的版本号 +1（见 `migration_step()`）——这一步只有一处，写在函数里。
-# 判据本身（形状、`already_applied`、拒绝文案）逐字照抄上游工作区：那边按升级前的版本号登记，
-# 同一条判据在两边的语义完全相同，只有键位挪了一格。
 MIGRATIONS = {
-    4: {
+    3: {
         "tables": V3_REQUIRED_TABLES,
         "columns": V3_REQUIRED_COLUMNS,
         "statements": ["ALTER TABLE attempts ADD COLUMN coordinator_session_id TEXT"],
         "already_applied": lambda conn: "coordinator_session_id" in column_names(conn, "attempts"),
         "already_applied_message": "Database claims an older version but already has the newer column; inspect it, do not migrate",
     },
-    5: {
+    4: {
         "tables": V4_REQUIRED_TABLES,
         "columns": V4_REQUIRED_COLUMNS,
         "statements": [
@@ -359,7 +352,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "merges" in expected_tables(conn),
         "already_applied_message": "Database claims version 4 but already has the merges table; inspect it, do not migrate",
     },
-    6: {
+    5: {
         "tables": V5_REQUIRED_TABLES,
         "columns": V5_REQUIRED_COLUMNS,
         "statements": [
@@ -380,7 +373,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "questions" in expected_tables(conn),
         "already_applied_message": "Database claims version 5 but already has the questions table; inspect it, do not migrate",
     },
-    7: {
+    6: {
         "tables": V6_REQUIRED_TABLES,
         "columns": V6_REQUIRED_COLUMNS,
         "statements": [
@@ -397,7 +390,7 @@ MIGRATIONS = {
                                          or "coordinator_workdir" in column_names(conn, "attempts")),
         "already_applied_message": "Database claims version 6 but already has notices or coordinator_workdir; inspect it, do not migrate",
     },
-    8: {
+    7: {
         "tables": V7_REQUIRED_TABLES,
         "columns": V7_REQUIRED_COLUMNS,
         "statements": [
@@ -409,7 +402,7 @@ MIGRATIONS = {
                                          or "wake_kind" in column_names(conn, "notices")),
         "already_applied_message": "Database claims version 7 but already has the newer notices columns; inspect it, do not migrate",
     },
-    9: {
+    8: {
         "tables": V8_REQUIRED_TABLES,
         "columns": V8_REQUIRED_COLUMNS,
         "statements": [
@@ -421,7 +414,7 @@ MIGRATIONS = {
                                          or "reviewed_sha" in column_names(conn, "merges")),
         "already_applied_message": "Database claims version 8 but already has submissions.head_sha or merges.reviewed_sha; inspect it, do not migrate",
     },
-    10: {
+    9: {
         "tables": V9_REQUIRED_TABLES,
         "columns": V9_REQUIRED_COLUMNS,
         "statements": [
@@ -436,7 +429,7 @@ MIGRATIONS = {
                                          or "base_sha" in column_names(conn, "submissions")),
         "already_applied_message": "Database claims version 9 but already has criteria_version or submissions.base_sha; inspect it, do not migrate",
     },
-    11: {
+    10: {
         "tables": V10_REQUIRED_TABLES,
         "columns": V10_REQUIRED_COLUMNS,
         "statements": [
@@ -476,7 +469,7 @@ MIGRATIONS = {
                                          or column_notnull(conn, "tickets", "prd_sha256") is False),
         "already_applied_message": "Database claims version 10 but already has projects.next_number, the ticket_links table or a nullable tickets.prd_sha256; inspect it, do not migrate",
     },
-    12: {
+    11: {
         "tables": V11_REQUIRED_TABLES,
         "columns": V11_REQUIRED_COLUMNS,
         "statements": [
@@ -502,7 +495,7 @@ MIGRATIONS = {
                                          or column_notnull(conn, "tickets", "prd_sha256") is not False),
         "already_applied_message": "Database claims version 11 but already has the batches table, attempts.batch_key or tickets.batch_id (or a v10-shaped tickets table); inspect it, do not migrate",
     },
-    13: {
+    12: {
         "tables": V12_REQUIRED_TABLES,
         "columns": V12_REQUIRED_COLUMNS,
         "statements": [
@@ -513,7 +506,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "conflict_preview" in column_names(conn, "submissions"),
         "already_applied_message": "Database claims version 12 but already has submissions.conflict_preview; inspect it, do not migrate",
     },
-    14: {
+    13: {
         "tables": V13_REQUIRED_TABLES,
         "columns": V13_REQUIRED_COLUMNS,
         "statements": [
@@ -527,7 +520,7 @@ MIGRATIONS = {
                                          or "owner_session_id" in column_names(conn, "tickets")),
         "already_applied_message": "Database claims version 13 but already has a 14 or 15 column; inspect it, do not migrate",
     },
-    15: {
+    14: {
         "tables": V14_REQUIRED_TABLES,
         "columns": V14_REQUIRED_COLUMNS,
         "statements": [
@@ -542,7 +535,7 @@ MIGRATIONS = {
         "already_applied": lambda conn: "owner_session_id" in column_names(conn, "tickets"),
         "already_applied_message": "Database claims version 14 but already has tickets.owner_session_id; inspect it, do not migrate",
     },
-    16: {
+    15: {
         "tables": V15_REQUIRED_TABLES,
         "columns": V15_REQUIRED_COLUMNS,
         "statements": lambda conn: [
@@ -564,13 +557,7 @@ MIGRATIONS = {
 
 def upgrade_chain():
     """已知升级链的文案：从 MIGRATIONS 的键推出来，不再手写「3 -> 4 -> 5」，免得加一级就成假话。"""
-    levels = sorted(MIGRATIONS)
-    return " -> ".join([str(levels[0] - 1)] + [str(version) for version in levels])
-
-
-def migration_step(conn_version):
-    """库声称第 N 版时要跑的那一步：键就是装配完成后的版本，所以取 N + 1。"""
-    return MIGRATIONS.get(conn_version + 1)
+    return " -> ".join([str(version) for version in sorted(MIGRATIONS)] + [str(SCHEMA_VERSION)])
 
 
 def validate_schema(conn):
@@ -640,9 +627,9 @@ def migrate_database(path):
             validate_schema(conn)
             return {"database": str(path), "schema_version": SCHEMA_VERSION, "from_version": SCHEMA_VERSION,
                     "migrated": False, "message": "已是最新，没有修改任何行"}
-        step = migration_step(version)
-        require(step is not None, "SCHEMA_MISMATCH",
+        require(version in MIGRATIONS, "SCHEMA_MISMATCH",
                 f"Unsupported schema version {version}; known upgrades are {upgrade_chain()}")
+        step = MIGRATIONS[version]
         validate_columns(conn, step["columns"], step["tables"])
         require(not step["already_applied"](conn), "SCHEMA_MISMATCH", step["already_applied_message"])
         conn.execute("BEGIN IMMEDIATE")
@@ -650,10 +637,10 @@ def migrate_database(path):
             # 事务内再确认一次，避免两次读之间版本被换掉。
             require(conn.execute("PRAGMA user_version").fetchone()[0] == version, "SCHEMA_MISMATCH",
                     "Schema version changed while migrating")
-            # 逐级升级：3 → 4 → 5 → … → 16，每一级只跑自己那几条语句。
+            # 逐级升级：3 → 4 → 5 → … → 11，每一级只跑自己那几条语句。
             current = version
             while current < SCHEMA_VERSION:
-                step_statements = MIGRATIONS[current + 1]["statements"]
+                step_statements = MIGRATIONS[current]["statements"]
                 # 语句可以是固定列表，也可以按当前列集合现算（只用于「补完一半落地的迁移」
                 # 那一级），调用处的形状一致。
                 if callable(step_statements):

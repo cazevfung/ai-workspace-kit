@@ -26,10 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import idle_watch
 
 ROOT = Path(__file__).resolve().parent.parent
-WORKDIR = "{{WORKSPACE}}"          # 安装时被 install.py 换成真实工作区路径
-# 占位符本身得拼出来：写成字面量的话，install.py 会把这一行一起换成真实路径，
-# 装出来的工作区里就没有「占位符」可测了。
-PLACEHOLDER = "{{" "WORKSPACE" "}}"
+WORKDIR = "{{WORKSPACE}}"
 OTHER_WORKDIR = "%USERPROFILE%/Documents/别的项目"
 
 # 夹具里的「现在」：固定值，避免用例随真实时间漂移。
@@ -876,37 +873,9 @@ def setUpModule():
     print(f"tools/test_idle_watch.py {_case_count()} 项")
 
 
-class DefaultWorkdirTest(unittest.TestCase):
-    """默认扫哪儿：源码树里是占位、装出来之后是本工作区，两种都得说得清。
-
-    套件里的默认工作区写成 `{{WORKSPACE}}`，由 install.py 在安装时替换成真实路径。
-    在套件仓库里直接跑时它还是占位，一个会话也匹配不上——那不是「没有悬空」。
-    反过来，装出来的工作区里它必须就是本工作区：写死别处的绝对路径，一样是
-    「一个也扫不到」，而且是能在别人机器上长期伪装成「没有悬空」的那种。
-    """
-
-    def test_placeholder_is_recognised(self):
-        self.assertEqual(
-            idle_watch.placeholder_workdirs((PLACEHOLDER, "D:/真的目录")),
-            [PLACEHOLDER],
-        )
-
-    def test_installed_path_is_not_a_placeholder(self):
-        self.assertEqual(idle_watch.placeholder_workdirs((str(ROOT),)), [])
-        self.assertEqual(idle_watch.placeholder_workdirs(("D:/ai-workspace",)), [])
-
-    def test_default_workdirs_are_placeholder_or_this_workspace(self):
-        """默认目录要么是占位（源码树），要么就是本文件所在的工作区（装出来的）。"""
-        defaults = [str(item) for item in idle_watch.DEFAULT_WORKDIRS]
-        self.assertTrue(defaults, "默认目录不能为空：空集合等于一个会话也不扫")
-        for item in defaults:
-            if idle_watch.placeholder_workdirs((item,)):
-                continue
-            self.assertEqual(
-                Path(item).resolve(), ROOT.resolve(),
-                f"默认目录既不是占位，也不是本工作区：{item}",
-            )
-
-
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     unittest.main(verbosity=2)

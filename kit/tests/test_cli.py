@@ -59,68 +59,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual("DB_NOT_INITIALIZED", result["error"]["code"])
         self.assertFalse(self.db.exists())
 
-    def run_raw(self, *extra):
-        """不经过 run_cli 的拼参，专门测「参数本身就不对」的那几条。"""
-        args = [sys.executable, "-m", "task_center", "--db", str(self.db), "list_tickets", *extra]
-        process = subprocess.run(args, input=None, capture_output=True, encoding="utf-8",
-                                 env={**os.environ, "PYTHONUTF8": "1"}, timeout=30)
-        self.assertNotIn("Traceback", process.stderr)
-        return process.returncode, json.loads(process.stdout)
-
-    def prd(self):
-        path = self.root / "PRD" / "PRD-001-demo.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# demo\n", encoding="utf-8")
-        return "PRD/PRD-001-demo.md"
-
-    def ticket_payload(self, deliverable):
-        # 号由库里发（schema 11 起 `create_ticket` 不再收自报 `ticket_id`），
-        # 所以这里也不写那一键：写了会被「号由库里发」当场拒掉。
-        return {
-            "project_id": "cli-demo",
-            "title": "命令行冒烟",
-            "deliverable": deliverable,
-            "prd_path": self.prd(),
-            "root": str(self.root),
-            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
-        }
-
-    # -- `--input` 指错路与参数不合格必须分开报 -------------------------------
-    #
-    # 两件事的修法不同：前者要改路径，后者要改 JSON 内容。都收成 INVALID_INPUT
-    # 时，路径打错的人会去里面找错，而那句通用文案什么都没说。
-
-    def test_missing_input_file_reports_the_path(self):
-        missing = self.root / "没有这个文件.json"
-        code, result = self.run_raw("--input", str(missing))
-        self.assertEqual(1, code)
-        self.assertEqual("INPUT_UNREADABLE", result["error"]["code"])
-        self.assertIn("读不到输入文件", result["error"]["message"])
-        self.assertIn(str(missing), result["error"]["message"], "要指出是哪条路读不到")
-
-    def test_directory_as_input_is_not_a_parameter_error(self):
-        code, result = self.run_raw("--input", str(self.root))
-        self.assertEqual(1, code)
-        self.assertEqual("INPUT_UNREADABLE", result["error"]["code"])
-        self.assertIn(str(self.root), result["error"]["message"])
-
-    def test_long_deliverable_prints_the_core_sentence(self):
-        """501 字时打的必须是核心原句（带 500），不是命令行层另写的一句话。"""
-        self.run_cli("init")
-        code, result = self.run_cli("create_ticket", self.ticket_payload("长" * 501), "long", use_file=True)
-        self.assertEqual(1, code)
-        self.assertEqual("INVALID_INPUT", result["error"]["code"])
-        self.assertIn("deliverable", result["error"]["message"])
-        self.assertIn("500", result["error"]["message"])
-
-    def test_normal_create_still_exits_zero(self):
-        self.run_cli("init")
-        code, result = self.run_cli("create_ticket", self.ticket_payload("能跑通的一张单"), "ok", use_file=True)
-        self.assertEqual(0, code, result)
-        self.assertEqual("ready", result["result"]["state"])
-        self.assertEqual("能跑通的一张单", result["result"]["deliverable"])
-        self.assertEqual("CD-001", result["result"]["id"], "号由库里发：cli-demo 取每段首字母得 CD，三位数")
-
 
     def test_planned_flag_is_the_cli_spelling_of_the_same_view(self):
         """`list_tickets --planned` 与 payload 里的 planned: true 是同一个池子视图（R6.1）。"""

@@ -27,6 +27,9 @@ from pathlib import Path
 import center_config
 
 REPO = Path(__file__).resolve().parent.parent
+# 中心库的发现顺序只在 `tools/center_config.py` 一处：这里、`auto_merge`、`close_gate`
+# 与两个巡检工具都从它取，不再各写一遍 `~/.agents/center.json`——AWK-105 的现场是
+# `--agents-home` 装出来的工作区，闸门却读到 `~/.agents` 那一套库。
 # 停住阈值默认 45 分钟（PRD-013 R4）。不传 --stalled-minutes 时这个值只用来算
 # 「其中 M 张最后落库超过 45 分钟」那一句；要不要因此非零退出，见 main() 里的说明。
 DEFAULT_STALLED_MINUTES = 45
@@ -39,6 +42,10 @@ ROUND_CHANGED_LINE = re.compile(r"^[-+](?![-+][-+])")
 ROUND_STATUS_ANYWHERE = re.compile(r"状态[：:]")
 ROUND_NUMBER_LINE = re.compile(r"^轮次[：:]\s*(R-\d{3})\s*$", re.M)
 ROUND_STATUS_LINE = re.compile(r"^状态[：:]\s*(\S+)\s*$", re.M)
+# 轮次归属哪个项目：`项目：<project_id>`，只认顶部（`round_header()`）。三个项目共用一条
+# 编号线（全库唯一，见 `docs/closing.md` 的「轮次编号与账本」），所以轮次文件必须自己
+# 说是哪个项目的轮——`--list` 的「本轮未收尾」按这一行判。
+ROUND_PROJECT_LINE = re.compile(r"^项目[：:]\s*(\S+)\s*$", re.M)
 # 状态位是三档之一时这一轮已经有结论；只有「进行中」才可能是没收。
 ROUND_CLOSED_STATUSES = ("已收尾", "等一句答复", "需重开")
 # 在途集合：**只有这一份定义**。`docs/closing.md` 的「在途集合只有一份定义」一节写的
@@ -100,11 +107,7 @@ def load_center():
 
 
 def discover_db(explicit=None, repo=REPO, **kwargs):
-    """按 `center_config` 的顺序发现中心库，返回 `Resolution`；找不到抛 `DiscoveryError`。
-
-    发现逻辑只有 `tools/center_config.py` 一处：这里、`auto_merge`、`close_gate`
-    （以及巡检那两个工具）都从它取，不再各写一遍 `~/.agents/center.json`。
-    """
+    """按 `center_config` 的顺序发现中心库，返回 `Resolution`；找不到抛 `DiscoveryError`。"""
     return center_config.resolve(repo=repo, explicit=explicit, **kwargs)
 
 
@@ -288,36 +291,136 @@ class CenterUnreadable(RuntimeError):
     读库失败就 `return []`，`--list` 于是打印零行、退出 0——它告诉所有人「没有活跃
     尝试」，而它正是「开工前先查有没有人在做」赖以判断的那条命令。撒谎的后果是两个
     人同时改同一批文件，所以这里抛异常，让调用方非零退出并说出错误码。
+
+    `step` 是出错的那一步（操作名，例如 `list_projects`）：报错时把它打出来，
+    「照着操作名与报文定位」才不是一句空话（AW-165）。
     """
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, step=None):
         self.code = code
         self.message = message
+        self.step = step
         super().__init__(f"{code}: {message}")
 
 
-def active(db_path):
+# 「整库读不出」时的分诊（AW-165）。以前两个分支都只写一句「先修库（migrate 或
+# 恢复快照）」：那句话在起因现场（一行历史 JSON 坏掉）方向是反的，而 AW-163 把「单张
+# 单读不出来」分开之后，能走到这两处的只剩下面几类，它们的出路并不相同——
+#   schema 不符 → migrate；库文件坏 → 恢复快照或换 --db；
+#   其余（锁 / 权限 / 打不开 / 未知）→ 照着操作名、异常类型与报文定位，不猜方向。
+_CORRUPT_MARKERS = ("not a database", "malformed", "corrupt", "encrypted", "disk image")
+_BUSY_MARKERS = ("locked", "busy")
+
+
+def exception_kind(exc):
+    """把一个存储层异常归到分诊的那几类现场之一：corrupt / busy / closed / unknown。"""
+    if isinstance(exc, OSError):
+        return "closed"
+    text = str(exc).lower()
+    if any(marker in text for marker in _CORRUPT_MARKERS):
+        return "corrupt"
+    if any(marker in text for marker in _BUSY_MARKERS):
+        return "busy"
+    if "unable to open" in text:
+        return "closed"
+    return "unknown"
+
+
+def probe_center(db_path):
+    """整库读不出时自己再读一遍这个库：只读，不建表、不写行、不跑 migrate。
+
+    为什么还要读一遍：core 把存储层异常压成一句人话（`STORAGE_ERROR: file is not a
+    database`），里头没有异常类型；而「照哪一类现场去修」看的正是它。返回
+    `(kind, detail)`：kind 见 `exception_kind()`，读得通时是 `"readable"`。
+    """
+    target = Path(db_path)
+    try:
+        conn = sqlite3.connect(f"{target.absolute().as_uri()}?mode=rw", uri=True, timeout=2)
+    except (sqlite3.Error, OSError) as exc:
+        return exception_kind(exc), f"{type(exc).__name__}: {exc}"
+    try:
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    except (sqlite3.Error, OSError) as exc:
+        return exception_kind(exc), f"{type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    return "readable", ""
+
+
+def unreadable_advice(code, message, probe=None):
+    """整库读不出时按现场给一句能当场照做的出路，不再一律「先修库」（AW-165）。
+
+    `probe` 是 `probe_center()` 的结果；没给时就只按错误码与报文判。三类出路与现场
+    一一对应：把三类混成一句「重启试试」，等于三个方向都不说。
+    """
+    code = (code or "").upper()
+    kind, detail = probe or ("", "")
+    text = (message or "").lower()
+    store = detail or message or "见上一行报文"
+    if code == "SCHEMA_MISMATCH":
+        return ("分诊：代码与库不是同一版（schema 对不上）→ 先复制一份库，再跑 "
+                "python -m task_center --db <这个库> migrate，升完再跑 --list。"
+                "升上去之前不要在这个库上开工。")
+    if kind == "corrupt" or (not kind and any(marker in text for marker in _CORRUPT_MARKERS)):
+        return (f"分诊：库文件本身坏了（存储层：{store}）→ 用最近一次文件层快照恢复"
+                "（合并工具在迁移前会留一份），或用 --db 指到一份完好的库。"
+                "文件坏了 migrate 只会再失败一次，别对着它跑。")
+    path_note = "（「打不开」这一种先看那条路径在不在、当前账号读不读得了）" \
+        if kind == "closed" else ""
+    return (f"分诊：这不是 schema 不符，也不是文件坏（存储层：{store}），归「锁 / 权限 / "
+            f"打不开 / 未知」这一档{path_note} → 照着上面的操作名、异常类型与报文定位："
+            "谁连着这个库、那条路径当前账号读不读得了；不猜方向，也别拿 migrate 试。")
+
+
+def print_unreadable(error, db_path, verdict, stream=None):
+    """「整库读不出」的一整组输出：错误码、出错的一步、报文、这一句什么意思、分诊。
+
+    两处分支共用：`--list` 那处判的是「谁在做」，轮次那处判的是「这一轮收没收」，
+    现场却是同一个、出路也是同一条——各写一份就必然一边改了、一边没改（AW-165）。
+    """
+    stream = stream or sys.stderr
+    probe = probe_center(db_path)
+    print(f"读库失败：{error.code}（{db_path}）", file=stream)
+    where = f"出错的一步：{error.step}；" if getattr(error, "step", None) else ""
+    print(f"  {where}报文：{error.message}", file=stream)
+    if probe[1]:
+        print(f"  存储层：{probe[1]}", file=stream)
+    print(f"  {verdict}", file=stream)
+    print(f"  {unreadable_advice(error.code, error.message, probe)}", file=stream)
+
+
+def active(db_path, unreadable=None):
     """列出所有带活跃尝试的工单：谁在做什么、等了多久，一眼能看到。
 
     每条带 `started_at`（尝试创建时间）与 `last_event_at`（本单最后一条事件时间）。
     两个时间是这个清单的用处所在：「谁该动手」看前四列，「等了多久」看后两列。
 
-    任何一步读失败都抛 `CenterUnreadable`：只列出读得通的那部分同样是撒谎，
-    少掉的恰好可能是别人正在做的那张单。
+    **一张单读不出来，不再把整份清单判成读不出来（AW-163）。** 以前这里遇到任何一张单
+    的 `get_ticket` 失败就抛 `CenterUnreadable`，于是一行 `INVALID_INPUT` 让整张在途
+    清单消失——`HSE-007` 的一条旧提交就干过这件事，代价是所有人都看不见别人在做什么。
+    现在分两层：库本身读不了（schema、文件损坏、连不上）照旧抛，那确实是「不知道有没有
+    数据」；单张单读不出来则点名记进 `unreadable`（调用方传进来的列表，每项带
+    `project_id` / `ticket_id` / `code` / `message`），其余照常列出。少掉的单照样看得见，
+    只是不再用它换掉整张表。
     """
     center = load_center()(db_path)
     items = []
     projects = center.execute("list_projects", {})
     if not projects["ok"]:
-        raise CenterUnreadable(projects["error"]["code"], projects["error"]["message"])
+        raise CenterUnreadable(projects["error"]["code"], projects["error"]["message"],
+                               step="list_projects")
     for project in projects["result"]["items"]:
-        listed = center.execute("list_tickets", {"project_id": project["project_id"], "limit": 100})
-        if not listed["ok"]:
-            raise CenterUnreadable(listed["error"]["code"], listed["error"]["message"])
-        for ticket in listed["result"]["items"]:
+        try:
+            tickets = pages(center, project["project_id"])
+        except CenterUnreadable as error:
+            record_unreadable(unreadable, project["project_id"], None,
+                              {"code": error.code, "message": error.message})
+            continue
+        for ticket in tickets:
             detail = center.execute("get_ticket", {"project_id": project["project_id"], "ticket_id": ticket["id"]})
             if not detail["ok"]:
-                raise CenterUnreadable(detail["error"]["code"], detail["error"]["message"])
+                record_unreadable(unreadable, project["project_id"], ticket["id"], detail["error"])
+                continue
             for attempt in detail["result"]["attempts"]:
                 if attempt["id"] == detail["result"]["current_attempt"] and attempt["state"] in ("dispatching", "running"):
                     items.append({
@@ -333,6 +436,21 @@ def active(db_path):
     return items
 
 
+def record_unreadable(unreadable, project_id, ticket_id, error):
+    """记一条「这张单读不出来」：`unreadable` 为 None 时抛 `CenterUnreadable`。
+
+    保留 `None` 这条兜底路径，是因为别的调用方可能只想问「能不能全读通」，不要逐个点名；
+    `--list` 传列表进来，于是它拿到的是「其余照常 + 这几张点名」而不是一片空白。
+    """
+    if unreadable is None:
+        raise CenterUnreadable(error["code"], error["message"])
+    entry = {"project_id": project_id, "ticket_id": ticket_id,
+             "code": error["code"], "message": error["message"]}
+    # 同一张单会被两处各读一次（在途表与项目现场），同一件事只点名一行。
+    if entry not in unreadable:
+        unreadable.append(entry)
+
+
 def last_event_times(db_path, ticket_ids):
     """一次读出这些工单的最后一条事件时间：`events` 的最大 `created_at`。
 
@@ -346,14 +464,14 @@ def last_event_times(db_path, ticket_ids):
     try:
         conn = sqlite3.connect(str(db_path))
     except sqlite3.Error as exc:
-        raise CenterUnreadable("STORAGE_ERROR", str(exc)) from exc
+        raise CenterUnreadable("STORAGE_ERROR", f"{type(exc).__name__}: {exc}", step="events") from exc
     try:
         rows = conn.execute(
             f"SELECT ticket_id, MAX(created_at) FROM events WHERE ticket_id IN ({placeholders})"
             " GROUP BY ticket_id", ids)
         return {row[0]: row[1] for row in rows if row[1]}
     except sqlite3.Error as exc:
-        raise CenterUnreadable("STORAGE_ERROR", str(exc)) from exc
+        raise CenterUnreadable("STORAGE_ERROR", f"{type(exc).__name__}: {exc}", step="events") from exc
     finally:
         conn.close()
 
@@ -374,19 +492,47 @@ def stalled(items, threshold_minutes, now=None):
     return overdue
 
 
-def read_staged_paths(repo=REPO):
-    """返回 (暂存区路径列表, 错误说明)。拿不到暂存区时列表为 None。"""
+def read_staged_changes(repo=REPO):
+    """返回 (暂存区每条路径与它的变更类型, 错误说明)。拿不到暂存区时列表为 None。
+
+    每条是 `(状态, 路径, 原路径或 None)`：`-z` 下一条是 `状态\0路径\0`，
+    `R*` / `C*` 是 `状态\0原路径\0新路径\0`，路径一律取**这次提交要写到哪儿**的那个。
+
+    为什么不用 `--name-only`：收尾提交的判据要分得开「新增或修改一份收尾包」与
+    「删掉一份收尾包」。前者是收尾这个动作，后者只是一次搬迁或清理——2026-11-24
+    合 AW-153 时删 `tasks/closing-R-018.md` 就被当成收尾提交，夹带别的文件当场
+    `CLOSING_REJECTED`，迁走三份文档只好拆成三笔提交。
+    """
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
+            ["git", "-C", str(repo), "diff", "--cached", "--name-status", "-z"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"跑不了 `git diff --cached`（{exc}）"
+        return None, f"跑不了 `git diff --cached --name-status`（{exc}）"
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()[:1]
-        return None, f"`git diff --cached` 退出 {result.returncode}（{detail[0] if detail else '没有输出'}）"
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()], None
+        return None, (f"`git diff --cached --name-status` 退出 {result.returncode}"
+                      f"（{detail[0] if detail else '没有输出'}）")
+    tokens = result.stdout.split("\0")
+    changes, index = [], 0
+    while index < len(tokens):
+        status = tokens[index]
+        index += 1
+        if not status:
+            continue
+        if status[0] in ("R", "C"):
+            if index + 1 >= len(tokens):
+                return None, "暂存区的改名记录不完整（`--name-status -z` 的输出被截断）"
+            source, path = tokens[index], tokens[index + 1]
+            index += 2
+            changes.append((status, path, source))
+        else:
+            if index >= len(tokens):
+                return None, "暂存区记录不完整（`--name-status -z` 的输出被截断）"
+            changes.append((status, tokens[index], None))
+            index += 1
+    return changes, None
 
 
 def round_changed_lines(repo=REPO):
@@ -405,43 +551,94 @@ def round_changed_lines(repo=REPO):
 
 
 def read_round(repo=REPO):
-    """读 `tasks/round.md`，返回 (轮次, 状态, 错误说明)。"""
+    """读 `tasks/round.md`，返回 (轮次, 状态, 归属项目, 错误说明)。
+
+    归属项目取顶部（第一个 `## ` 之前）的 `项目：<project_id>`：没有这一行时返回
+    `None`，调用方按「当前这个仓库的项目」判——老文件不因为少一行就判不了。
+    只认顶部的那一行，是为了不让正文里恰好写着的「项目：X」把归属改掉。
+    """
     path = Path(repo) / "tasks" / "round.md"
     if not path.is_file():
-        return None, None, f"{path}: 没有本轮目标文件"
+        return None, None, None, f"{path}: 没有本轮目标文件"
     try:
         text = path.read_bytes().decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        return None, None, f"{path}: 不是 UTF-8 文件（第 {exc.start} 字节无法解码）"
+        return None, None, None, f"{path}: 不是 UTF-8 文件（第 {exc.start} 字节无法解码）"
     number = ROUND_NUMBER_LINE.search(text)
     status = ROUND_STATUS_LINE.search(text)
-    return (number.group(1) if number else None), (status.group(1) if status else None), None
+    owner = ROUND_PROJECT_LINE.search(round_header(text))
+    return ((number.group(1) if number else None), (status.group(1) if status else None),
+            (owner.group(1) if owner else None), None)
 
 
-def project_tickets(center_path, repo=REPO):
-    """返回 (项目, 工单详情列表)；读不出来一律抛 CenterUnreadable。"""
-    found, error = registered_project(center_path, repo)
-    if error is not None:
-        raise CenterUnreadable(error["code"], str(error["message"]))
-    if found is None:
-        raise CenterUnreadable("PROJECT_NOT_REGISTERED", f"{Path(repo).resolve()} 不属于任何已注册项目")
-    center = load_center()(center_path)
+def round_header(text):
+    """轮次文件的顶部：第一个二级标题之前的那几行。三行元信息只在这里找。"""
+    lines = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def pages(center, project_id):
+    """一个项目的全部工单列表项，翻页翻完。
+
+    以前 `active()` 只取第一页 100 张（AW-163）：ai-workspace 已经超过 100 张，最新建的
+    那几张永远不进表——本单自己的 AW-163 当时正在跑，却不在在途清单里。一个会漏掉最新
+    工单的「谁在做」清单，比一张单读不出来更安静，也更贵。
+    """
     tickets = []
     offset = 0
-    while True:  # 一页最多 100 张：翻完为止，不把「没翻到」当成「没有」
-        listed = center.execute("list_tickets", {"project_id": found["project_id"], "limit": 100, "offset": offset})
+    while True:
+        listed = center.execute("list_tickets", {"project_id": project_id, "limit": 100, "offset": offset})
         if not listed["ok"]:
-            raise CenterUnreadable(listed["error"]["code"], listed["error"]["message"])
+            raise CenterUnreadable(listed["error"]["code"], listed["error"]["message"],
+                                   step="list_tickets")
         page = listed["result"]["items"]
-        for item in page:
-            detail = center.execute("get_ticket", {"project_id": found["project_id"], "ticket_id": item["id"]})
-            if not detail["ok"]:
-                raise CenterUnreadable(detail["error"]["code"], detail["error"]["message"])
-            tickets.append(detail["result"])
+        tickets.extend(page)
         if len(page) < 100:
-            break
+            return tickets
         offset += len(page)
-    return found, tickets
+
+
+def tickets_of(center_path, project_id, unreadable=None):
+    """按项目号取每一张单的详情：`pages()` 翻完页，再逐张 `get_ticket`。
+
+    与 `project_tickets` 共用这一份翻页：`--list` 现在会读**别的项目**的现场
+    （轮次属于谁就按谁判），两边各写一份就会一边翻完、一边只看第一页。
+    传了 `unreadable` 时，单张单读不出来就点名后跳过（AW-163）；不传时一律抛
+    `CenterUnreadable`——`--ticket` 那道门要的是「能不能全读通」，不是点名。
+    """
+    center = load_center()(center_path)
+    tickets = []
+    for item in pages(center, project_id):
+        detail = center.execute("get_ticket", {"project_id": project_id, "ticket_id": item["id"]})
+        if not detail["ok"]:
+            record_unreadable(unreadable, project_id, item["id"], detail["error"])
+            continue
+        tickets.append(detail["result"])
+    return tickets
+
+
+def project_by_id(center_path, project_id):
+    """按项目号取登记记录；没登记返回 None——那是「判不了」，不是「什么都没有」。"""
+    listed = load_center()(center_path).execute("list_projects", {})
+    if not listed["ok"]:
+        raise CenterUnreadable(listed["error"]["code"], listed["error"]["message"],
+                               step="list_projects")
+    return next((item for item in listed["result"]["items"] if item["project_id"] == project_id), None)
+
+
+def project_tickets(center_path, repo=REPO, unreadable=None):
+    """返回 (项目, 工单详情列表)；没传 `unreadable` 时读不出来一律抛 CenterUnreadable。"""
+    found, error = registered_project(center_path, repo)
+    if error is not None:
+        raise CenterUnreadable(error["code"], str(error["message"]), step="register_project")
+    if found is None:
+        raise CenterUnreadable("PROJECT_NOT_REGISTERED", f"{Path(repo).resolve()} 不属于任何已注册项目",
+                               step="register_project")
+    return found, tickets_of(center_path, found["project_id"], unreadable)
 
 
 def ticket_backing(tickets):
@@ -477,7 +674,7 @@ def staged_round_status(edits):
     return None
 
 
-def closing_commit(repo=REPO, center_path=None, staged_paths=None):
+def closing_commit(repo=REPO, center_path=None):
     """收尾类提交：先问这次提交在不在「收尾」，再问有没有工单。
 
     两类，判据差一件事：`tasks/round.md` 的状态位有没有改成三档之一
@@ -498,6 +695,9 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
     2. `tasks/round.md` 的暂存增删每一行都含 `状态：`，且至少有一份收尾包；
     3. 收尾提交另要求在途集合为空（含还没开始的 ready / rework，不含池子里的 planned）。
 
+    第 2 条的「至少一份收尾包」只数**新增或修改**的：纯删除（`D`）不算带收尾包，
+    否则「搬走一份旧收尾包」会被当成「收尾」，夹带别的文件就当场拒绝。
+
     两支共用第 1、2 条：收尾包改动允许带 `tasks/round.md`，但只允许改状态行，
     每一增删行都含 `状态：`——与收尾提交同一道白名单，不是另一份。
 
@@ -508,13 +708,17 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
     不许因为「没报错」而放行。
     """
     repo = Path(repo)
-    if staged_paths is None:
-        staged_paths, error = read_staged_paths(repo)
-        if error is not None:
-            return {"verdict": "reject", "round": None,
-                    "detail": f"拿不到暂存区：{error}。收尾提交要按暂存区一条条核，核不了就不放行。"}
-    paths = [str(path) for path in staged_paths]
-    packets = [path for path in paths if CLOSING_PACKET.match(path)]
+    changes, error = read_staged_changes(repo)
+    if error is not None:
+        return {"verdict": "reject", "round": None,
+                "detail": f"拿不到暂存区：{error}。收尾提交要按暂存区一条条核，核不了就不放行。"}
+    paths = [path for _status, path, _source in changes]
+    # 收尾包只算「这次要写进去的」：删除一份收尾包不是收尾这个动作，它是搬迁或
+    # 清理，走普通规则由工单背书（AW-153 现场，见 read_staged_changes 的说明）。
+    packets = [path for status, path, _source in changes
+               if CLOSING_PACKET.match(path) and not status.startswith("D")]
+    deleted_packets = [path for status, path, _source in changes
+                       if CLOSING_PACKET.match(path) and status.startswith("D")]
     outside = [path for path in paths if path not in CLOSING_EXACT_PATHS and not CLOSING_PACKET.match(path)]
 
     edits, error = round_changed_lines(repo)
@@ -524,20 +728,22 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
                 "detail": f"拿不到 tasks/round.md 的暂存 diff：{error}。判不出它只改了状态行，就不放行。"}
     status_only = bool(edits) and all(ROUND_STATUS_ANYWHERE.search(line) for line in edits)
 
-    # 只有「带收尾包」或「round.md 只改了状态行且没夹带别的文件」才可能是收尾类提交；
-    # 其余交回普通规则。不放宽成「只要碰了 round.md 就按收尾提交判」：那会让一张
-    # running 的工单正常改代码时被一条与它不相干的例外拦住。
-    if not packets and not (round_touched and status_only and not outside):
+    # 只有「带收尾包」或「round.md 只改了状态行」才可能是收尾类提交；其余交回普通规则。
+    # `outside` 不进这个条件：只要状态位真被改过，那就是一次收尾（或重开）尝试，
+    # 夹带别的文件得当场拒，不能靠「删了一份收尾包」把夹带洗成一次普通改动。
+    if not packets and not (round_touched and status_only):
+        gone = f"（这次删了 {'、'.join(deleted_packets)}，那不是收尾）" if deleted_packets else ""
         return {"verdict": "skip", "round": None,
-                "detail": "暂存区里没有收尾包、也不只是状态行改动；按普通提交规则判。"}
+                "detail": f"暂存区里没有新增或修改的收尾包、也不只是状态行改动{gone}；按普通提交规则判。"}
     if outside:
         return {"verdict": "reject", "round": None,
                 "detail": ("收尾提交只允许 tasks/closing-*.md / tasks/round.md / tasks/rounds.md，"
                            f"这次还带了：{'、'.join(outside)}。别的文件要走工单，不能搭这一趟。")}
     if not packets:
+        gone = f"；这次只有删除的收尾包（{'、'.join(deleted_packets)}），没有新增或修改的一份" if deleted_packets else ""
         return {"verdict": "reject", "round": None,
                 "detail": ("收尾提交必须带一份 tasks/closing-<轮次>.md；只改状态位不算收尾，"
-                           "七节收尾包按 docs/closing.md 写。")}
+                           f"七节收尾包按 docs/closing.md 写{gone}。")}
     if round_touched and not status_only:
         bad = [line for line in edits if not ROUND_STATUS_ANYWHERE.search(line)]
         sample = "、".join(line.strip() for line in bad[:3])
@@ -545,7 +751,7 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
                 "detail": ("tasks/round.md 在收尾提交里只许改状态行，这次还改了："
                            f"{sample}。轮次行、本轮目标、结束条件都要走工单。")}
 
-    round_no, status, error = read_round(repo)
+    round_no, status, _owner, error = read_round(repo)
     if error is not None or round_no is None:
         return {"verdict": "reject", "round": None,
                 "detail": (f"读不到 tasks/round.md 的 `轮次：R-00N`（{error or '没有这一行'}）；"
@@ -553,8 +759,8 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
 
     if center_path is None or not Path(center_path).is_file():
         return {"verdict": "reject", "round": round_no,
-                "detail": (f"读不了中心库（DB_NOT_FOUND：{center_path}）：不知道本项目还有没有"
-                           f"在途工单，就不放行。{center_config.ORDER_HINT}")}
+                "detail": ("读不了中心库：不知道本项目还有没有在途工单，就不放行。"
+                           "检查 ~/.agents/center.json 的 db 字段，不要为了让闸门通过新建一个库。")}
     try:
         found, tickets = project_tickets(center_path, repo)
     except CenterUnreadable as error:
@@ -602,7 +808,7 @@ def closing_commit(repo=REPO, center_path=None, staged_paths=None):
             "detail": f"收尾提交：{round_no}"}
 
 
-def project_snapshot(center_path, repo=REPO):
+def project_snapshot(center_path, repo=REPO, unreadable=None):
     """一次读全项目现场，`--list` 的三件事都从这一份快照读。
 
     三件事是：谁在做（`active()` 的表）、本轮收了没有（`unclosed_round()`）、收尾会不会
@@ -610,14 +816,24 @@ def project_snapshot(center_path, repo=REPO):
     本来就慢在这里，而三处各自解释一遍状态名，正是「同一件事三个答案」的温床。
 
     返回 `None` 表示项目没注册——那是「判不了」，不是「什么都没有」，调用方要分开说。
-    库读不了仍抛 `CenterUnreadable`。
+    库读不了仍抛 `CenterUnreadable`；传了 `unreadable` 时单张单读不出来只点名（AW-163）。
     """
     try:
-        found, tickets = project_tickets(center_path, repo)
+        found, tickets = project_tickets(center_path, repo, unreadable)
     except CenterUnreadable as error:
         if error.code == "PROJECT_NOT_REGISTERED":
             return None
         raise
+    return snapshot_from(found["project_id"], tickets)
+
+
+def snapshot_from(project_id, tickets):
+    """把一批工单详情折成 `--list` 要的那份现场。
+
+    单独一个函数的原因是：轮次属于别的项目时，`unclosed_round()` 要拿**那个项目**
+    的现场判（轮次属于谁就按谁判），而「在途几张、池子几张、哪些已收尾合并」这套
+    折叠不该为此再写一份。
+    """
     counts = {state: 0 for state in CLOSING_BLOCKING_STATES}
     waiting = []
     planned = 0
@@ -638,7 +854,7 @@ def project_snapshot(center_path, repo=REPO):
         if state == "done" and ticket.get("merges"):
             landed.append(ticket["id"])
     return {
-        "project_id": found["project_id"],
+        "project_id": project_id,
         "states": counts,
         "total": sum(counts.values()),
         "waiting": waiting,
@@ -701,35 +917,88 @@ def describe_pool(snapshot, now=None, max_days=None):
     return lines, stale
 
 
-def unclosed_round(snapshot, repo=REPO):
-    """本轮该收却没收回：返回 (轮次, 说明) 或 (None, None)。
+def unclosed_round(snapshot, repo=REPO, center_path=None):
+    """本轮该收却没收：返回 (轮次, 进失败集合的说明, 旁注)。
 
-    三个条件同时成立才报：本项目在途集合为空、`tasks/round.md` 的状态是「进行中」、
-    且本项目存在 done 且有合并记录的工单。成立时 `--list` 非零并给三步——它是每轮
-    开工的第一条命令，`状态：进行中` 不该能合法地永远留着。
+    三个条件同时成立才报：**这一轮所属的那个项目**在途集合为空、`tasks/round.md`
+    的状态是「进行中」、且那个项目存在 done 且有合并记录的工单。成立时 `--list`
+    非零并给三步——它是每轮开工的第一条命令，
+    `状态：进行中` 不该能合法地永远留着。
 
-    读不出轮次文件（比如别的仓库没有 tasks/）、或项目没注册（`snapshot is None`），就不报：
-    那是「判不了」，不是「收过了」。
+    「这一轮属于哪个项目」按 `tasks/round.md` 顶部的 `项目：<project_id>` 认，
+    没写就按当前这个检出的项目判（老文件）。归别的项目时用**那个项目**的现场判，
+    不拿本项目的账去套：2026-11-24 之前就是那么误判的——工作区 `round.md` 写着业务
+    项目的轮，`--list` 拿工作区的在途集合去比，一边把别人的轮报成本项目的欠账，
+    一边让那个项目真的没收的轮永远不会被举起来。
+
+    旁注是「不归本项目、或判不了」的那句话，不进制止集合：读不出轮次文件、项目未登记
+    这些「判不了」不算「收过了」，也不算「未收尾」。
     """
-    round_no, status, _error = read_round(repo)
+    round_no, status, declared, _error = read_round(repo)
     if round_no is None or status is None or status in ROUND_CLOSED_STATUSES:
-        return None, None
-    if snapshot is None or snapshot["total"]:
-        return None, None
-    landed = snapshot["landed"]
+        return None, None, None
+    here = snapshot["project_id"] if snapshot is not None else None
+    owner = declared or here
+    if owner is None:
+        return None, None, None
+    round_file = Path(repo) / "tasks" / "round.md"
+    target_root = Path(repo)
+    target_snapshot = snapshot if owner == here else None
+    # 状态与落点必须来自**同一个文件**：归别的项目时，状态也得读那个项目自己的
+    # round.md。否则会出现「拿本检出的状态、却叫你去改别人的文件」：照它做，
+    # 报上来的那份一字未动，下一轮 `--list` 照样红。
+    status_file = "tasks/round.md"
+    if owner != here:
+        found = project_by_id(center_path, owner) if center_path else None
+        if found is None:
+            return None, None, (
+                f"本轮 {round_no} 属于项目 {owner}（{round_file} 的 `项目：` 行），"
+                f"但 {owner} 没登记在库里，判不了它收没收；本项目不为它报。")
+        target_root = Path(found["root"])
+        remote_round = target_root / "tasks" / "round.md"
+        remote_no, remote_status, _remote_owner, _error = read_round(target_root)
+        if remote_no is None or remote_status is None:
+            return None, None, (
+                f"本轮 {round_no} 属于项目 {owner}（{round_file} 的 `项目：` 行），但 {remote_round} "
+                "读不到轮次与状态，判不了它收没收；本项目不为它报。")
+        if remote_no != round_no:
+            return None, None, (
+                f"{round_file} 说这一轮是 {round_no}、归项目 {owner}，但 {remote_round} 写的是 "
+                f"{remote_no}；两边对不上，既不判也不替谁改，先把两边的轮次改一致。")
+        status_file = str(remote_round)
+        if remote_status in ROUND_CLOSED_STATUSES:
+            return None, None, (
+                f"本轮 {round_no} 属于项目 {owner}；那边写着 状态：{remote_status}，本项目不为它报。")
+        status = remote_status
+        target_snapshot = snapshot_from(owner, tickets_of(center_path, owner))
+    if target_snapshot is None:
+        return None, None, None
+    landed = target_snapshot["landed"]
+    if target_snapshot["total"]:
+        if owner == here:
+            return None, None, None
+        return None, None, (
+            f"本轮 {round_no} 属于项目 {owner}（{round_file} 的 `项目：` 行）；"
+            f"那边还有 {target_snapshot['total']} 张在途单，这一轮本来就收不了；本项目不为它报。")
     if not landed:
-        return None, None
-    target = Path(repo) / "tasks" / f"closing-{round_no}.md"
-    return round_no, (
-        f"本轮 {round_no} 未收尾：项目 {snapshot['project_id']} 已经没有在途工单，已有验收并合并的工单"
-        f"（{'、'.join(landed[:3])}{' 等' if len(landed) > 3 else ''}），但 tasks/round.md 还写着 状态：{status}。\n"
+        if owner == here:
+            return None, None, None
+        return None, None, (
+            f"本轮 {round_no} 属于项目 {owner}（{round_file} 的 `项目：` 行）；"
+            "那边还没有验收并合并的工单，判不出它该收尾；本项目不为它报。")
+    target = target_root / "tasks" / f"closing-{round_no}.md"
+    where = "" if owner == here else f"属于项目 {owner}，"
+    message = (
+        f"本轮 {round_no} {where}未收尾：项目 {owner} 已经没有在途工单，已有验收并合并的工单"
+        f"（{'、'.join(landed[:3])}{' 等' if len(landed) > 3 else ''}），但 {status_file} 还写着 状态：{status}。\n"
         "这样补（三步）：\n"
         f"  1. 按 docs/closing.md 写 {target}（七节，第 7 节结论三档之一）\n"
-        "  2. 把 tasks/round.md 的状态位改成与结论一致（已收尾 / 等一句答复 / 需重开）\n"
-        "  3. git add 这两个文件（外加 tasks/rounds.md 的历史行）后直接 git commit，"
-        f"钩子把它认成「收尾提交：{round_no}」例外，不要 TASK_CENTER_TICKET\n"
+        f"  2. 把 {status_file} 的状态位改成与结论一致（已收尾 / 等一句答复 / 需重开）\n"
+        "  3. git add 这两个文件（外加账本 tasks/rounds.md 的历史行，账本只有一份、在工作区）"
+        f"后直接 git commit，钩子把它认成「收尾提交：{round_no}」例外，不要 TASK_CENTER_TICKET\n"
         "本轮没收尾就先收尾再开新单。"
     )
+    return round_no, message, None
 
 
 def main(argv):
@@ -754,14 +1023,13 @@ def main(argv):
         print("--stalled-minutes 必须是正整数（分钟）；不传就只统计不判红。", file=sys.stderr)
         return 1
 
-    # 发现只做一次：报错也带回来，--list 和工单判定用同一句为什么。
-    db_error = None
-    resolution = None
     try:
         resolution = discover_db(args.db, repo=args.repo)
         db_path = resolution.db
     except center_config.DiscoveryError as error:
-        db_path, db_error = None, error
+        resolution, db_path, db_error = None, None, error
+    else:
+        db_error = None
     if args.list:
         if db_path is None or not Path(db_path).is_file():
             code = db_error.code if db_error is not None else "DB_NOT_FOUND"
@@ -774,15 +1042,14 @@ def main(argv):
             # 凭什么读到这一份：发现顺序有多长，这一行就有多必要。
             config = f"；配置 {resolution.config}" if resolution.config is not None else ""
             print(f"中心库：{db_path}（{resolution.source}{config}）", file=sys.stderr)
+        unreadable: list = []
         try:
-            items = active(db_path)
+            items = active(db_path, unreadable)
         except CenterUnreadable as error:
-            # 读不了库就必须非零退出：零行 + 退出 0 等于宣称「没有人在做」。
-            print(f"读库失败：{error.code}（{db_path}）", file=sys.stderr)
-            print(f"  {error.message}", file=sys.stderr)
-            print("  这不是「没有活跃尝试」，是「查不出来」。先修库"
-                  "（migrate 或恢复快照），再重新跑 --list；不要把它当成没人干活。",
-                  file=sys.stderr)
+            # 库本身读不了就必须非零退出：零行 + 退出 0 等于宣称「没有人在做」。
+            # 单单读不出来（AW-163）不进这里：那一种要「其余照常 + 这几张点名」。
+            print_unreadable(error, db_path,
+                             "这不是「没有活跃尝试」，是「查不出来」。修好之前不要把它当成没人干活。")
             return 1
         if not args.json:
             # 六列：前四列回答「谁该动手」，后两列回答「等了多久」。
@@ -792,8 +1059,20 @@ def main(argv):
                       f"\t{item['started_at']}\t{item['last_event_at']}")
         threshold = args.stalled_minutes if args.stalled_minutes is not None else DEFAULT_STALLED_MINUTES
         overdue = stalled(items, threshold)
+        if unreadable and not args.json:
+            # 不在上面的表里、但也不是「没人干活」：逐张点名，含错误码与报文。
+            for entry in unreadable:
+                where = (f"单 {entry['ticket_id']}" if entry["ticket_id"]
+                         else f"项目 {entry['project_id']} 的全部工单")
+                print(f"读不出来：{where}（{entry['project_id']}）{entry['code']}：{entry['message']}",
+                      file=sys.stderr)
+            print("  这几张是「读不出来」，不是「没人在做」；其余在途单已照常列在上面。"
+                  "一张单读不出来不该让整份清单空掉，但也不能就此当它不存在。", file=sys.stderr)
         # 汇总行与判红都走 stderr：stdout 只留 6 列表格，机器解析不会被最后一行绊倒。
-        print(f"共 {len(items)} 张在途，其中 {len(overdue)} 张最后落库超过 {threshold} 分钟", file=sys.stderr)
+        summary = f"共 {len(items)} 张在途，其中 {len(overdue)} 张最后落库超过 {threshold} 分钟"
+        if unreadable:
+            summary += f"；另有 {len(unreadable)} 张读不出来，已逐条点名"
+        print(summary, file=sys.stderr)
         # 传了阈值就据它判红；没传只统计。理由是同一份清单在两个场合用：巡检要一条
         # 能变红的命令（传阈值），而开工前查「有没有人在做」不该因为别人在跑就跑不成——
         # 后者一旦恒为 1，钩子与日常流程会把它当噪声跳过。
@@ -804,11 +1083,10 @@ def main(argv):
             print(f"  判据：最后事件时间距今超过 {threshold} 分钟。要么去问它一句，"
                   "要么 recover_ticket 换一张再跑；不要看着不动当它在做。", file=sys.stderr)
         try:
-            snapshot = project_snapshot(db_path, args.repo)
+            snapshot = project_snapshot(db_path, args.repo, unreadable)
         except CenterUnreadable as error:
             # 清单已经打印出来了，但「在途集合长什么样」「本轮收了没有」判不了：同样非零。
-            print(f"读库失败：{error.code}（{db_path}）", file=sys.stderr)
-            print(f"  {error.message}", file=sys.stderr)
+            print_unreadable(error, db_path, "清单打印出来了，但判不了在途集合与本轮收没收。")
             return 1
         # 上面那张表数的是「有活跃尝试的单」，这一行数的是「在途集合」——收尾闸门与
         # 收尾提交例外按同一个集合判，所以两条命令不会再给出相反的两句话。
@@ -819,7 +1097,16 @@ def main(argv):
                 print(f"没人在做，在等人领走：{'、'.join(snapshot['waiting'])}", file=sys.stderr)
                 print("  它们是 ready / rework，都算在途：收尾闸门会拦，收尾提交的钩子也会拦。"
                       "没打算现在做就先 cancel_ticket 或在库里排成 planned。", file=sys.stderr)
-        round_no, unclosed = unclosed_round(snapshot, args.repo)
+        round_no, unclosed, round_note = None, None, None
+        try:
+            round_no, unclosed, round_note = unclosed_round(snapshot, args.repo, db_path)
+        except CenterUnreadable as error:
+            # 轮次属于别的项目时要读那个项目的现场；读不了同样非零，不把「判不了」当「收过了」。
+            print_unreadable(error, db_path,
+                             "判不出这一轮收没收；修好之后再跑一次 --list，不要当成收过了。")
+            return 1
+        if round_note and not args.json:
+            print(round_note, file=sys.stderr)
         pool_lines, pool_stale = ([], [])
         if snapshot is not None:
             # 池子明细逐张打印（不是只数张数）：念头与写好的单要分得出来，排久了要看得见。
@@ -857,6 +1144,13 @@ def main(argv):
             )
         if unclosed is not None:
             failures.append(f"unclosed-round：本轮 {round_no} 没有收尾，先收尾再开新单")
+        if unreadable:
+            # 读不出来的单必须能被判成失败：它们没进 items，不点名就等于把「查不清」当成了「没事」。
+            failures.append(
+                f"unreadable：{len(unreadable)} 张单/项目读不出来"
+                f"（{'、'.join(entry['ticket_id'] or entry['project_id'] for entry in unreadable)}）；"
+                "上面那张表不含它们，别按它判「没人在做」"
+            )
         if pool_stale_detail:
             failures.append(pool_stale_detail)
         if args.json:
@@ -865,8 +1159,12 @@ def main(argv):
                 "stalled_count": len(overdue), "stalled_minutes": threshold,
                 "stalled": [item["ticket_id"] for item in overdue],
             }
+            if unreadable:
+                result["unreadable"] = unreadable
             if snapshot is not None:
                 result["in_flight"] = snapshot
+            if round_note:
+                result["round_note"] = round_note
             if failures:
                 # 失败时必须写清为什么，不然调用方只能看到一个 false。
                 result["reason"] = "；".join(failures)

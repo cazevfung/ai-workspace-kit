@@ -4,7 +4,6 @@
 绑在别的项目上的情况，而不只是打印一句提醒。
 """
 import json
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -13,8 +12,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import center_config
-import project_doctor
 import work_gate
 
 
@@ -113,16 +110,6 @@ class WorkGateTest(unittest.TestCase):
         self.assertIn("放行", result.stdout + result.stderr)
 
     def test_missing_ticket_id_is_rejected_before_touching_the_database(self):
-        # 这条要走完收尾提交判定才轮到「没有工单号」，而收尾判定是拿
-        # `git diff --cached` 读暂存区的。源码包（Release 的 source.zip）解压出来
-        # 的目录不是 git 工作树，git 在那里自己就报错，闸门会在更早一步拒掉——
-        # 那是环境不成立，不是行为变了。所以这里 skip 而不是把断言改成迁就环境：
-        # 断言本身留着，在真正的仓库里照旧生效（AWK-115）。
-        if not project_doctor.is_repository(work_gate.REPO):
-            self.skipTest(
-                f"不在 git 工作树里（{work_gate.REPO}）：收尾判定读不到暂存区，"
-                "这条用例的前提不成立。想看它真跑，先在这个目录 `git init` 并提交一次。"
-            )
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             code = work_gate.main(["work_gate.py", "--db", str(self.db)])
@@ -196,6 +183,27 @@ class WorkGateTest(unittest.TestCase):
         items = work_gate.active(self.db)
         self.assertEqual([self.tid("repo-1")], [item["ticket_id"] for item in items])
         self.assertEqual("running", items[0]["state"])
+
+
+class PagesTest(unittest.TestCase):
+    """`pages()` 必须翻页翻完：只取第一页会让最新建的单永远不在清单里（AW-163）。"""
+
+    def test_pages_walks_past_the_first_hundred(self):
+        tickets = [{"id": f"T-{index:03d}"} for index in range(1, 126)]
+
+        class Fake:
+            def __init__(self):
+                self.offsets = []
+
+            def execute(self, operation, payload=None, request_id=None):
+                self.offsets.append(payload["offset"])
+                page = tickets[payload["offset"]:payload["offset"] + payload["limit"]]
+                return {"ok": True, "result": {"items": page}}
+
+        center = Fake()
+        got = work_gate.pages(center, "p1")
+        self.assertEqual([item["id"] for item in tickets], [item["id"] for item in got])
+        self.assertEqual([0, 100], center.offsets, "第一页满 100 张就必须接着翻")
 
 
 class ListCommandTest(unittest.TestCase):
@@ -288,6 +296,83 @@ class ListCommandTest(unittest.TestCase):
         self.assertEqual("", out, "读不了库时不能一边报错一边照旧打印空清单")
         self.assertIn("不是「没有活跃尝试」", err)
 
+    # --- AW-165：整库读不出时按现场分诊，不再一律「先修库」 -------------------
+
+    def test_corrupt_center_advice_is_restore_not_a_blanket_fix(self):
+        """库文件坏了：劝人恢复快照或换 --db，不再句句「先修库（migrate 或恢复快照）」。
+
+        起因现场是坏行，不是库坏；AW-163 把那一类分开之后，能走到这一处的只剩 schema
+        不符、库文件坏、锁/权限/未知几类，而它们的出路并不相同——一句「先修库」在其中
+        几类是反方向。这条同时钉住 AW-163 已给的部分不许回退：错误码、出错的那一步与
+        存储层异常类型都要照旧打得出来，否则「按现场分诊」就成了让人自己去猜。
+        """
+        broken = self.root / "center-corrupt-triage.sqlite3"
+        broken.write_bytes(b"not a database at all")
+        code, out, err = self.list_command(broken)
+        self.assertEqual(1, code, out + err)
+        self.assertIn("读库失败：STORAGE_ERROR", err, "错误码照旧打印")
+        self.assertIn("出错的一步：list_projects", err, "哪一步出错要看得出")
+        self.assertIn("file is not a database", err, "报文原文不许丢")
+        self.assertIn("DatabaseError", err, "异常类型也要说得出来")
+        self.assertNotIn("先修库（migrate 或恢复快照）", err, "不再是无条件的一句建议")
+        self.assertIn("快照", err, "文件坏了的第一条出路是恢复快照")
+        self.assertIn("--db", err, "第二条是换一份库")
+        self.assertEqual("", out, "读不了库时不能一边报错一边照旧打印空清单")
+
+    def test_schema_mismatch_advice_names_migrate(self):
+        """schema 对不上：出路是 migrate，而不是让去恢复快照。"""
+        broken = self.copy_database("center-v6-triage.sqlite3")
+        with contextlib.closing(sqlite3.connect(str(broken))) as conn:
+            conn.execute("PRAGMA user_version=6")
+            conn.commit()
+        code, out, err = self.list_command(broken)
+        self.assertEqual(1, code, out + err)
+        self.assertIn("SCHEMA_MISMATCH", err)
+        self.assertIn("migrate", err)
+        self.assertNotIn("先修库（migrate 或恢复快照）", err, "不再是无条件的一句建议")
+        self.assertNotIn("文件层快照", err, "schema 不符不是文件坏，别劝人去恢复快照")
+
+    def test_locked_center_advice_points_at_the_scene_not_at_a_guess(self):
+        """锁 / 权限 / 未知这一档：照操作名与异常类型定位，不给一个方向。
+
+        这条同时走的是**轮次**那个分支（`--list` 里第二处「整库读不出」）：本轮写在
+        另一个项目名下，那个项目的工单列表读不出来。两处现场是同一个、出路也是同一条，
+        所以两边必须给同一套分诊——各写一份就必然一边改了、一边没改（AW-165）。
+        """
+        other = self.root / "另一个仓库"
+        other.mkdir()
+        (other / "tasks").mkdir()
+        (other / "tasks" / "round.md").write_text(
+            "轮次：R-901\n状态：进行中\n项目：other\n", encoding="utf-8")
+        tasks = self.project / "tasks"
+        tasks.mkdir()
+        (tasks / "round.md").write_text(
+            "轮次：R-901\n状态：进行中\n项目：other\n", encoding="utf-8")
+        self.ok("register_project", {"project_id": "other", "name": "另一个仓库", "root": str(other)})
+
+        center_class = work_gate.load_center()
+        original_loader = work_gate.load_center
+
+        class Locked(center_class):
+            def execute(self, operation, payload=None, request_id=None):
+                if operation == "list_tickets" and (payload or {}).get("project_id") == "other":
+                    return {"ok": False,
+                            "error": {"code": "STORAGE_ERROR", "message": "database is locked"}}
+                return super().execute(operation, payload, request_id)
+
+        work_gate.load_center = lambda: Locked
+        self.addCleanup(setattr, work_gate, "load_center", original_loader)
+
+        code, out, err = self.list_command(self.copy_database("center-locked.sqlite3"))
+        self.assertEqual(1, code, out + err)
+        self.assertIn("读库失败：STORAGE_ERROR", err)
+        self.assertIn("出错的一步：list_tickets", err, "锁住的是哪一步要看得见")
+        self.assertIn("database is locked", err, "报文原文不许丢")
+        self.assertIn("判不出这一轮收没收", err, "这一处判的是轮次，不是在途表")
+        self.assertIn("锁 / 权限", err, "这一档本来就该让人去定位，而不是给一个方向")
+        self.assertNotIn("先修库（migrate 或恢复快照）", err, "不再是无条件的一句建议")
+        self.assertNotIn("文件层快照", err, "锁不是文件坏，别劝人去恢复快照")
+
     def test_corrupt_copy_fails_loudly(self):
         """文件损坏是另一个错误码，同样不许被当成「没人干活」。"""
         broken = self.root / "center-corrupt.sqlite3"
@@ -315,6 +400,64 @@ class ListCommandTest(unittest.TestCase):
         self.assertIn(self.tid("repo-1"), out)
         self.assertIn("running", out)
         self.assertIn("session-repo", out)
+
+    # --- AW-163：一张单读不出来，不该让整份在途清单读不出来 -------------------
+
+    def flaky_center(self, broken_ticket, message):
+        """让某个工单号的 `get_ticket` 失败，其余照常：现场就是这么坏的（HSE-007 的旧提交）。"""
+        center_class = work_gate.load_center()
+        original_loader = work_gate.load_center
+
+        class Flaky(center_class):
+            def execute(self, operation, payload=None, request_id=None):
+                if operation == "get_ticket" and (payload or {}).get("ticket_id") == broken_ticket:
+                    return {"ok": False, "error": {"code": "INVALID_INPUT", "message": message}}
+                return super().execute(operation, payload, request_id)
+
+        work_gate.load_center = lambda: Flaky
+        self.addCleanup(setattr, work_gate, "load_center", original_loader)
+
+    def test_one_unreadable_ticket_still_lists_the_rest(self):
+        """一张单读不出来：其余照常打印、汇总行照旧，坏的那张逐条点名（AW-163）。
+
+        反例是修之前的行为——整张在途清单被一行 `INVALID_INPUT` 顶掉，所有人都
+        看不见别人在做什么。这里要三件事同时成立：其余在途单还在表里、汇总行仍在、
+        坏的那条带错误码与报文被点名，而「读库失败」四个字不出现（那是库本身读不了）。
+        """
+        create_numbered(self.ok, self.ids, "repo-2", {
+            "project_id": "repo", "title": "池子里的另一张",
+            "deliverable": "一张没开工的单", "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
+            "state": "planned",
+        })
+        broken = self.tid("repo-2")
+        self.flaky_center(broken, "Invalid input or inaccessible local path — JSONDecodeError: Expecting value")
+        good = self.copy_database("center-one-broken.sqlite3")
+        code, out, err = self.list_command(good)
+        self.assertIn(self.tid("repo-1"), out, "其余在途单照旧打印")
+        self.assertIn("共 1 张在途", err, "汇总行照旧给出张数")
+        self.assertIn("另有 1 张读不出来", err)
+        self.assertIn(f"读不出来：单 {broken}", err)
+        self.assertIn("INVALID_INPUT", err)
+        self.assertIn("JSONDecodeError", err, "报文里的底层异常类型不丢")
+        self.assertNotIn("读库失败", err, "库是读得通的，只是这一张单坏")
+        self.assertEqual(1, code, "读不出来的单必须能被判成失败，不能悄悄当成没有")
+
+    def test_json_lists_the_unreadable_ticket(self):
+        """`--json` 也要答得出「哪一张没读到」，否则机器调用方只能看到少了一条。"""
+        create_numbered(self.ok, self.ids, "repo-2", {
+            "project_id": "repo", "title": "池子里的另一张",
+            "deliverable": "一张没开工的单", "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}],
+            "state": "planned",
+        })
+        broken = self.tid("repo-2")
+        self.flaky_center(broken, "Invalid input or inaccessible local path — JSONDecodeError: Expecting value")
+        code, out, err = self.list_command(self.copy_database("center-json-broken.sqlite3"), "--json")
+        receipt = json.loads(out)
+        self.assertFalse(receipt["ok"], receipt)
+        self.assertEqual([broken], [entry["ticket_id"] for entry in receipt["result"]["unreadable"]])
+        self.assertIn("unreadable", receipt["result"]["reason"])
 
     # --- AW-087 / PRD-013 R4：等了多少、谁该动手，看得见 ------------------
 
@@ -989,6 +1132,88 @@ class ClosingCommitGateTest(unittest.TestCase):
         self.assertEqual("reject", verdict["verdict"], verdict)
         self.assertIn("库", verdict["detail"])
 
+    # --- 删除收尾包：不是收尾，是一条普通改动（AW-153 现场）----------------
+
+    def committed_packet(self, name="closing-R-900.md"):
+        """基线里先有一份收尾包：之后暂存它的删除才是「删已入库的收尾包」。"""
+        self.packet(name)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "先有一份收尾包")
+
+    def gate_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = work_gate.main(["work_gate.py", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_deleting_a_closing_packet_is_judged_as_a_normal_change(self):
+        """AW-153：迁移时删掉搬走的收尾包，顺手带上别的文件就报 CLOSING_REJECTED。
+
+        删除收尾包不是「收尾这个动作」——它没有新增任何收尾包，状态位也可能一动不动。
+        所以它必须交回普通规则，由工单背书，而不是被当成一次收尾提交去核那三条前提。
+        """
+        self.committed_packet()
+        (self.project / "tasks" / "closing-R-900.md").unlink()
+        (self.project / "tasks" / "plan-100-搬走.md").write_text("计划\n", encoding="utf-8")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("skip", verdict["verdict"], verdict)
+
+    def test_deleting_a_closing_packet_alone_is_judged_as_a_normal_change(self):
+        """只删收尾包、不带别的文件：同样不是收尾提交。
+
+        它没有收尾包可核（这一支要求至少一份 `tasks/closing-*.md`），也没有状态位
+        改动可核；按普通规则判，才不会把「删文件」当成「收尾」。
+        """
+        self.committed_packet()
+        (self.project / "tasks" / "closing-R-900.md").unlink()
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("skip", verdict["verdict"], verdict)
+
+    def test_deleting_a_packet_still_needs_a_ticket(self):
+        """「按普通规则判」不是「随便放行」：没有工单号时这条提交照旧被拦。"""
+        self.committed_packet()
+        (self.project / "tasks" / "closing-R-900.md").unlink()
+        self.git("add", "-A")
+        code, out, err = self.gate_main("--repo", str(self.project), "--db", str(self.db))
+        self.assertEqual(1, code, out + err)
+        self.assertIn("工单", err)
+        self.assertNotIn("CLOSING_REJECTED", err)
+
+    def test_deleting_a_packet_with_a_running_ticket_commits_end_to_end(self):
+        """真正的目的：删收尾包 + 别的文件，有一张 running 的单背书就能一次提交。"""
+        self.committed_packet()
+        self.bind()
+        (self.project / "tasks" / "closing-R-900.md").unlink()
+        (self.project / "tasks" / "plan-100-搬走.md").write_text("计划\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.hooks()
+        result = self.git("commit", "-m", "搬走收尾包",
+                          env={"TASK_CENTER_DB": str(self.db),
+                               "TASK_CENTER_TICKET": self.tid("repo-1")})
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("放行", result.stdout + result.stderr)
+
+    def test_deleting_a_packet_does_not_launder_a_closing_with_extra_paths(self):
+        """删一份收尾包不能把「收尾 + 夹带」洗成普通改动。
+
+        现场：`git rm tasks/closing-R-900.md` + `round.md` 状态改成 `已收尾` +
+        `tools/` 里一个文件 + 一张 `running` 的单。状态位真被改过，这就是一次收尾
+        尝试：夹带要么拒，要么就得走收尾提交那三条前提——不能因为多了一条删除，
+        就落回普通规则让那张单给它背书。
+        """
+        self.committed_packet()
+        self.bind()
+        (self.project / "tasks" / "closing-R-900.md").unlink()
+        self.write_round(status="已收尾")
+        (self.project / "tools").mkdir(exist_ok=True)
+        (self.project / "tools" / "work_gate.py").write_text("# 夹带的改动\n", encoding="utf-8")
+        self.git("add", "-A")
+        verdict = self.closing()
+        self.assertEqual("reject", verdict["verdict"], verdict)
+        self.assertIn("tools/work_gate.py", verdict["detail"])
+
     # --- 钩子端到端 -------------------------------------------------------
 
     def hooks(self):
@@ -1091,43 +1316,64 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         return result["result"]
 
-    def set_status(self, status):
+    def set_status(self, status, project=None):
+        header = "" if project is None else f"项目：{project}\n"
         self.round.write_text(
-            "# 本轮：收尾\n\n轮次：R-900\n状态：" + status + "\n\n"
+            "# 本轮：收尾\n\n轮次：R-900\n状态：" + status + "\n" + header + "\n"
             "## 本轮目标\n\n1. 让收尾真的会发生\n\n"
             "## 结束条件\n\n- python tools/close_gate.py 退出 0\n\n"
             "## 不做什么\n\n- 不改 PRD\n",
             encoding="utf-8",
         )
 
-    def land_and_merge(self):
+    def other_project(self):
+        """再登记一个项目：用它验证「轮次属于谁就按谁判」。"""
+        other = self.root / "别的项目"
+        (other / "tasks").mkdir(parents=True)
+        (other / "PRD").mkdir()
+        (other / "PRD" / "PRD-001-示例.md").write_text("需求", encoding="utf-8")
+        self.ok("register_project", {"project_id": "other", "name": "别的项目", "root": str(other)})
+        return other
+
+    def write_other_round(self, root, status, number="R-900"):
+        """写那个项目自己的 round.md：状态与落点必须来自同一个文件。"""
+        (root / "tasks" / "round.md").write_text(
+            "# 本轮：那边的收尾\n\n轮次：" + number + "\n状态：" + status + "\n项目：other\n\n"
+            "## 本轮目标\n\n1. 那边的目标\n\n"
+            "## 结束条件\n\n- python tools/close_gate.py 退出 0\n\n"
+            "## 不做什么\n\n- 不改 PRD\n",
+            encoding="utf-8",
+        )
+
+    def land_and_merge(self, project_id="repo", alias="repo-1", root=None, prefix="repo"):
         """造一张 done 且已有合并记录的工单：这才叫「这一轮真的做出过东西」。"""
-        claim = self.ok("claim_ticket", {"project_id": "repo", "ticket_id": "repo-1", "expected_revision": 1,
-                                       "coordinator_session_id": "coordinator-repo"})
+        root = self.project if root is None else root
+        claim = self.ok("claim_ticket", {"project_id": project_id, "ticket_id": alias, "expected_revision": 1,
+                                       "coordinator_session_id": f"coordinator-{prefix}"})
         attempt = claim["attempt_id"]
-        self.ok("bind_session", {"project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
-                                 "session_id": "session-repo", "project_root": str(self.project)})
-        (self.project / "out.md").write_text("成果", encoding="utf-8")
+        self.ok("bind_session", {"project_id": project_id, "ticket_id": alias, "attempt_id": attempt,
+                                 "session_id": f"session-{prefix}", "project_root": str(root)})
+        (root / "out.md").write_text("成果", encoding="utf-8")
         submission = self.ok("submit_result", {
-            "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
-            "session_id": "session-repo", "summary": "成果", "artifacts": ["out.md"],
+            "project_id": project_id, "ticket_id": alias, "attempt_id": attempt,
+            "session_id": f"session-{prefix}", "summary": "成果", "artifacts": ["out.md"],
             "evidence": ["核对"], "risks": [],
             "head_sha": "0123456789abcdef0123456789abcdef01234567",
             "base_sha": "0123456789abcdef0123456789abcdef01234567",
         })
         self.ok("review_result", {
-            "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
-            "submission_id": submission["submission_id"], "reviewer_session_id": "reviewer-repo",
+            "project_id": project_id, "ticket_id": alias, "attempt_id": attempt,
+            "submission_id": submission["submission_id"], "reviewer_session_id": f"reviewer-{prefix}",
             "verdict": "accept", "reason": "通过",
             "checks": [{"id": "C1", "passed": True, "evidence": "核对了"}],
         })
         self.ok("record_notice", {
-            "project_id": "repo", "ticket_id": "repo-1", "attempt_id": attempt,
-            "session_id": "coordinator-repo", "origin_session_id": "coordinator-repo",
+            "project_id": project_id, "ticket_id": alias, "attempt_id": attempt,
+            "session_id": f"coordinator-{prefix}", "origin_session_id": f"coordinator-{prefix}",
             "status": "sent", "detail": "已把回执发回原会话",
-            "target_session_id": "coordinator-repo", "wake_kind": "queued",
+            "target_session_id": f"coordinator-{prefix}", "wake_kind": "queued",
         })
-        self.ok("merge_ticket", {"project_id": "repo", "ticket_id": "repo-1",
+        self.ok("merge_ticket", {"project_id": project_id, "ticket_id": alias,
                                  "commit": "a" * 40, "target_branch": "master", "tests": "OK",
                                  "reviewed_sha": "0123456789abcdef0123456789abcdef01234567"})
 
@@ -1148,6 +1394,65 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertIn("本轮 R-900 未收尾", out + err)
         self.assertIn("closing-R-900.md", out + err)
         self.assertIn("收尾再开新单", out + err)
+
+    # -- 轮次属于哪个项目，就按那个项目判（AW-158 C2）-------------------------
+
+    def test_list_does_not_flag_a_round_that_belongs_to_another_project(self):
+        """本项目有已合并的单，但那一轮属于别的项目：本项目不为它报「未收尾」。
+
+        以前 `--list` 只看当前检出的 `tasks/round.md`，拿**本项目**的在途集合去套
+        别的项目的轮：本项目的账已经清了，于是把一个不归它的轮报成「该收没收」。
+        """
+        self.land_and_merge()
+        other = self.other_project()
+        self.set_status("进行中", project="other")
+        self.write_other_round(other, "已收尾")
+        code, out, err = self.list_command()
+        self.assertEqual(0, code, out + err)
+        self.assertNotIn("本轮 R-900 未收尾", out + err)
+        # 不只要「没红」：要说清那一轮在那边已经收了、本项目不为它报。
+        self.assertIn("已收尾", err)
+        self.assertIn("不为它报", err)
+
+    def test_list_flags_an_unclosed_round_of_the_project_it_names(self):
+        """另一种误判：轮次属于别的项目、那边真的该收尾——照样报，并指向那边的落点。
+
+        漏判和误判是同一处错的两面：不按项目判时，别人的账本项目永远不会举起来。
+        状态与落点必须来自**同一个文件**：报里叫你去改的那份，就是承载这个
+        `状态：进行中` 的那份。
+        """
+        other = self.other_project()
+        create_numbered(self.ok, self.ids, "other-1", {
+            "project_id": "other", "title": "那边的成果", "state": "planned",
+            "deliverable": "那边的交付物",
+            "prd_path": "PRD/PRD-001-示例.md",
+            "criteria": [{"id": "C1", "text": "含 `python tools/run_tests.py` 且退出码 0"}],
+        })
+        self.land_and_merge(project_id="other", alias="other-1", root=other, prefix="other")
+        self.set_status("进行中", project="other")
+        self.write_other_round(other, "进行中")
+        code, out, err = self.list_command()
+        self.assertEqual(1, code, out + err)
+        text = out + err
+        self.assertIn("R-900", text)
+        self.assertIn("other", text)
+        # 指向那个项目自己的落点（排除 `仓库\tasks\…` 那种本项目的路径）；
+        # 临时目录在 Windows 上会缩短成 8.3 名，所以只比后半段。
+        self.assertIn(os.path.join("别的项目", "tasks", "closing-r-900.md"), os.path.normcase(text))
+        # 叫你去改的那份 round.md 是**那个项目**的，不是当前检出这一份。
+        self.assertIn(os.path.join("别的项目", "tasks", "round.md"), os.path.normcase(text))
+        self.assertIn("收尾再开新单", text)
+
+    def test_list_notes_a_round_number_mismatch_instead_of_judging_it(self):
+        """两边轮次对不上时只出旁注：既不判也不替谁改，更不能拿一边的状态去报另一边。"""
+        other = self.other_project()
+        self.set_status("进行中", project="other")
+        self.write_other_round(other, "进行中", number="R-901")
+        code, out, err = self.list_command()
+        self.assertEqual(0, code, out + err)
+        self.assertIn("R-901", err)
+        self.assertIn("对不上", err)
+        self.assertNotIn("本轮 R-900 未收尾", out + err)
 
     # -- 在途集合：planned 不算、ready 算（PRD-014 AC-R1-2）-------------------
 
@@ -1276,142 +1581,6 @@ class UnclosedRoundListTest(unittest.TestCase):
         self.assertEqual(1, code, err)
         self.assertFalse(payload["ok"], f"退出 1 时 ok 必须为 false：{payload}")
         self.assertIn("stalled", payload["result"].get("reason", ""), f"要点名停住：{payload}")
-
-
-class CenterDiscoveryTest(unittest.TestCase):
-    """中心库怎么发现：只有一处，且要认安装时的 --agents-home（AWK-105 C1/C2/C4）。
-
-    这一组的现场按真实布局摆：`<工作区>/.agents/center.json` 是指针（install.py 写的），
-    `<agents-home>/center.json` 说的是库在哪，`~/.agents/center.json` 是默认档。
-    所有用例都把 `home` / `env` / `roots` 显式传进去，一个真实用户目录都不读。
-    """
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name)
-        self.ws = base / "ws"
-        (self.ws / ".agents").mkdir(parents=True)
-        self.home = base / "home"
-        self.agents_home = base / "agents"
-        self.agents_home.mkdir()
-        self.pointer = self.ws / ".agents" / "center.json"
-        self.commanded_db = base / "custom" / "center.sqlite3"
-        self.default_db = base / "default" / "center.sqlite3"
-        self.own_db = self.ws / ".data" / "task-center.sqlite3"
-        self.write_center(self.agents_home, self.commanded_db)
-        self.write_center(self.home / ".agents", self.default_db)
-
-    def write_center(self, agents_home, db):
-        agents_home.mkdir(parents=True, exist_ok=True)
-        (agents_home / "center.json").write_text(
-            json.dumps({"db": str(db)}, ensure_ascii=False), encoding="utf-8")
-
-    def write_pointer(self, agents_home):
-        self.pointer.write_text(json.dumps({"agents_home": str(agents_home)}, ensure_ascii=False),
-                                encoding="utf-8")
-
-    def resolve(self, **kwargs):
-        payload = {"repo": self.ws, "env": {}, "home": self.home}
-        payload.update(kwargs)
-        return work_gate.discover_db(**payload)
-
-    def test_custom_agents_home_wins_over_default(self):
-        """C1：--agents-home 装出来的工作区，读到的是 <agents-home>/center.json 的库。"""
-        self.write_pointer(self.agents_home)
-        found = self.resolve()
-        self.assertEqual(self.commanded_db, found.db)
-        self.assertIn("工作区指针", found.source)
-        self.assertEqual(self.agents_home, found.agents_home)
-
-    def test_missing_agents_home_config_is_fatal_and_does_not_fall_back(self):
-        """C2：指针指到的 center.json 不在，就报 DB_NOT_FOUND，不回落 ~/.agents。"""
-        self.write_pointer(self.agents_home)
-        (self.agents_home / "center.json").unlink()
-        with self.assertRaises(center_config.DiscoveryError) as caught:
-            self.resolve()
-        error = caught.exception
-        self.assertEqual("DB_NOT_FOUND", error.code)
-        # 说得出「缺的是哪一个」：不接受一句「没找到库」。
-        self.assertIn(str(self.agents_home / "center.json"), error.message)
-        self.assertIn("不回落到 ~/.agents", error.fix)
-        # 而且确实没有偷偷返回默认档那份库。
-        with self.assertRaises(center_config.DiscoveryError):
-            self.resolve()
-
-    def test_default_install_still_reads_user_agents(self):
-        """C4：默认安装（不传 --agents-home）仍读 ~/.agents，行为不变。"""
-        self.write_pointer(self.home / ".agents")
-        found = self.resolve()
-        self.assertEqual(self.default_db, found.db)
-
-    def test_install_without_pointer_falls_back_to_user_agents(self):
-        """老安装没有工作区指针：照旧读 ~/.agents。"""
-        found = self.resolve()
-        self.assertEqual(self.default_db, found.db)
-
-    def test_workspace_own_database_wins_over_user_agents(self):
-        """工作区自带库（install 初始化的那一份）优先于 ~/.agents。"""
-        self.own_db.parent.mkdir(parents=True)
-        self.own_db.write_bytes(b"")
-        found = self.resolve()
-        # Windows 的临时目录会回 8.3 短路径（202108~1），比较前先归一。
-        self.assertEqual(self.own_db.resolve(), found.db.resolve())
-
-    def test_explicit_paths_beat_the_pointer(self):
-        """--db 与 TASK_CENTER_DB 是人当场说的，优先级最高。"""
-        self.write_pointer(self.agents_home)
-        explicit = self.ws.parent / "explicit.sqlite3"
-        self.assertEqual(explicit, self.resolve(explicit=str(explicit)).db)
-        env_db = self.ws.parent / "env.sqlite3"
-        self.assertEqual(env_db, self.resolve(env={"TASK_CENTER_DB": str(env_db)}).db)
-
-    def test_explicit_agents_home_env(self):
-        """TASK_CENTER_AGENTS_HOME：多份安装共用一台机器时显式指定。"""
-        other = self.ws.parent / "other-agents"
-        self.write_center(other, self.ws.parent / "other.sqlite3")
-        found = self.resolve(env={"TASK_CENTER_AGENTS_HOME": str(other)})
-        self.assertEqual(self.ws.parent / "other.sqlite3", found.db)
-
-    def test_worktree_finds_pointer_in_main_checkout(self):
-        """工作树里没有指针（`.agents/center.json` 不进版本库）就回主检出找那一份。"""
-        if shutil.which("git") is None:
-            self.skipTest("没有 git")
-        base = self.ws.parent / "gitrepo"
-        base.mkdir()
-        (base / ".data").mkdir()
-        self.assertTrue(self.git(base, "init", "-b", "master")[0] == 0)
-        (base / "README.md").write_text("x", encoding="utf-8")
-        self.git(base, "add", "-A")
-        self.git(base, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-m", "init")
-        worktree = self.ws.parent / "wt"
-        code, _out, err = self.git(base, "worktree", "add", "-q", str(worktree), "-b", "t-wt")
-        self.assertEqual(0, code, err)
-        pointer = base / ".agents" / "center.json"
-        pointer.parent.mkdir(parents=True, exist_ok=True)
-        pointer.write_text(json.dumps({"agents_home": str(self.agents_home)}, ensure_ascii=False),
-                           encoding="utf-8")
-        found = work_gate.discover_db(repo=worktree, env={}, home=self.home)
-        self.assertEqual(self.commanded_db, found.db)
-        self.assertFalse((worktree / ".agents" / "center.json").exists())
-
-    def git(self, repo, *args):
-        result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", timeout=120)
-        return result.returncode, result.stdout, result.stderr
-
-    def test_list_command_exits_non_zero_with_db_not_found(self):
-        """C2 的命令形态：库里找不到就非零退出，并打出 DB_NOT_FOUND 与缺的那个文件。"""
-        self.write_pointer(self.agents_home)
-        (self.agents_home / "center.json").unlink()
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = work_gate.main(["work_gate.py", "--list", "--repo", str(self.ws)])
-        self.assertEqual(1, code, out.getvalue() + err.getvalue())
-        self.assertIn("DB_NOT_FOUND", err.getvalue())
-        self.assertIn(str(self.agents_home / "center.json"), err.getvalue())
-        # 不许「新建一个空库」：现场一个文件都没多出来。
-        self.assertFalse(self.own_db.exists())
 
 
 if __name__ == "__main__":

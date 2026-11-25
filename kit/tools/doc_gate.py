@@ -7,6 +7,7 @@
     python tools/doc_gate.py tasks/plan-002-xxx.md
     python tools/doc_gate.py tasks/round.md
     python tools/doc_gate.py --all          # 扫 tasks/plan-*.md 与 tasks/round*.md
+    python tools/doc_gate.py --all --root <项目根>   # 扫别的项目的 tasks/（服务对象项目）
 
 两种文件、两套判据：`plan-*.md` 查六节与依据，`round*.md` 查本轮目标 /
 结束条件 / 不做什么。分流的理由是这两件事的错法不同——计划写虚了是一回事，
@@ -68,18 +69,9 @@ def skill_dirs(anchor=None):
     默认看工具所在仓库与用户目录；传入 anchor 时，额外沿它的祖先逐层找
     `.agents/skills`。不这么做的话，另一项目的计划文件引用自己项目的 skill
     会被误判为「不存在」。
-
-    套件源码树里技能放在 `<仓库>/skills/workspace` 与 `<仓库>/skills/generic`，
-    只有装到工作区或用户目录之后才出现在 `.agents/skills`。开发期直接跑
-    `python tools/run_tests.py` 时若不认这两处，本仓库自己的计划会被判成引用了
-    不存在的 skill，闸门与它写的用例一起红——发现的路径不该逼人先装一遍。
     """
     here = Path(__file__).resolve().parent.parent
     bases = [here / ".agents" / "skills", Path.home() / ".agents" / "skills"]
-    for kind in ("workspace", "generic"):
-        candidate = here.parent / "skills" / kind
-        if candidate.is_dir() and candidate not in bases:
-            bases.append(candidate)
     if anchor is not None:
         for parent in [anchor if anchor.is_dir() else anchor.parent, *anchor.parents]:
             candidate = parent / ".agents" / "skills"
@@ -100,8 +92,17 @@ def known_skills(anchor=None):
 
 
 def prd_dirs(anchor):
-    """沿计划文件的祖先找 PRD 目录，用来核对依据里的 PRD 编号不是编的。"""
+    """沿计划文件的祖先找 PRD 目录，用来核对依据里的 PRD 编号不是编的。
+
+    此外始终带上工具所在仓库的 `PRD/`：计划搬进服务对象项目之后，它照样会引用
+    工作区的 `PRD-001` / `PRD-003` 这类过程依据，那些文件在项目自己的 `PRD/` 下
+    并不存在。这与 skill_dirs 的做法一致——两处都在核对「这个名字不是编的」，
+    而名字的合法出处不止本仓库一处。
+    """
     found = []
+    here = Path(__file__).resolve().parent.parent / "PRD"
+    if here.is_dir():
+        found.append(here)
     if anchor is None:
         return found
     start = anchor if anchor.is_dir() else anchor.parent
@@ -207,11 +208,19 @@ def check_round(path):
 
 
 def scan(root):
-    """`--all` 的两组目标。两个都缺时分别报，不互相遮住。"""
+    """`--all` 的两组目标。两个都缺时分别报，不互相遮住。
+
+    `root` 可以是另一个项目的根（`--root`）：文档搬进服务对象项目之后，`--all`
+    也得能对那边跑。指向的目录连 `tasks/` 都没有时，点名那个路径——不然会出现
+    「没有找到 tasks/plan-*.md」这种看不出找错地方的说法。
+    """
     tasks = Path(root) / "tasks"
+    problems = []
+    if not tasks.is_dir():
+        problems.append(f"{tasks}: 这个目录不存在；`--root` 要指向一个带 tasks/ 的项目根")
+        return [], problems
     plans = sorted(tasks.glob("plan-*.md"))
     rounds = [p for p in sorted(tasks.glob("round*.md")) if is_round_file(p)]
-    problems = []
     if not plans:
         problems.append(f"{tasks}: 没有找到 tasks/plan-*.md")
     if not rounds:
@@ -349,14 +358,38 @@ def check(path, baseline=None):
     return problems
 
 
+def all_root(argv):
+    """从 `--all` 之后的参数里取 `--root <目录>`；缺省是工具所在仓库根。
+
+    只认 `--all` 与 `--root <目录>` 两种参数，多写一个不认识的就当用法错误——
+    与单文件模式一样退出码 2，不静默忽略，否则「我以为它在查 B 项目、其实又查了
+    一遍自己」这种事查不出来。
+    """
+    root, index = Path(__file__).resolve().parent.parent, 0
+    rest = [a for a in argv if a != "--all"]
+    while index < len(rest):
+        if rest[index] == "--root":
+            if index + 1 >= len(rest):
+                raise ValueError("--root 后面要跟一个目录")
+            root = Path(rest[index + 1])
+            index += 2
+            continue
+        raise ValueError(f"--all 只接受 --root <目录>，不认 {rest[index]}")
+    return root
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if not argv:
         print(__doc__.strip())
         return 2
     baseline = load_baseline()
-    if argv[0] == "--all":
-        root = Path(__file__).resolve().parent.parent
+    if "--all" in argv:
+        try:
+            root = all_root(argv)
+        except ValueError as exc:
+            print(f"用法错误：{exc}", file=sys.stderr)
+            return 2
         targets, all_problems = scan(root)
         if all_problems:
             print(f"闸门未通过，{len(all_problems)} 个问题：")

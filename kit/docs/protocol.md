@@ -75,30 +75,31 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 | register_project | project_id, name, root | root 是已存在的绝对项目目录；root 是身份、project_id 是标签，同一路径重复登记复用原记录（回执返回原 project_id 与 name，`reused: true`），不报 CONFLICT、也不改已有标签；把自己的 project_id 指向第二个目录报 CONFLICT |
 | list_projects | 空对象 | 只读，列出 project_id / name / root；没有它时项目清单只能读库或靠工单反推 |
 | unregister_project | project_id | 撤销错误登记；项目下仍有工单时拒绝（PROJECT_HAS_TICKETS），回执里列出这些工单；撤销后同一路径可重新登记 |
-| rename_project | project_id, name, changed_by 可选 | 只改显示名：`projects.name` 换成新名字，`id` / `root` / `next_number` 与工单归属一字不动；回执带 `old_name` 与 `name`（另带 `root` 与自报的 `changed_by`，它可以不给）。名字 1–200 字：空名（含只有空白）与超长报 INVALID_INPUT，project_id 不存在报 NOT_FOUND，被拒时一行不写（只留一条 rejected 事件）。**`name` 是显示名、`project_id` 是身份、改路径（`root`）只能 `unregister_project` + `register_project`**——有工单的项目撤不掉（PROJECT_HAS_TICKETS），所以名字给错了以前只能一直错下去，这条操作就是为那件事存在的；它不重建项目、不动 root、也不碰任何工单。每次改名落一条 `rename_project` 事件，detail 里是这次回执（旧名、新名、`changed_by`），所以「谁把哪个名字改成了什么」事后查得到 |
+| rename_project | project_id, name, changed_by 可选 | 只改显示名：`projects.name` 换成新名字，`id` / `root` / `next_number` 与工单归属一字不动；回执带 `old_name` 与 `name`（另带 `root` 与自报的 `changed_by`，它可以不给）。名字 1–200 字：空名（含只有空白）与超长报 INVALID_INPUT，project_id 不存在报 NOT_FOUND，被拒时一行不写（只留一条 rejected 事件）。**`name` 是显示名、`project_id` 是身份、`root` 是路径——路径用 `relocate_project` 改（AW-154）**，这条只管名字；它不重建项目、不动 root、也不碰任何工单。每次改名落一条 `rename_project` 事件，detail 里是这次回执（旧名、新名、`changed_by`），所以「谁把哪个名字改成了什么」事后查得到 |
+| relocate_project | project_id, new_root | 换根不改身份（AW-154）：`projects.root` 换成新路径，`project_id` / `name` / `next_number` 与名下工单一字不动，`tickets` / `attempts` 的历史字段一个不碰。**有工单的项目也迁得成**——以前改路径只能「`unregister_project` → `register_project`」，而前者对名下有工单的项目直接报 `PROJECT_HAS_TICKETS`，两条叠起来等于「有工单的项目永远改不了根」（2026-11-24 要把 heartopia-script-evolution 从 C: 搬到 D: 时遇到的正是这件事）。`new_root` 必须是已存在的绝对目录；空值与相对路径报 INVALID_INPUT、目录不存在报 FILE_NOT_FOUND、project_id 不存在报 NOT_FOUND、新根已被另一个项目占着报 CONFLICT（root 是身份，一个目录只能挂一个项目；`projects.root` 的唯一约束兜底），被拒时一行不写（只留一条 rejected 事件）。新旧根相同报 `relocated: false` 且一行不写。成功回执带 `old_root` / `root` / `relocated`，并落一条 `relocate_project` 事件，detail 是这次回执。它只改登记，不搬磁盘上任何文件：目录得先自己搬好再迁 |
 | create_ticket | project_id, title, deliverable, prd_path, criteria, root 可选, state 可选, blocked_by / related / rides_with 可选, requester_session_id 可选 | **工单号由库里发**：payload 里出现 `ticket_id` 一律报 `INVALID_INPUT` 并写明「号由库里发」，回执里的 `ticket_id` 才是真号（PRD-014 R5）。号是 `<前缀>-<序号>`，前缀取项目 id 的短名（`ai-workspace` → `AW`、`p1` → `P1`），每个项目一条独立序列、在同一个事务里取号并加一。`state` 只收 `planned` 与 `ready`（缺省 `ready`，与以前行为一致）；`planned` 是「还没开工、在库里排着」，不产生尝试、不占 `active_session`、也不接受 `bind_session`。**create 只记 `prd_path`、不记指纹**：`tickets.prd_sha256` 在排队期间是 NULL，依据在 `claim_ticket` 那一刻才定格（PRD-014 R2）。`blocked_by` / `related` / `rides_with` 是三类依赖边（各 0–50 个工单号，出现即按这份覆盖，不出现不动），写边时查一次可达性，成环报 `DEPENDENCY_CYCLE` 并点名环上的单。项目内 PRD 相对路径要存在；创建 revision=1 工单。`criteria` 每一条都要过形状闸门（见下「`criteria` 只收两种写法」），有一条不合格就报 `CRITERIA_NOT_JUDGEABLE` 并点名它是第几条，这张单一行不写；`state=planned` 时 `criteria` 可以是空数组（念头的位置），其余状态至少要一条。root 可选：project_id 未登记时传了就顺手记一行（name 取目录名）再开单，不传报 NOT_FOUND 且 message 写明可以传 root；project_id 已登记而 root 与库里的不一致报 ROOT_MISMATCH，原记录不动 |
-| get_ticket | project_id, ticket_id | 返回工单（含 `owner_session_id`：现在谁负责收尾）、所有执行尝试（含 coordinator_session_id：谁派的这条尝试，与 coordinator_workdir）、提交和验收历史，以及合并记录数组 merges、问答历史数组 questions 与 answers、回信记录数组 notices（没有记录时均为空数组），还有依赖边 `links`：`out` 是「它卡在谁身上」、`in` 是「谁在等它」，每边 `{kind, ticket_id, state}`，state 是对方当前的状态；回信结果与协调者工作目录在同一份回执里，验收据此判交接闭环有没有走完。每条 `reviews[*]` 带 `checks`（`{id,status,evidence}`，status 取 `pass`/`unverified`/`fail`，`pass`/`fail` 另带一个 `passed` 布尔镜像）、`checks_summary`（`{total,pass,unverified,fail}`）与一行 `summary`；工单级再带 `review_summary`（最后一条验收的那行摘要，没有验收时为 `null`）与 `unverified_checks`（同一口径的未验条数）——「带未验项的 accept」与「全部已验证」在这两个字段上字面就不同，不必读 `reason` 才分得出（AW-132） |
+| get_ticket | project_id, ticket_id | 返回工单（含 `owner_session_id`：现在谁负责收尾）、所有执行尝试（含 coordinator_session_id：谁派的这条尝试，与 coordinator_workdir）、提交和验收历史，以及合并记录数组 merges、问答历史数组 questions 与 answers、回信记录数组 notices（没有记录时均为空数组），还有依赖边 `links`：`out` 是「它卡在谁身上」、`in` 是「谁在等它」，每边 `{kind, ticket_id, state}`，state 是对方当前的状态；回信结果与协调者工作目录在同一份回执里，验收据此判交接闭环有没有走完。每条 `reviews[*]` 带 `checks`（`{id,status,evidence}`，status 取 `pass`/`unverified`/`fail`，`pass`/`fail` 另带一个 `passed` 布尔镜像）、`checks_summary`（`{total,pass,unverified,fail}`）与一行 `summary`；工单级再带 `review_summary`（最后一条验收的那行摘要，没有验收时为 `null`）与 `unverified_checks`（同一口径的未验条数）——「带未验项的 accept」与「全部已验证」在这两个字段上字面就不同，不必读 `reason` 才分得出（AW-132）。**读不出来的列不再让整张单读不出来（AW-163）**：`submissions` 的 `artifacts` / `evidence` / `risks` / `conflict_preview`、`questions[*].options`、`criteria`、每条 review 的 `checks` 解不开 JSON 时，回执 `ok` 仍是 true，那一列原样留住库里的文本（列表列兜成只装原文的一条：`"无"` 读成 `["无"]`，不是空数组），另有 `decode_warnings` 数组逐条点名`{where, field, error, detail, raw}`——`error` 是底层异常类型（例如 `JSONDecodeError`），`where` 是「哪条提交、哪个问题、哪条验收」，`raw` 是原文前 120 字。**review 的 `checks` 解不开时（AW-166）**同一个口径：`checks` 里留着那段原文（兜成只装原文的一条，不是空数组），`decode_warnings` 里 `field` 为 `checks`、`where` 为 `review <id>`；那一行读不出当时是 pass 还是 fail，所以在 `checks_summary` 里按 `unverified` 数（未验不是通过，不冒充 pass），`total` 仍是条目数。没有这种情况时不出现这个键。历史上确实存进过不是 JSON 的文本（`HSE-007` 的一条提交把 `evidence` 写成了纯文本），所以这里定的是「读得出来多少给多少」，而不是让一条旧行把整张单的尝试与验收历史变成一句 `INVALID_INPUT` |
 
 | list_tickets | project_id 可选, limit 可选, offset 可选, planned 可选 | 默认 50 条，最多 100；按项目过滤。`planned: true`（CLI 糖 `--planned`，等价写法 payload 里写 `{"--planned": true}`）是**池子视图**：只列 `planned` 单，按依赖层数升序（无前置为第 0 层，同层按 `created_at`），`columns` 在原来那八列之后多出 `claimable`、`blocked_by` 与 `criteria_n` 三列，其余视图的表头与以前逐字一致（PRD-014 R6）。`blocked_by` 是**未 `done`** 的前置单号数组（无前置为空数组）；`criteria_n` 是条件条数（`planned` 可为 0，0 就是「念头」，它领不走）；`claimable` = 状态在 planned/ready/rework 之内 **且** 所有 `blocked_by` 已 `done`。**它不代表「现在就能领」**：同项目已有在途单时 `claim_ticket` 仍报 `DISPATCH_BUSY`，那是另一件事，不在这一列里混着答。回执是 `{"columns": […], "items": […], "limit", "offset"}`：`columns` 是这一份输出的表头（`id` / `project_id` / `title` / `state` / `revision` / `criteria_v` / `behind` / `created_at`），表头与每一条的字段名一致，一张单也没有时表头照旧给出。`criteria_v` 是工单当前的判据版本（与 `get_ticket` 的 `criteria_version` 同一个值）；`behind` 是 `git rev-list --count <最新提交的 head_sha>..master`，**算不出来时是字符串 `?` 而不是 `0`**——`head_sha` 为 NULL 的历史提交、分支已被删、目录不是仓库这三种情况都算不了，写 0 就会和「基于最新 master」分不开（PRD-013 R7）。 |
-| claim_ticket | project_id, ticket_id, expected_revision, coordinator_session_id, coordinator_workdir 可选, allow_parallel 可选, parallel_reason 可选, parallel_scope 可选 | 原子领取 `planned` / `ready` / `rework` 工单，生成 attempt_id，状态 dispatching。**PRD 指纹在领取这一刻取**：`claim_ticket` 自己读文件算 sha256，写进 attempts 的两列并回写 `tickets.prd_sha256`——排队期间 PRD 升版因此不再让单过期，claim 之后再变才是 `STALE_PRD`。**`blocked_by` 里有未 `done` 的前置时报 `BLOCKED_BY_DEPENDENCY`**，message 点名是哪张单、它当前在什么状态（`cancelled` 也算未满足），一行不写；这道校验排在 `DISPATCH_BUSY` 之前，因为它回答的是「这张单能不能开工」。**条件一条都没有时报 `CRITERIA_NOT_JUDGEABLE`**（`planned` 允许空着，但空着就只是念头），message 指回 `revise_ticket`；它与上面那道依赖校验同类，同样排在 `DISPATCH_BUSY` 之前。coordinator_session_id 是派发它的协调会话，1–500 字符，同一句里就被写成这张单的 `owner_session_id`（当时两者相等，之后 owner 可被 `take_over_ticket` 换掉）；coordinator_workdir 是协调者自己的工作目录（1–1000 字符），不传就是空，不阻止派发；**同项目已有在途工单时报 DISPATCH_BUSY，消息里点名那张单号与它停在哪一步**（在途 = dispatching / running / awaiting_review / blocked，见「同项目一次只跑一张单」；`planned` 不在其中，池子里排着的单不占这个名额）；`allow_parallel` 只收布尔且默认 false，显式传 true 才越过，越过往 events 写一条 `allow_parallel_override` 并在回执里回显 `parallel_with`。**越过必须同时给 `parallel_reason`**（1–200 字符，写清为什么这两张单可以同时跑）：缺了报 `PARALLEL_REASON_REQUIRED`，工单停在原状态、不产生尝试；可选 `parallel_scope` 是 1–20 条字符串，每条是一个项目内相对路径、目录，或一段以 `资源:` 开头的资源标识，形状不对报 INVALID_INPUT。这两项与 `parallel_with` 并列写进同一条事件，回执里也原样回显；`allow_parallel` 为 false 时带上它们报 INVALID_INPUT——不留一条没人读的声明。**带车次的单在这里多看一处**（见「车次：几时几张单算一趟活」）：车次的 `owner_session_id` 为空就把本次 `coordinator_session_id` 写进去，等于本会话就放行，是别的会话报 `BATCH_OWNED_BY_OTHER` 并点名车次号与持有会话（一行不写）；`closed_at` 非空的车次报 `INVALID_STATE`，不再接受新单；`tickets.batch_id` 指向别的项目的车次是脏行，入口就报 `BATCH_PROJECT_MISMATCH`。**车次这一段的三种拒绝都排在 `DISPATCH_BUSY` 之前**：同一现场两个条件都满足时报车次，不报「项目忙」（判序依据见「车次：几时几张单算一趟活」）。回执额外带 `batch_id` 与 `batch_owner_session_id` |
+| claim_ticket | project_id, ticket_id, expected_revision, coordinator_session_id, coordinator_workdir 可选, allow_parallel 可选, parallel_reason 可选, parallel_scope 可选 | 原子领取 `planned` / `ready` / `rework` 工单，生成 attempt_id，状态 dispatching。**已取消的单报 `TICKET_CANCELLED`，一行不写，且这条判据排在 `STALE_REVISION` 之前**（见「取消之后：哪些操作必须被拒」）。**PRD 指纹在领取这一刻取**：`claim_ticket` 自己读文件算 sha256，写进 attempts 的两列并回写 `tickets.prd_sha256`——排队期间 PRD 升版因此不再让单过期，claim 之后再变才是 `STALE_PRD`。**`blocked_by` 里有未 `done` 的前置时报 `BLOCKED_BY_DEPENDENCY`**，message 点名是哪张单、它当前在什么状态（`cancelled` 也算未满足），一行不写；这道校验排在 `DISPATCH_BUSY` 之前，因为它回答的是「这张单能不能开工」。**条件一条都没有时报 `CRITERIA_NOT_JUDGEABLE`**（`planned` 允许空着，但空着就只是念头），message 指回 `revise_ticket`；它与上面那道依赖校验同类，同样排在 `DISPATCH_BUSY` 之前。coordinator_session_id 是派发它的协调会话，1–500 字符，同一句里就被写成这张单的 `owner_session_id`（当时两者相等，之后 owner 可被 `take_over_ticket` 换掉）；coordinator_workdir 是协调者自己的工作目录（1–1000 字符），不传就是空，不阻止派发；**同项目已有在途工单时报 DISPATCH_BUSY，消息里点名那张单号与它停在哪一步**（在途 = dispatching / running / awaiting_review / blocked，见「同项目一次只跑一张单」；`planned` 不在其中，池子里排着的单不占这个名额）；`allow_parallel` 只收布尔且默认 false，显式传 true 才越过，越过往 events 写一条 `allow_parallel_override` 并在回执里回显 `parallel_with`。**越过必须同时给 `parallel_reason`**（1–200 字符，写清为什么这两张单可以同时跑）：缺了报 `PARALLEL_REASON_REQUIRED`，工单停在原状态、不产生尝试；可选 `parallel_scope` 是 1–20 条字符串，每条是一个项目内相对路径、目录，或一段以 `资源:` 开头的资源标识，形状不对报 INVALID_INPUT。这两项与 `parallel_with` 并列写进同一条事件，回执里也原样回显；`allow_parallel` 为 false 时带上它们报 INVALID_INPUT——不留一条没人读的声明。**带车次的单在这里多看一处**（见「车次：几时几张单算一趟活」）：车次的 `owner_session_id` 为空就把本次 `coordinator_session_id` 写进去，等于本会话就放行，是别的会话报 `BATCH_OWNED_BY_OTHER` 并点名车次号与持有会话（一行不写）；`closed_at` 非空的车次报 `INVALID_STATE`，不再接受新单；`tickets.batch_id` 指向别的项目的车次是脏行，入口就报 `BATCH_PROJECT_MISMATCH`。**车次这一段的三种拒绝都排在 `DISPATCH_BUSY` 之前**：同一现场两个条件都满足时报车次，不报「项目忙」（判序依据见「车次：几时几张单算一趟活」）。回执额外带 `batch_id` 与 `batch_owner_session_id` |
 | bind_session | project_id, ticket_id, attempt_id, session_id, project_root | 将预留尝试绑定到会话标识；状态 running；session_id 与 claim 时的 coordinator_session_id 相同则报 SELF_DISPATCH，工单停在 dispatching；回执含 session_id 与 coordinator_session_id；不代表已验证宿主身份 |
-| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks, head_sha, base_sha | 保存 submission_id、成果摘要、自检证据、这次提交的分支 head sha 与它分叉自哪个 commit；状态 awaiting_review。`head_sha` 与 `base_sha` 都必填，各收 40 位十六进制（大小写都收，存小写），缺字段、长度不对或含非十六进制字符报 INVALID_INPUT，被拒时一行不写。`artifacts` / `evidence` / `risks` 三个都是**字符串数组**：`artifacts` 1–20 条、`evidence` 1–100 条、`risks` 0–100 条，每条非空且不超过 4000 字符；传对象数组、传一整段 JSON 字符串、传单个字符串都报 INVALID_INPUT。**首次提交（新仓库只有一次初始提交、没有 `master` 分支）时 `git merge-base HEAD master` 跑不出来，`base_sha` 就填 `git rev-parse HEAD` 的输出（与 `head_sha` 相同），但这一格仍然必填**。形状错时回执只有一条 INVALID_INPUT，`message` 里同时点名五个字段的期望形状与这一次哪几项不合格；三个数组的形状表、最小 payload 与首次提交的取法见下文「`submit_result` 的形状：三个字符串数组与首次提交的 `base_sha`」。`head_sha` 记的是「被验收的那棵树」，合并时 `merge_ticket` 拿它与最新提交比；`base_sha` 是在提交处的工作树里跑 `git merge-base HEAD master` 的输出——**不是「填表那一刻 master 的 sha」**，rebase 之后两者语义不同（PRD-013 R7 / D5）。回执带 `criteria_changed`：这次尝试开始时的 `criteria_version` 低于工单当前值时是 true，说明判据在开工后被改过，验收得按新条件重看一遍。它不回写任何行。**回执与 `get_ticket` 的 `submissions[-1]` 都带 `conflict_preview`**（PRD-015 R2）：提交时对未来的目标分支跑一次 `git merge-tree --write-tree --name-only <head_sha> <目标分支 tip>`，形状是 `{target_branch, target_sha, command, exit_code, conflicts}`，`conflicts` 是按字母序去重的路径数组。无冲突时 `conflicts` 是空数组、`exit_code` 是 0，字段照常出现——不是省略、不是 `null`，验收会话据此分得清「跑过且干净」与「没跑」；有冲突时 `exit_code` 是 1 且回执 `ok` 仍是 true，预演只报告不处置：不拒收提交、不回滚、不自动解冲突、不改分支；算不出来（目录不是仓库、`head_sha` 不在本地、git 不可用）时 `conflict_preview` 是 `null`。落库为 `submissions.conflict_preview`（JSON 文本，可空），`list_tickets` 不加这一列 |
+| submit_result | project_id, ticket_id, attempt_id, session_id, summary, artifacts, evidence, risks, head_sha, base_sha | 保存 submission_id、成果摘要、自检证据、这次提交的分支 head sha 与它分叉自哪个 commit；状态 awaiting_review。**已取消的单报 `TICKET_CANCELLED`，且这条判据排在 `STALE_ATTEMPT` 之前**（取消会把 `current_attempt` 置空，否则最先撞上的是「这不是当前那次尝试」）；`artifacts` 每一项恰好三键 `path` / `sha256` / `size`，提交侧自己生成的指纹也要过这把尺（形状不对报 `ARTIFACT_KEYS` 并点名字段名）。`head_sha` 与 `base_sha` 都必填，各收 40 位十六进制（大小写都收，存小写），缺字段、长度不对或含非十六进制字符报 INVALID_INPUT，被拒时一行不写。**业务项目根不是 git 仓库时例外（AW-151）**：传 `repo_kind: "non_git"`，两棵树都**不许带**（带了报 INVALID_INPUT），两列存 NULL——不许拿空树值 `da39a3ee…` 之类的占位 sha 顶替，详见下面「非 git 项目怎么交：`repo_kind: "non_git"`，两棵树留 NULL」一节。`repo_kind` 只收 `git`（缺省）与 `non_git` 两个值，回执原样带回。`head_sha` 记的是「被验收的那棵树」，合并时 `merge_ticket` 拿它与最新提交比；`base_sha` 是在提交处的工作树里跑 `git merge-base HEAD master` 的输出——**不是「填表那一刻 master 的 sha」**，rebase 之后两者语义不同（PRD-013 R7 / D5）。回执带 `criteria_changed`：这次尝试开始时的 `criteria_version` 低于工单当前值时是 true，说明判据在开工后被改过，验收得按新条件重看一遍。它不回写任何行。**回执与 `get_ticket` 的 `submissions[-1]` 都带 `conflict_preview`**（PRD-015 R2）：提交时对未来的目标分支跑一次 `git merge-tree --write-tree --name-only <head_sha> <目标分支 tip>`，形状是 `{target_branch, target_sha, command, exit_code, conflicts}`，`conflicts` 是按字母序去重的路径数组。无冲突时 `conflicts` 是空数组、`exit_code` 是 0，字段照常出现——不是省略、不是 `null`，验收会话据此分得清「跑过且干净」与「没跑」；有冲突时 `exit_code` 是 1 且回执 `ok` 仍是 true，预演只报告不处置：不拒收提交、不回滚、不自动解冲突、不改分支；算不出来（目录不是仓库、`head_sha` 不在本地、git 不可用）时 `conflict_preview` 是 `null`。落库为 `submissions.conflict_preview`（JSON 文本，可空），`list_tickets` 不加这一列 |
 | review_result | project_id, ticket_id, attempt_id, submission_id, reviewer_session_id, verdict, checks, reason | 只接受这八个顶层字段，多传即拒（见「验收 payload 是一张闭集」）；accept→done；reject→rework。验收者不能是该工单任一历史执行会话。`checks` 每条收两种写法：新的 `{id,status,evidence}`（status 取 `pass` / `unverified` / `fail`），或旧的 `{id,passed,evidence}`（归一成 pass / fail）；两个都给时不许自相矛盾，`unverified` 不许带 `passed`。判定规则跟着三档走：**accept 不许有 `fail`（`unverified` 不阻断）**，**reject 至少要有 `fail`**（未验不是失败，不能拿它当打回的理由）。回执带归一后的 `checks`、`checks_summary`（`{total,pass,unverified,fail}`）与一行 `summary` |
-| recover_ticket | project_id, ticket_id, attempt_id, expected_revision, reason | 只恢复 dispatching/running/awaiting_review/blocked；attempt_id 必须是当前尝试，旧编号返回 STALE_ATTEMPT；回执含 superseded_attempt_id、discarded_submission_id 与 voided_question_ids；旧尝试失效，它的开放问题转 voided，revision+1，回到 ready |
+| recover_ticket | project_id, ticket_id, attempt_id, expected_revision, reason | 只恢复 dispatching/running/awaiting_review/blocked；**已取消的单报 `TICKET_CANCELLED`（排在 `STALE_REVISION` 之前）**；attempt_id 必须是当前尝试，旧编号返回 STALE_ATTEMPT；回执含 superseded_attempt_id、discarded_submission_id 与 voided_question_ids；旧尝试失效，它的开放问题转 voided，revision+1，回到 ready |
 | revise_ticket | project_id, ticket_id, expected_revision, reason, prd_path, criteria, deliverable 可选, reopen 可选, restart 可选, blocked_by / related / rides_with 可选 | 明确更新需求摘要和验收项。**默认不作废在飞的尝试**：`criteria` 确有变化时 `criteria_version` 加 1（回执回显 `from` / `to`），`revision`、`current_attempt`、`attempts.state` 一个都不动——判据变了不等于这一代作废（PRD-013 R6）。改判据时若有尝试在飞（`dispatching` / `running` / `awaiting_review` / `blocked`），回执带 `must_wake`（`session_id` + `attempt_id` + `criteria_version.from` / `.to`），并写一条 `criteria_revised_in_flight` 事件；带 `must_wake` 只说明「要叫谁、为什么叫」，发送仍由协调会话走 `send_to_session`。要作废就显式传 `restart: true`（只收布尔，缺省 false）：那是三个作废入口之一，旧尝试 `superseded`、开放问题转 `voided`、`revision` 加 1、回到 `ready`，回执没有 `must_wake`。`criteria` 与 create_ticket 同一道形状闸门，**按落点状态判**：`restart` 与「对已完成单 `reopen`」都把单送回 `ready`，所以这两条路不接受空列表（`planned` 的空条件只在不换状态时成立）；不合格报 `CRITERIA_NOT_JUDGEABLE` 且一行不写；deliverable 不传则保留原值；对已完成工单必须传 reopen=true（重开也换代次，`revision` 加 1，回到 ready）；传了依赖边就按那一类覆盖式改写（先清后写，成环报 `DEPENDENCY_CYCLE` 且整个事务回滚）；`planned` 单改路径仍留 `prd_sha256 = NULL`（排队期间不取指纹）；回执含 previous_state、criteria_version、must_wake、prd_path、prd_sha256 与 deliverable；已取消工单不能重开 |
 | cancel_ticket | project_id, ticket_id, expected_revision, reason | 取消未终结工单（含 `planned`：池子里排着的单可以直接撤，它本来就没有尝试），旧尝试失效，revision+1；不停止真实会话 |
 | archive_ticket | project_id, ticket_id, expected_revision, reason | 把一个已验收（`done`）工单划进第十个终态 `archived`：只从 `done` 进得来，`reason` 必填（缺了报 `INVALID_INPUT`），回执含 ticket_id、state、previous_state、revision、current_attempt 与 reason。**`revision` 不变**——归档不是新的一代，它没作废任何尝试、也没换人，所以 `reviews` / `submissions` / `current_attempt` 一概不动，历史行一条不删。判序是**先状态、后 revision**：同一张单第二次归档报 `INVALID_STATE`（不是 `STALE_REVISION`——那会让人以为重读一次就能成），回执的正文里带着当时的 `revision`，两次相同；`running` / `ready` / `planned` / `cancelled` 的单同样 `INVALID_STATE`，状态一行不动。进去之后：不进 `list_unmerged`、不被 `wait_audit` 的 done 两类命中、不算在途（`ACTIVE_TICKET_STATES` 仍是四态），也不在 `cancel_ticket` 的可取消范围里（终态不可再终止）；作为 `blocked_by` 前置**算满足**（它只能从 `done` 进来，归档承认的是「做过、只是账对不上」，与 `cancelled` 不是一回事）。用 `tools/archive_legacy.py --dry-run / --apply` 一次清存量，别手工改库（AW-128） |
 | merge_ticket | project_id, ticket_id, commit, target_branch, tests, reviewed_sha | 给已验收（done）工单写一条合并记录：合并提交、目标分支、合并前跑过的测试结论、被验收的那棵树；不是 done 报 INVALID_STATE；该单 `notices` 为空报 NO_NOTICE（要么补记一条 `sent`、要么记一条 `failed` 并写清原因，`failed` 也算走过回执）；已有合并记录报 ALREADY_MERGED（这一条先判，行为不变）。`reviewed_sha` 必填：与该工单最新一条提交的 `head_sha` 相等就放行并写入该值，不等报 `SHA_MISMATCH` 且一行不写；最新提交的 `head_sha` 为 NULL（schema 8 以前的老提交）时必须传字面量 `unverified`，否则报 INVALID_INPUT，传了就把 `unverified` 原样入库；有 `head_sha` 的单传 `unverified` 同样报 INVALID_INPUT。回执含 ticket_id、commit、target_branch、tests、reviewed_sha、source、verified_by、verified_at、note 与 merge_id。**出处三个取值**（AW-116 / AW-127）：不传 `source` 时为 `auto_merge`（工具跑的正常合并路径：预演、临时工作树测试、真实合并、合并后测试都跑过），`verified_by` 与 `note` 留 NULL，传 `note` 报 INVALID_INPUT；传 `source=manual` 表示人手工 `git merge --no-ff` 合入（例如 `auto_merge` 在该项目上跑不动），**必须**同时传 `note` 写清闸门哪几步跑了、哪几步没跑；传 `source=backfill` 表示记录是事后补的，**必须**写 `note` 说明补记时间与原因。`manual` 与 `backfill` 都要求有可核对的树（`reviewed_sha` 不能是 `unverified`），都会**当场重跑** `git merge-base --is-ancestor <reviewed_sha> <target_branch>`，退出 0 才写行，否则报 `NOT_LANDED` 并点名工单号，一行不写；真跑过的命令由工具写进 `verified_by`，调用方不能自报（传 `verified_by` 报 INVALID_INPUT）。`source` 只收这三个值 |
 | repair_backfill_command | project_id, ticket_id | 只改**补记行**（`source=backfill`）`verified_by` 的**路径写法**（反斜杠 → 正斜杠），命令本身一个字不动：把存量值与工具现在的规范写法都按正斜杠归一后比对，相等才更新，不等报 `COMMAND_MISMATCH` 并把原值留给人读；别的 `source`（`auto_merge` / `manual`）报 `INVALID_STATE`（`manual` 行由工具当场写下命令，本来就已是规范写法，没有可修的），还没有合并记录报 `NOT_FOUND`；已经是规范值返回 `changed=false`（幂等，AW-116） |
-| list_unmerged | project_id 可选, since_days 可选 | 只读，列出 state=done 但没有合并记录的工单（id / project_id / title / state / revision / created_at，带 has_merge=false）；历史工单直接在 master 上做、没有 merges 行，会照样列出——清单让人看见并判断，不替人隐去。`since_days` 是 1–365 的整数，给了就只列 `created_at` 在这么多天以内的单；**不传时 SQL 与行为与以前逐字一致**，全量清单不变（历史单的密度是这张单的起因，收窄窗口不能变成替人隐去历史）。本操作仍只返回原料；要分「真待合并 / 历史豁免」用 `tools/auto_merge.py --list`，它读 `docs/unmerged-exemptions.json` 分栏（见下文「历史豁免清单」） |
+| list_unmerged | project_id 可选, since_days 可选 | 只读，列出 state=done 但没有合并记录的工单（id / project_id / title / state / revision / created_at，带 has_merge=false）；历史工单直接在 master 上做、没有 merges 行，会照样列出——清单让人看见并判断，不替人隐去。`since_days` 是 1–365 的整数，给了就只列 `created_at` 在这么多天以内的单；**不传时 SQL 与行为与以前逐字一致**，全量清单不变（历史单的密度是这张单的起因，收窄窗口不能变成替人隐去历史）。本操作仍只返回原料；要分「真待合并 / 仓库无改动 / 历史豁免」用 `tools/auto_merge.py --list`，判据是仓库里的两个 git 事实与 `docs/unmerged-exemptions.json`（前者见本章「验收通过不等于已合并」，后者见下文「历史豁免清单」） |
 | events | project_id, ticket_id, limit 可选, offset 可选 | 按顺序返回状态事件和原请求回执关联；被拒绝的写操作也各留一行（见「被拒绝的写操作留一行事件」） |
 | backup | destination | 在现有目录内创建新的绝对路径快照，不覆盖文件，不记录业务状态变化；只接受当前 schema（16）的库，旧库返回 SCHEMA_MISMATCH 且不落任何文件 |
 | ask_ticket | project_id, ticket_id, attempt_id, session_id, question, options 可选 | 就当前尝试提一个可回答的问题，工单进「在等答案」：question 1–2000 字符；options 为 0–6 项 `{"id","text"}`（id ≤20 且不重复、text ≤200），不传或空数组表示开放题；工单与尝试同时进 blocked，revision 不变；回执含 question_id、state、asked_at。工单不在 running 报 INVALID_STATE，attempt_id 不是当前尝试报 STALE_ATTEMPT，session_id 不是该尝试绑定的那个报 SESSION_MISMATCH；一条尝试同时只能有一条开放问题 |
 | answer_ticket | project_id, ticket_id, question_id, answer, answered_by, answered_by_session_id 条件必填, prd_sha256 | 把人的结论写进库：answer 1–4000 字符；answered_by 只能为 human / coordinator，coordinator 必须带 answered_by_session_id、human 不许带；**代答的授权读当前 owner**（`tickets.owner_session_id`），与 `record_notice` 同一把尺：`answered_by_session_id` 不等于当前 owner 报 `NOT_COORDINATOR` 且一行不写，是本条尝试的执行会话报 `SELF_ANSWER`（AW-122 之前这里读的是 origin，于是接替之后回执能补、问题却谁都答不了）；prd_sha256 原样抄 get_ticket 的当前值；问题 open → answered、尝试与工单回 running，revision 不变；回执含 answer_id、question_state、ticket_state。工单回到 running 只表示库里不再等答案，不代表那个会话已经在跑（见「`blocked`：工单在等一句话」） |
 | review_dispatched | project_id, ticket_id, submission_id, reviewer_session_id 可选, note 可选 | 记下「验收已经派出去了」，**只落一条同名事件，别的一行不动**（AW-133）。`state` 仍是 `awaiting_review`、`revision` 不变、`reviews` 表一行不写——它不是验收结论，是「有人在看」这条事实，所以它有窗口期（`task_center.core.REVIEW_IN_FLIGHT_SECONDS`，30 分钟）。判序按「这张单现在能不能被派验收」排队：状态不是 `awaiting_review` 报 `INVALID_STATE`，`submission_id` 不是最新那条提交报 `STALE_SUBMISSION`（返工后的新提交还没人看过，拿旧提交去标会把新提交压住），那份提交已有 `reviews` 行报 `ALREADY_REVIEWED`（同一棵树不判第二次），四种都一行不写、只留一条带 `rejected` 的拒绝事件。`reviewer_session_id` 与 `note` 可给可不给，给了也只是一条自报的指向，不是身份。回执带 ticket_id、state、revision、submission_id、reviewer_session_id、note 与 `in_flight_until`（派出去那一刻 + 30 分钟）。**消费方只有一个：`tools/next_action.py`**，它靠这条事件不再对同一张单报 `dispatch_review`，超过窗口自动回落 |
+| record_pool_report | project_id, ticket_id, session_id 可选, note 可选 | 记下「这张空判据单被点名报过一次」（AW-140）：**只落一条同名事件，别的一行不动**。`state` / `revision` / `criteria_version` / `criteria` 全不变——报过不是新的一代，更不是补了判据。判据只有三条：工单存在、状态可领（`planned` / `ready` / `rework`）、条件确实为空；条件不为空报 `INVALID_STATE` 且一行不写——把有判据的单记成「空判据报过」，等于让读侧替一张真活记账。回执带 `ticket_id`、`state`、`revision`、`session_id`、`note`、`reported_rounds`（记完之后是第几轮，按这张单的同名事件行数算）与 `reported_at`。**消费方只有一个：`tools/next_action.py`**，它按轮次决定「照原样点名 / 按窗口退避 / 报到第 N 轮升级」；阈值、台账与写法见 `docs/无人值守派单.md` §3.2 |
 | record_notice | project_id, ticket_id, attempt_id, session_id, origin_session_id, status, detail, target_session_id, wake_kind, message_id 可选 | 记一次回信尝试（本操作只落库，不发消息）：status 只收 `sent` / `failed`，其他值报 INVALID_INPUT；session_id 必须等于这张单**当前的 owner**（`tickets.owner_session_id`，claim 时由 `coordinator_session_id` 写下、之后可被 `take_over_ticket` 换掉），否则 NOT_COORDINATOR 且不写行（执行会话自己那次没送到的回执不在这里写，走 `report_notice_failure`）；target_session_id 必填且也必须等于当前 owner，写成执行会话、别的会话或已经归档的原协调会话都报 NOT_TARGET 且不写行；wake_kind 是宿主回执里的原值，不按白名单收：只有 `created`（宿主把它当成新建任务而非投递）**特判**——一律落 `failed`、回执带 `alert: NOTIFY_CREATED_TASK` 并让这次调用**非零退出**（那一行仍然入库，事后查得到）；`queued` / `resumed` 与枚举外的取值（例如 `already-active`）一律原样入库，调用方不得自行映射成近似的三值之一（见「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」）；只校验形状——空串、纯空白、超过 40 字、含内部空白或换行报 INVALID_INPUT 且不写行；同一张单最多一条 `sent`，第二次报 ALREADY_NOTIFIED 且不写行；`failed` 可以多条，措辞在 detail 里，回执带 `alert: NOTIFY_FAILED` 但不改工单状态；回执含 notice_id、ticket_id、attempt_id、origin_session_id、status、detail、target_session_id、wake_kind、ticket_state 与 revision |
 | take_over_ticket | project_id, ticket_id, new_owner_session_id, reason | 责任人接替：把 `tickets.owner_session_id` 换成一条新会话，**不动 `revision`**，也不改 `attempts.coordinator_session_id`（origin 是谁派的，历史事实）。四个字段就是全部，不要求 `attempt_id` 或 `expected_revision`：接替不是新的一代。`new_owner_session_id` 已经是当前 owner 报 ALREADY_OWNER；是这条尝试的执行会话报 TAKEOVER_BY_EXECUTOR（那等于自派自做）。工单已取消报 INVALID_STATE；字段缺失、空串或多余字段报 INVALID_INPUT，一行不写。成功事件由 `execute()` 照常写一行 `operation=take_over_ticket`，`detail.result` 里带旧/新 owner、origin 与理由；回执含 ticket_id、previous_owner_session_id、owner_session_id、origin_session_id、reason、state、revision。接替之后 `record_notice`、`answer_ticket` 与 `merge_ticket` 的授权读新 owner（见「协调会话归档之后：owner 与 origin 不是一个字段」）。**日常入口是 `python tools/handover_owner.py --ticket <单号> --to <会话 id> --reason <一句>`**：它先只读核「当前 owner 已不在、目标会话活着、这张单还有收尾动作可做、目标不是执行会话」，四条都过才调本操作；本操作自己仍是四条字段、仍只做声明，不认证 |
-| record_pool_report | project_id, ticket_id, session_id 可选, note 可选 | 记下「这张空判据单被点名报过一次」（AW-140）：**只落一条同名事件，别的一行不动**。`state` / `revision` / `criteria_version` / `criteria` 全不变——报过不是新的一代，更不是补了判据。判据只有三条：工单存在、状态可领（`planned` / `ready` / `rework`）、条件确实为空；条件不为空报 `INVALID_STATE` 且一行不写——把有判据的单记成「空判据报过」，等于让读侧替一张真活记账。回执带 `ticket_id`、`state`、`revision`、`session_id`、`note`、`reported_rounds`（记完之后是第几轮，按这张单的同名事件行数算）与 `reported_at`。**消费方只有一个：`tools/next_action.py`**，它按轮次决定「照原样点名 / 按窗口退避 / 报到第 N 轮升级」；阈值、台账与写法见 `docs/无人值守派单.md` §3.2 |
 | report_notice_failure | project_id, ticket_id, attempt_id, session_id, target_session_id, detail, wake_kind 可选 | 执行会话记**自己那次没送到的回执**（本操作只落库，不发消息）。它没有 `status` 字段，因此造不出 `sent`——`one_sent_notice` 那条索引在结构上碰不到，`sent` 只有当前的 owner 能宣告。`session_id` 必须是这条尝试绑定的执行会话，否则 SESSION_MISMATCH；`target_session_id` 必须是该尝试的 `coordinator_session_id`（origin：这条回执本来要发给谁），否则 NOT_TARGET；`detail` 写宿主给的原话或错误码（例如「send_to_session 返回 ARCHIVED」）与「送到哪儿失败了」。落库形状与 `record_notice` 的 `failed` 完全一致：`origin_session_id` 自动写执行会话自己，`status` 固定 `failed`，回执带 `alert: NOTIFY_FAILED`、`reported_by_session_id`、notice_id、ticket_state 与 revision。`wake_kind` 这次没有宿主投递回执可读，不给值时落 `unknown`。记完之后 `merge_ticket` 的 `NO_NOTICE` 就过得去（`failed` 也算走过回执），而「回执没送到、原因是什么」在 `notices` 里查得到，记录人写在同一次调用的成功事件里 |
 
 
@@ -119,9 +120,18 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 
 `unregister_project` 的保护条件不是礼貌性的：有工单的项目一旦被撤掉，工单就指向一个不存在的项目，事件与验收记录随之失据。要撤先处理工单（`cancel_ticket` 之后仍需人工清理），不要为了「收拾登记」删工单。
 
-**项目登记不设门禁：列表即范围，登记只是记账。** 能不能在某个目录开单取决于它是 Cindy 列表里的目录，不取决于库里有没有这一行，所以 `create_ticket` 允许带着 `root` 自动记账，不必先单独调 `register_project`。库里只有 `projects` 这一张表，没有白名单也没有镜像表，`root` 是唯一的身份：六个同名的 `bots/*/workspace` 各自一行、互不干扰，`project_id` 撞车不阻断派发——标签给人看，路径才决定工单落在哪。三个字段各自的改法不同：**`name` 是显示名**，写错了用 `rename_project` 改（只动这一列）；**`project_id` 是身份**，换它等于换一个项目，没有原地改名的入口；**`root` 是路径**，改路径只能 `unregister_project` 之后重新登记。`create_ticket` 不会代你改任何一项。
+**项目登记不设门禁：列表即范围，登记只是记账。** 能不能在某个目录开单取决于它是 Cindy 列表里的目录，不取决于库里有没有这一行，所以 `create_ticket` 允许带着 `root` 自动记账，不必先单独调 `register_project`。库里只有 `projects` 这一张表，没有白名单也没有镜像表，`root` 是唯一的身份：六个同名的 `bots/*/workspace` 各自一行、互不干扰，`project_id` 撞车不阻断派发——标签给人看，路径才决定工单落在哪。三个字段各自的改法不同：**`name` 是显示名**，写错了用 `rename_project` 改（只动这一列）；**`project_id` 是身份**，换它等于换一个项目，没有原地改名的入口；**`root` 是路径**，搬了目录用 `relocate_project` 改登记——有工单的项目也能迁（AW-154），不必先撤销：`unregister_project` 对名下有工单的项目会拒（`PROJECT_HAS_TICKETS`），所以「撤销 → 重新登记」只在项目下一张单都没有时走得通。`create_ticket` 不会代你改任何一项。
 
 `artifacts` 是 1–20 个业务项目内文件相对路径。禁止绝对路径、项目外路径和解析后重复的路径。程序计算并保存每个文件的 SHA-256 和大小，不信任调用者自报摘要。单文件上限 32 MiB。
+
+**落库的每一项恰好三个键：`path` / `sha256` / `size`，多一个少一个都是 `ARTIFACT_KEYS`（AW-159）。** 这三个键各自回答一件事：`path` 是哪份文件、`sha256` 是提交那一刻工作树里那份字节（口径见上一节）、`size` 是它的字节数。`review_result` 用**整份字典逐项相等**判断成果有没有变，所以多一个键不是备注、而是永远对不上的理由。形状校验有**两道**，各自给的人说话：
+
+- **提交侧（`submit_result`）**：指纹生成之后立刻过一遍同一把尺，报错点名字段名（`artifacts[0] 多出 role`）。正常路径永不触发——它防的是「将来有人给 `fingerprint()` 加一个键」那一刻当场红，而不是等到验收时才表现成一句无解的话。
+- **验收侧（`review_result`）**：比指纹**之前**先查形状，报错点名是哪条提交、第几项、多出/缺少哪个键、期望是哪三个键；被拒时一行不写（不写 `reviews`、不改状态）。
+
+两道都要能诊断，因为这两类现场在库里都真的出现过：HSE-008 的提交 `1cd60777` 五项 artifacts 都多一个 `role`（全库仅此一条，`submit_result` 产不出来），HSE-007 的 `6aa4dadf` 整项直接是路径字符串（改动前它会落进 `saved["path"]` 的 TypeError，被兜成一句 `INVALID_INPUT: Invalid input or inaccessible local path`——那句话说的是路径，而事实是这一行不是提交工具写的形状）。要求被验收的那一行就是 `ARTIFACT_CHANGED`（真的改过文件时仍是这个码），但消息里点明是哪个键变了（`sha256` 还是 `size`），不再是一句「Submitted artifact changed」。
+
+存量可疑行（键集合不对、整项不是对象）用 `python tools/invariants.py` 一次点出来，不要手改库：见下面「不变量自检」。
 
 ### artifact 的 SHA-256 与 git blob 的 sha 不是同一个数
 
@@ -131,7 +141,7 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 
 **验收用工作树的 SHA-256，不用 blob。** 在 `head_sha` 的检出（工作树）里对文件重算 `sha256`，与 `submissions.artifacts[].sha256` 比；拿分支 blob 去复算会看到系统性差异，那不是成果被改过（`ARTIFACT_CHANGED` 判的是工作树对工作树），也不是提交造了假。要用 blob 核对就先按 git 的换行规则归一（或 `git -c core.autocrlf=false checkout`），但那是另一种口径，不是本库记下的那一个——两处各写一种，事后没人分得清哪条是权威。
 
-`evidence` 为 1–100 条自检说明字符串，`risks` 为 0–100 条字符串数组（没有风险就给空数组，字段不能省）。自检说明是执行者声明，不等于独立测试证据已经被系统验证。
+`evidence` 为至少一条自检说明字符串，`risks` 为字符串数组，可为空。自检说明是执行者声明，不等于独立测试证据已经被系统验证。
 
 验收条件里说的「提交说明」，指的就是 `submit_result` 的 `summary` 与 `evidence` 两部分：`summary` 说清这次改了什么、边界在哪，`evidence` 逐条给出自检说明。别处不再有第二个位置——验收不得要求执行者额外写进工单描述、聊天回复、单独的文件或某个特定小标题下，也不得以「说明的位置不对」为由判不通过。条件想约束文案时，要写明它落在 `summary` 还是 `evidence`。
 
@@ -262,7 +272,7 @@ CREATE UNIQUE INDEX active_session ON attempts(session_id)
 - **回执只发一条，正文不报送原值。** 执行会话交回成果时发**一条**消息：正文只写工单号、状态与提交 sha 或 review_id；`wake_kind` 不写进正文，也不为它另发一条。理由与做法一起换了：那个值只出现在 `send_to_session` 的发送回执里，一条消息写不出自己这一条的发送结果，所以**这条消息本就不承担报送原值的职责**——省掉这一步，也就省掉了「推定一个值写进正文」这条唯一能造假的路径；而以前那条只写原值的第二条，每发一次就要多唤醒一次原会话、多读一遍上下文，收益不抵成本。协调会话收到回执后照常 `record_notice` 落库：`wake_kind` 填 `unknown`（只校验形状、不按白名单收，所以它合规矩也能入库），并在 `detail` 里写明「本次 `wake_kind` 未取到，`unknown` 是占位」——这一列本身记不下「这是推定」，省了 `detail` 就再也分不出这一行是事实还是推定。
 - **送达改由一次会话列表核对承担，不看投递回执里的 `wake_kind`。** 协调会话收到回执后跑 `cindy_helper` 的 `list_sessions`（按 `workdir`），确认列表里没有多出标题就是这份回执正文的新任务——**没有多出新任务即算送达**。这条判据只看有操作后果的那一类：`queued` / `resumed` / `already-active` 都只表示消息进了原会话、没有副作用；唯一有后果的是宿主把回执当成新建任务，而它在会话列表里看得见，不必再去读投递回执。2026-11-18 实测同一会话、同样入参与 `target_session_id` 连投三条消息，`wake_kind` 依次是 `already-active`、`created`、`queued`——三值同框，所以「上一条投中了」推不出「这一条也投中了」，能推的只有当场查一遍列表。查见多出的那条就停掉它（`stop_session_turn`，必要时 `archive_sessions`），再带 `target_session_id` 重发。
 - **终态只落库不唤醒。** 回执的收尾分两类：`done` / `rework` 这类终态**只落库不唤醒**——提交、验收、`record_notice` 都记进库，不为了通知再发一条消息，否则每张单都要多一次唤醒、多一遍上下文重读；唤醒只留给三种情况：`created` 误建了任务、工单 `blocked` 在等人一句话、`ask_ticket` 已经落了问题。判据按「这件事要不要让别的会话现在改变动作」问，不按「有没有新状态」问。
-- **dispatch 完就结束本轮，禁止轮内 sleep 等下游。** 派完就交回这一轮，**唯一续跑点是回执到达时起的新一轮**；回执没到时**由 `python tools/wait_audit.py` 报出**，协调会话**不得在轮内 sleep，也不得 sleep 一阵再查一次库**（轮内轮询是同一个问题的另一种写法）。这样规定的理由不是「等一会儿也没关系」，而是轮内 sleep 把一条活轮押在「回执一定会到」上：睡的时候不能纠错、不能响应队列里的消息，睡过头就是盲等（实测同一条会话日志里 31 次 `sleep`，其中 `sleep 1700` 四次、`sleep 1800` 三次、`sleep 1500` 三次，动作都是「睡完再查一次库」）。而回执本来就不保证送达：`review_result` / `done` / 合并都只落库不外发，唯一的外发是评审会话自己发的一条回执，那是礼貌不是保证；`send_to_session` 还是入队语义，还可能被宿主当成新任务误建。检出面就是 `tools/wait_audit.py`：只读打开工单库与会话库，列出「等在验收超过 4 小时且没有 review 行」「`done` 但 `notices` 为空」「`done` 但 `merges` 无行」「`running` 但执行会话 10 分钟没有活动」四类，阈值出处是 `PRD-010` §4.3 S3（4 小时）与 §4.3 S4（10 分钟）；有命中退出 1，库有问题退出 2，末行固定打四类各几条。**判据：这一轮里搜不到「sleep 一段时间再查库」这种写法；「下游还没回」这个结论来自一次 `wait_audit` 或下一轮到达的回执。**
+- **dispatch 完就结束本轮，禁止轮内 sleep 等下游。** 派完就交回这一轮，**唯一续跑点是回执到达时起的新一轮**；回执没到时**由 `python tools/wait_audit.py` 报出**，协调会话**不得在轮内 sleep，也不得 sleep 一阵再查一次库**（轮内轮询是同一个问题的另一种写法）。这样规定的理由不是「等一会儿也没关系」，而是轮内 sleep 把一条活轮押在「回执一定会到」上：睡的时候不能纠错、不能响应队列里的消息，睡过头就是盲等（实测同一条会话日志里 31 次 `sleep`，其中 `sleep 1700` 四次、`sleep 1800` 三次、`sleep 1500` 三次，动作都是「睡完再查一次库」）。而回执本来就不保证送达：`review_result` / `done` / 合并都只落库不外发，唯一的外发是评审会话自己发的一条回执，那是礼貌不是保证；`send_to_session` 还是入队语义，还可能被宿主当成新任务误建。检出面就是 `tools/wait_audit.py`：只读打开工单库与会话库，列出五类——「`awaiting_review` 但最新提交已经过去 20 分钟、且这张单 `notices` 一行都没有」（S3 的分钟级前哨）、「等在验收超过 4 小时且没有 review 行」「`done` 但 `notices` 为空」「`done` 但 `merges` 无行」「`running` 但执行会话 10 分钟没有活动」；三个阈值出处是 `PRD-010` §4.3 S3a（20 分钟）、§4.3 S3（4 小时）与 §4.3 S4（10 分钟）。**为什么是 20 分钟**：无人值守巡检每 10 分钟一轮，20 = 10 × 2，即两轮都没人接——提交通常是执行会话这一轮的最后一步，两轮之内没人接手基本就是这条链断了，不是「还在忙」；多出的那一轮留给回执一次自然补发的机会，第二轮回执还没动静才点名。这一档判的是「这张单一条回执记录都没有」，不是「最新提交之后没有」——`notices` 是按工单走的，时间窗只用 `submissions.created_at`，任意一行（含 `failed`）都算回执走过。有命中退出 1（新档也算命中），库有问题退出 2，末行固定打五类各几条。**轮内 sleep 与轮内轮询本身**由 `python tools/sleep_audit.py` 报：它扫 `%APPDATA%/Cindy/pi-agent-home/sessions/*.jsonl` 里每一条 shell 命令，把 ≥30 秒的 `sleep` 连同同一条命令的后半段按时间倒序列出（`grep`/正则字符串里的 `sleep 270` 不算命中），有命中退出 1、目录不存在退出 2。分工写死：**回执没到由 `wait_audit` 报，睡眠与轮询由 `sleep_audit` 报**；`sleep_audit` 检出什么就是违规，不是提示。**判据：这一轮里搜不到「sleep 一段时间再查库」这种写法；「下游还没回」这个结论来自一次 `wait_audit` 或下一轮到达的回执。**
 - **投递之前的三步先做完，再谈回执。** 回执只说明这一条消息怎么被处理，它不替你把前面的判断补上：队列里已有未消费的消息就不叠加（改走 `update` / `steer` / 等），正文里不写会在几小时内失效的标识（只写指向 `get_ticket` 当前状态的说法），同一事项的消息用覆盖式改写合并不拼正文。完整口径见「发消息之前：看队列、只写指针、同类合并」。
 - **真伪的边界。** 这里只做落库，不投递：库里记的是「协调会话声明它发了、发给了谁」与它自己填的 `wake_kind`（本条路径上是 `unknown` 占位），不是「宿主确认送达」。自动发信与重试属于之后的适配层。
 
@@ -273,8 +283,8 @@ CREATE UNIQUE INDEX active_session ON attempts(session_id)
 **一、可核的事实：它在哪一刻被归档，能复算。**
 
 - **归档是宿主做的，不是本工具。** `task_center/` 里没有任何归档**会话**的调用（`grep -rn "archive_sessions" task_center/` 无输出），所以「让它别归档」「等它归档完再来」这类设计在本仓库里做不到。注意别把两件事的名字混在一起：`archive_ticket` 归档的是**工单**（`tickets.state='archived'`），跟宿主里那条会话的 `status=archived` 毫无关系，一个归档了工单的会话下一条消息照样收得到。`move_session` 也搬不动已归档的会话（见 `docs/intake.md` 的限制那一段）。
-- **看两个字段就够：** 宿主会话库 `sessions` 表的 `status`（或 `cindy_helper` 的 `list_sessions` 回执里的同名字段），以及 `last_turn_ended_at` / `updated_at`。2026-11-22 在 `%APPDATA%\Cindy\cindy-*.db` 实测：调度建的协调会话 `<session-id>`，`last_turn_ended_at` = 08:04:08.244Z、`updated_at` = 08:04:08.266Z（相差 22 ms），`status=archived`；另一条会话同样是「这一轮结束即归档」（相差 26 ms）。
-- **不能从「这一轮结束了」推断「它一定归档」。** 同一天同一张表里，另外两条会话也结束了本轮，`status` 仍是 `active`。所以规矩只有一句：**不要假设一轮结束后的协调会话还能收信**，也不要把「还没归档」当成保证。
+- **看两个字段就够：** 宿主会话库 `sessions` 表的 `status`（或 `cindy_helper` 的 `list_sessions` 回执里的同名字段），以及 `last_turn_ended_at` / `updated_at`。2026-11-22 在 `%APPDATA%\Cindy\cindy-*.db` 实测：调度建的协调会话 `<session-id>`，`last_turn_ended_at` = 08:04:08.244Z、`updated_at` = 08:04:08.266Z（相差 22 ms），`status=archived`；另一条 `fbe2f791-…` 同样是「这一轮结束即归档」（相差 26 ms）。
+- **不能从「这一轮结束了」推断「它一定归档」。** 同一天同一张表里，`bc73b954-…` 与 `fb41e678-…` 也结束了本轮，`status` 仍是 `active`。所以规矩只有一句：**不要假设一轮结束后的协调会话还能收信**，也不要把「还没归档」当成保证。
 - **一条命令复算：** `python tools/coordinator_state.py --ticket <单号>`。它只读打开工单库与宿主会话库，打印这张单的 `owner_session_id`（现在谁负责）与 `origin`（谁派的）、宿主里那条会话的 `host_status` / `host_source` / `last_turn_ended_at` / `updated_at` 与结论；退出码 0 = 责任人还在（`OWNER_ACTIVE`），1 = 责任人已归档或宿主里查不到（`TAKEOVER_NEEDED`，并打印接替命令的形状），2 = 查不出来（没有 owner、会话库打不开——**「不知道」不当成「还在」**）。
 
 **二、两个字段：授权读 owner，审计读 origin。**
@@ -342,6 +352,59 @@ session_id 按原样精确比较，大小写不同即视为不同会话（`EXEC3
 
 历史号一律不改、不重排、不复用：迁移按每个项目已有的最大号初始化发号盘（`AW-096` → 下一次 `AW-097`），`claim` 不再取号——号在写 `tickets.id` 那一刻就发出去了，它同时是主键、也是 attempts / submissions / merges / notices 引用的那个值，换号就等于换主键。
 
+### 取消之后：哪些操作必须被拒（`TICKET_CANCELLED`）
+
+`cancel_ticket` 是一道**单向门**：之后这张单不再产生新尝试、不推高 `revision`、不收执行结果、也不能被恢复或重开。要把那件事接着做，新建一张单。
+
+三处续做入口报的是专用码 `TICKET_CANCELLED`，而不再混在 `INVALID_STATE` / `STALE_ATTEMPT` / `STALE_REVISION` 里：
+
+| 操作 | 取消之后 | 判序 |
+| --- | --- | --- |
+| `claim_ticket` | `TICKET_CANCELLED` | **排在 `STALE_REVISION` 之前**：先报那个让重试失去意义的事实 |
+| `submit_result` | `TICKET_CANCELLED` | **排在 `STALE_ATTEMPT` 之前**：取消会把 `current_attempt` 置空，否则最先撞上的是「这不是当前那次尝试」 |
+| `recover_ticket` | `TICKET_CANCELLED` | 与 claim 同一道闸、同一个判序 |
+
+消息里点名工单号、当前 `revision` 与唯一出路（`create_ticket`），并指回 `events` 里最后一条成功 `cancel_ticket` 的 `result.reason`。**这不是「原来能续做、现在不能」**——原来也拒；改的是拒绝时说的是哪件事。2026-11-24 的 HSE-005 就是被旧措辞送到手改库那一步的：14:04:57 取消之后，14:28:38 库里凭空多出一条 `revision=3` 的尝试（`events` 里没有对应的 `claim_ticket`），而 14:30:56 的 `submit_result` **成功了**——因为手写那一步顺手把工单放回了 `running`。旧措辞（`STALE_ATTEMPT` / `STALE_REVISION`）两句都在说「换个编号 / 重读一遍再来」，而取消之后这两条路永远走不通。
+
+判序的理由与 `archive_ticket` 那条一致：能绕的那个错误（`STALE_REVISION`）会让调用方照着「重读再来一次」重试，下一次仍然过不去；不可绕的那个一句话就把人送到唯一出路。
+
+其余操作在取消后的行为（都是既有口径，本版未改，列在这里是为了「哪些操作必须被拒」有一份完整答案）：
+
+| 操作 | 取消之后 |
+| --- | --- |
+| `revise_ticket` | `INVALID_STATE`（`Cancelled tickets cannot be silently reopened`）——重开没有别的入口 |
+| `archive_ticket` | `INVALID_STATE`：归档只从 `done` 进 |
+| `merge_ticket` | `INVALID_STATE`：只有 `done` 的单能写合并记录 |
+| `take_over_ticket` | `INVALID_STATE`：取消的单没有收尾活可接替 |
+| `cancel_ticket` | `INVALID_STATE`：已是终态 |
+| `ask_ticket` / `report_notice_failure` | `STALE_ATTEMPT`：`current_attempt` 已被置空 |
+| `answer_ticket` | `QUESTION_MISMATCH`：取消时开放问题已转 `voided`，晚到的答案只能报这一条 |
+| `review_dispatched` | `INVALID_STATE`：只有 `awaiting_review` 能被标成「验收派出去了」 |
+| `record_notice` | **可以写**：回信是这张单的历史事实，取消不撤已发生的事；它不推状态、不动 `revision` |
+
+### 不变量自检：attempt 与 revision 必须在 `events` 里找得到来源
+
+`Center.execute()` 每写成功一次就落一条带 `result` 的事件，所以「库里多了一行、`events` 里查不到是谁写的」只有一条成因：**有人绕过了工具，直接往 SQLite 里写**。工具层拦不住那一类写入（同一台机器、同一个用户、同一份文件权限），能守的是当场可判的三条：
+
+```bash
+python tools/invariants.py                                  # 全库
+python tools/invariants.py --project heartopia-script-evolution   # 只扫一个项目
+python tools/invariants.py --json                           # 结构化，给别的脚本读
+python tools/invariants.py --list-checks                    # 只问「查哪三件事」
+```
+
+退出码：0 干净；1 有可疑行（逐条点名它为什么可疑）；2 库读不了或不像中心库（**「没法检」不是「检完干净」**，两者靠退出码分开）。只读：`mode=ro` + `PRAGMA query_only`，一个字节不写。
+
+| 检查 | 判据 | 为什么成立 |
+| --- | --- | --- |
+| `attempt_without_claim` | 每条 `attempts` 行都要有一条 `claim_ticket` 事件指着它 | 尝试只有 `_claim_ticket` 一处会插入（`INSERT INTO attempts` 全仓唯一），而它每写一次都会落事件 |
+| `revision_without_event` | `tickets.revision` 必须等于它事件里出现过的最大 `revision` | `revision` 只在 `_invalidate()` 里加一（全仓唯一），它的三个调用方（`cancel_ticket` / `recover_ticket` / `revise_ticket restart`）都把新值写进回执，回执又原样进 `events.detail.result` |
+| `artifact_key_shape` | `submissions.artifacts` 的每一项恰好三键 | 见上一条 `artifacts` 的口径；`submit_result` 产不出别种形状，所以命中的行同样是手写的 |
+
+**它只报不改。** 可疑行是事实，修法是先看那一行、判断它是怎么来的，再由人决定补一次 `recover_ticket` 还是把它记成历史；工具不删行、不改状态。
+
+为什么它和用例是两件东西：用例证明「工具走的那几条路能拦住」——那是闸门；这个脚本回答「当前这个库里有没有已经混进去的行」——那是体检。HSE-005 的 `ae87a2fc` 在工具层没有产出它的路径，所以真正抓得到它的是体检。
+
 ### 恢复与修订的验证口径
 
 恢复必须写明它核对过的当前尝试编号。拒收返工不递增 revision，一个 revision 内可以有多个尝试；只比版本号会让晚到的旧恢复意图作废正在执行的新尝试。
@@ -370,63 +433,33 @@ session_id 按原样精确比较，大小写不同即视为不同会话（`EXEC3
 1. 协调会话先调用 claim_ticket，传入自己的会话标识作为 coordinator_session_id，记录 attempt_id。
 2. **派发是另一个会话**：协调会话不得自己执行这张工单。默认载体是项目普通会话——`send_to_session` 不传 `target_session_id` 并指定 `project_path`（见下节「派发的载体」）；宿主确实没有新建项目会话的能力时才用一次性独立上下文子任务并标注；两者都没有就停下来告诉人，不要自己动手。适配器负责检查项目与会话回执。
 3. 被派发的会话调用 bind_session 保存绑定——它的 session_id 不能等于 claim 时的 coordinator_session_id。真实执行者必须等绑定完成，才能提交；先完成了成果也应保留本地记录并稍后提交，而不是再次创建工单。
-4. 执行者保存业务项目中的成果，再调用 submit_result——`head_sha` 填 `git rev-parse HEAD` 的输出（40 位十六进制），它是这次被验收的那棵树。同一张单验收后再提交一次会刷新这个值，所以合并比的是最新一条。
+4. 执行者保存业务项目中的成果，再调用 submit_result——`head_sha` 填 `git rev-parse HEAD` 的输出（40 位十六进制），它是这次被验收的那棵树。同一张单验收后再提交一次会刷新这个值，所以合并比的是最新一条。**项目根不是 git 仓库时没有这棵树**：传 `repo_kind: "non_git"`、两棵树都留空，存进库里是 NULL（见下面「非 git 项目怎么交」一节），不要编一个 sha。
 5. 收到回执后通知协调方，**只发一条**：正文写清工单号、状态与提交 sha 或 review_id，不写 `wake_kind`、也不补第二条（为什么一条就够、送达怎么判，见「回信落库：一张单最多一条 `sent`，没过回执的单合不进去」一节的「回执只发一条」「送达改由一次会话列表核对承担」「终态只落库不唤醒」三条）。协调会话收到后 `record_notice` 落库（`wake_kind` 填 `unknown` 并在 `detail` 里注明是占位），再跑一次 `list_sessions` 核对会话列表：没有多出标题等于这份回执的新任务即算送达，多出了就先停掉误建的再带 `target_session_id` 重发。终态（`done` / `rework`）只落库不唤醒，唤醒只留给 `created` 误建、`blocked`、`ask_ticket` 三种。通知丢失时，可根据中心 awaiting_review 状态继续，而不重做执行。
 6. 独立验收会话核对成果后调用 review_result。
 
 本版只实现第1、3、4、6步的本机记录和校验，不会自动执行第2或第5步。也正因第2步还没有适配层，「新开一个会话」目前靠调用方自觉；`SELF_DISPATCH` 只能拦住「用同一个标识绑自己的工单」这一种偷懒方式。
 
-### `submit_result` 的形状：三个字符串数组与首次提交的 `base_sha`
+### 非 git 项目怎么交：`repo_kind: "non_git"`，两棵树留 NULL（AW-151）
 
-演练记录（2026-11-24 03:38，`onboard --host generic` 的最小闭环）里，同一个人为同一个 payload 连撞五次 `INVALID_INPUT`：先 `head_sha`、再 `base_sha`、然后把 `artifacts` 传成对象数组、再把 `artifacts` 传成一整段 JSON 字符串、最后 `evidence` 与 `risks`。五次都是同一个原因——协议只写了字段名，没写形状。所以在这里一次写全：
+业务项目根可以是任何 Cindy 列表里的目录，不必是 git 仓库（PRD-009 D3）。这类项目交成果时没有 `head_sha` 可填：`git rev-parse HEAD` 根本没有输出，`git merge-base HEAD master` 也跑不起来。以前执行会话为了过形状闸门，拿空树值 `da39a3ee5e6b4b0d3255bfef95601890afd80709` 之类的 sha 顶上（2026-11-24 HSE-001 记的就是这一串），后来的单又拿前一张的 head 当 `base_sha`（HSE-002 的 `base_sha` 就是 HSE-001 那个编出来的 `head_sha`），于是库里留下两棵在任何登记仓库里都不存在的树，`list_unmerged` 把它们判进「真待合并」，巡检每轮报一遍永远合不了的单。
 
-| 字段 | 形状 | 上下限 | 常见的错法 |
-| --- | --- | --- | --- |
-| `artifacts` | **字符串数组**，每项是一个项目内相对路径 | 1–20 条 | 传 `[{"path": "result.md"}]`（对象数组）、传 `"[\"result.md\"]"`（一整段 JSON 字符串）、传 `"result.md"`（单个字符串）、把绝对路径写进去 |
-| `evidence` | **字符串数组**，每项一条自检说明（跑过什么命令、看到什么） | 1–100 条 | 传空数组、把整段自检写成一个多行字符串 |
-| `risks` | **字符串数组**，每项一条已知风险 | 0–100 条（没有就给 `[]`，字段不能省） | 省略字段、写 `""`、写 `null` |
-| `head_sha` | 40 位十六进制（大小写都收，存小写） | 恰好 40 字符 | 传短 sha（`git rev-parse --short HEAD`）、传 `HEAD`、传分支名 |
-| `base_sha` | 同上，「这棵树从哪分叉」 | 恰好 40 字符 | 传「填表那一刻 master 的 sha」（rebase 之后语义不同，PRD-013 D5） |
+**做法（执行会话照着填）：**
 
-三个数组字段的每一项另有一条长度闸门：非空、不超过 4000 字符。
+1. 先确认项目根真的是非 git 目录：在提交处的工作树里跑 `git rev-parse --git-dir`，退出非零且输出带 `not a git repository`。跑得起来（找到了仓库）就照常填两棵树，不许用 `non_git` 绕过。
+2. `submit_result` 里传 `repo_kind: "non_git"`，**不要传** `head_sha` / `base_sha`。两列在库里是 NULL——NULL 表示「没有这棵树」，这是事实。
+3. **禁止占位 sha**：不要用空树值 `da39a3ee…`，也不要拿上一张单的 head 充 `base_sha`，更不要用全 0。`repo_kind: "non_git"` 带了任何一个 sha 都会报 `INVALID_INPUT` 且一行不写——校验挡的就是「用假 sha 冒充真树」。
 
-**最小 payload**（把 `<…>` 占位换成真值、`--request-id` 用唯一编号就能跑）：
+**验收时怎么核。** 这类单没有分支可核，验收会话核三件事：项目根跑 `git rev-parse --git-dir` 确实非零；`get_ticket` 的 `submissions[-1]` 里 `head_sha` 与 `base_sha` 都是 `null`；成果文件的 SHA-256 与提交记下的一致（`fingerprint()` 照旧按工作树里的字节算，不需要 git）。
 
-```json
-{
-  "project_id": "<项目 id>",
-  "ticket_id": "<单号>",
-  "attempt_id": "<claim_ticket 回执里的 attempt_id>",
-  "session_id": "<这条执行会话的 id>",
-  "summary": "改完了什么、边界在哪",
-  "artifacts": ["kit/docs/protocol.md"],
-  "evidence": ["python tools/run_tests.py → 末行 结果：全部通过"],
-  "risks": [],
-  "head_sha": "<git rev-parse HEAD 的 40 位十六进制>",
-  "base_sha": "<git merge-base HEAD master 的 40 位十六进制>"
-}
-```
+**验收后归位。** 非 git 项目没有合并这一步：`merge_ticket` 要一条可核对的树，这里没有。协调会话在验收通过（`done`）后调 `archive_ticket`，理由写「非 git 项目、无可合并的树，验收已通过」；`archived` 不进 `list_unmerged`，不需要也不允许补合并记录。2026-11-24 的 HSE-001 / HSE-002 就是这样收口的（两张单都 `done`、无 `merges` 行、项目根 `%USERPROFILE%/Documents/Heartopia/台词演进研究` 不是 git 仓库，按「验收过、但账对不上」归档）。
 
-```bash
-python -m task_center --db <中心库> submit_result --request-id <唯一编号> --input <JSON文件>
-```
-
-**首次提交没有 `master` 可对**：`git worktree add .worktrees/<单号> -b ticket/<单号> master` 出来的新仓库如果只有一次初始提交（没有父提交），`git merge-base HEAD master` 直接失败——`base_sha` 无处可取。这时填 `git rev-parse HEAD` 的输出，它与 `head_sha` 相同：这棵树确实没有从别处分叉。两条都跑得通的取法：
-
-```bash
-git rev-parse HEAD                                            # head_sha
-git merge-base HEAD master 2>/dev/null || git rev-parse HEAD  # base_sha：没有 master 分支时就与 head 相同
-```
-
-`base_sha` 仍然必填、仍然是 40 位十六进制（PRD-013 R7 / AC12）：缺它一样报 `INVALID_INPUT` 且一行不写。这一节给的是「填什么」，不是「可以不填」。
-
-**形状错只报一条，但一次说全**：`artifacts` / `evidence` / `risks` / `head_sha` / `base_sha` 五项的期望形状都写在同一份 `message` 里，后面跟 `Wrong now:` 与这一次不合格的每一项（例如 `artifacts[0] is dict, not a string`）。撞一次就能把五项一起改对，不用逐项试到第五次。
+**`list_unmerged` 三栏对这类单的预期表现。** `tools/unmerged_scan.py` 先看项目根的仓库状态：git 当面确认「不是仓库」且两棵树都是 NULL 的，归「仓库无改动」，依据写「项目根不是 git 仓库（<路径>），两棵树都是 NULL，没有可合的树」；非 git 项目却带着 sha（编的占位值）留在「真待合并」让人看见；git 问不出来（不在、读不动、超时）也退回「真待合并」。所以一张按协议填 `repo_kind: "non_git"` 的单**不会**落进「真待合并」，`next_action` 也不会再派「合并这张单」。「历史豁免」一栏也不收它：那不是「合并流程之前的直接提交」，是「从来没有仓库」。
 
 ### 派发的载体
 
 第 2 步的「新开一个会话」有明确所指，不是任选一种独立上下文。载体优先级写死：
 
-1. **项目普通会话**（默认）：`cindy_helper` 的 `send_to_session` 不传 `target_session_id` 即新建任务，指定 `project_path` 与 `title`。新会话出现在该项目的会话列表里，可以点开、追问、自己提交成果——2026-11-17 的真实演练用的就是这一种（`tasks/real-session-drill.md`）。
+1. **项目普通会话**（默认）：`cindy_helper` 的 `send_to_session` 不传 `target_session_id` 即新建任务，指定 `project_path` 与 `title`。新会话出现在该项目的会话列表里，可以点开、追问、自己提交成果——2026-11-17 的真实演练用的就是这一种（`tasks/real-session-drill.md`）。**新建时显式指定模型，不再依赖继承**：create 模式里传 `model: "deepseek/deepseek-v4.1-flash"` 与 `effort: "high"`（模型 id 用 `list_available_models` 核对，本机经 `xd` provider 提供的精确 id 就是它；`effort` 按目标 provider + model 的支持档位校验，不匹配时创建前失败、不静默降级）。旧的「派发不指定模型、一律继承当前会话模型」口径作废：协调会话现在常驻 k3、模型会随讨论阶段变化，继承会把 k3 带进执行会话，而执行会话要的是稳定、便宜、跑出过基线的 flash。`model` / `effort` 只在 create 模式生效，jump 模式（带 `target_session_id` 投递）忽略，不改既有会话的模型。
 2. **一次性独立上下文子任务**：宿主确实没有新建项目会话的能力时才用，并且必须在 `submit_result` 的 `evidence` 里写明「载体是一次性子任务，无法追问」。
 3. **两者都没有**：停下来告诉人，协调会话自己执行仍然不被接受（见「会话标识与工单标识」）。
 
@@ -461,7 +494,7 @@ git merge-base HEAD master 2>/dev/null || git rev-parse HEAD  # base_sha：没�
 
 ### 发消息之前：看队列、只写指针、同类合并
 
-`send_to_session` 的入参里没有 steer、合并或优先级——它的完整 `properties` 只有 `message` / `target_session_id` / `title` / `working_dir` / `project_path` / `device` / `model`，没有一样能表达「先看看目标会话在干什么」。所以发之前那三个判断只能在调用方做；不做，代价就留在目标的队列里：`ed91af11`（CHM-042）的队列堆了 4–5 条，其中一条让绑定的 attempt 在入队两分钟后就 superseded；`bc5c116f`（CHM-030）一条消息在队列里躺了 18 小时没被消费，最后靠另开新会话绕过。
+`send_to_session` 的入参里没有 steer、合并或优先级——它的 `properties` 只有 `message` / `target_session_id` / `title` / `working_dir` / `project_path` / `device` / `model`（create 模式另有 `agent_kind` / `effort` / `fast` / `use_worktree` 等执行配置），没有一样能表达「先看看目标会话在干什么」。所以发之前那三个判断只能在调用方做；不做，代价就留在目标的队列里：`ed91af11`（CHM-042）的队列堆了 4–5 条，其中一条让绑定的 attempt 在入队两分钟后就 superseded；`bc5c116f`（CHM-030）一条消息在队列里躺了 18 小时没被消费，最后靠另开新会话绕过。
 
 三步，每一步都能当场判一次：
 
@@ -506,7 +539,20 @@ git merge-base HEAD master 2>/dev/null || git rev-parse HEAD  # base_sha：没�
 
 - 写入用 `merge_ticket`，只接受 `state=done` 的工单；同一工单只允许一条，第二次返回 `ALREADY_MERGED`。`commit` 是合并提交（`--no-ff` 生成的那个），`target_branch` 是它进入的分支，`tests` 是合并前跑过的测试结论。三项都是自报字符串，数据库不能验证它们真的发生过。
 - 读取用 `list_unmerged`：列出已验收但没有合并记录的工单。**历史工单 AW-004~AW-016 是直接在 master 上做的，没有 `merges` 行，因此会出现在清单里**——这是事实，不是待修的缺陷；要处理的是「现在这张到底合没合」，不是替历史补记录。
-- 读取用 `list_unmerged`：列出已验收但没有合并记录的工单。**历史工单 AW-004~AW-016 是直接在 master 上做的，没有 `merges` 行，因此会出现在清单里**——这是事实，不是待修的缺陷；要处理的是「现在这张到底合没合」，不是替历史补记录。
+
+**三种现场不能挤在一条结论里（AW-147）。** `done` 但没有 `merges` 行一共有三种，`tools/auto_merge.py --list` 分三栏列：
+
+| 栏 | 判据 | 怎么办 |
+| --- | --- | --- |
+| 真待合并 | 仓库里还有一棵没合进去的树（分支在，或提交的 head 与目标不同） | `--ticket` 合并；合并已成功、只差记录时 `--record-only` |
+| 仓库无改动 | 本次尝试没造出提交（提交的 `head_sha` 与 `base_sha` 相同），**且**仓库里没有 `ticket/<单号>` 分支；**或**项目根不是 git 仓库（`repo_kind: "non_git"`，两棵树为 NULL，AW-151） | 不合并：没有可合的树。非 git 项目验收后走 `archive_ticket`；其余不写合并记录、不进 `archived` |
+| 历史豁免 | 最新提交没有 `head_sha`（合并流程建立之前的直接提交） | 见下文「历史豁免清单」 |
+
+「仓库无改动」这一栏的依据逐行印在单号后面（哪两个 sha 相同、哪个分支不存在，或项目根不是 git 仓库），读到这一行不必再跑一遍 git 才知道结论从哪来。它挡的是最具体的那个死循环：这类单一进 `done` 就被算成「真待合并」，而合并对它一步都走不动（第 2 步：源分支不存在），于是 `next_action` 每轮都报「合并 X」，后面排着的单永远派不出去。判定只在能确认时成立（`tools/unmerged_scan.py`，只跑 `git rev-parse`）：`head_sha == base_sha` 且没有分支，或者 git 当面确认项目根不是仓库（AW-151）；git 读不动、分支还在、两个 sha 不等或 `base_sha` 为空，任一条都归回「真待合并」——把不确定的单藏进另一栏，比多列一行糟得多。
+
+**判据不拿目标分支的 head 当参照（AW-148）。** 以前用「`head_sha` 等于 `master` 的 head」，那个值随每一张单合并往前走：AW-146 提交时 `head_sha = base_sha = 2e911e84`，与当时的 master head 相等，判得对；AW-147 一合进 master（head 变 5aa136d），它当场退回「真待合并」，`next_action` 又开始派那个走不通的动作。换成 `head_sha == base_sha` 之后，说的是这条提交自己的事实（交上去的还是分叉点那棵树），master 怎么动都不影响结论。别把它放宽成「只要没有分支就算仓库无改动」：一张真提交过、分支又被删的单会被藏进这一栏，真失败从此看不见。
+
+**为什么不写一条合并记录把它清出清单。** `merges` 记的是「合到了哪个提交」，这类单能写进去的只能是当时 master 那个 head，也就是别人的合并提交——一条指向别人合并提交的记录，会把「它真的合过」写成查到的事。反过来把它塞进 `archived` 也不行：`archived` 的语义是「做完了但账对不上」，这类单的账是清楚的，混进去会让归档失去区分力。所以它的账位就是这一栏本身。（**非 git 项目是例外**：它从来没有仓库可合，按上面「非 git 项目怎么交」一节，验收通过后由协调会话 `archive_ticket`。这一栏把两类「没有可合的树」并在一起，但归位动作不同。）
 
 **这条记录是谁写的、当时闸门跑了哪几步，必须一眼分得开（AW-116 / AW-127）。** `merges` 自 schema 16 起多四列：`source`、`verified_by`（`manual` / `backfill` 两档真跑过的核对命令，路径一律正斜杠，例如 `git -C D:/cindy-harmony-app merge-base --is-ancestor 8885cdc7 master`——反斜杠在 Git Bash 里会被当转义吃掉）、`verified_at` 与 `note`。存量行的四列是 NULL，那是「那时没有这一项」。
 
@@ -539,7 +585,7 @@ python tools/backfill_merges.py --apply     # 只给 A 档写记录，并刷新�
 具体动作由 `tools/auto_merge.py` 执行，不靠人记得：
 
 ```bash
-python tools/auto_merge.py --list                    # 每轮开工先看：done 但没有合并记录的工单（分「真待合并 / 历史豁免」两栏）
+python tools/auto_merge.py --list                    # 每轮开工先看：done 但没有合并记录的工单（分「真待合并 / 仓库无改动 / 历史豁免」三栏）
 python tools/auto_merge.py --ticket AW-xxx           # 预演 → 测试 → --no-ff 合入 master → merge_ticket
 python tools/auto_merge.py --ticket AW-xxx --dry-run # 只预演与跑测试，不碰目标分支、不写记录
 python tools/auto_merge.py --ticket AW-xxx --record-only # 只用于「合并已成功、只差记录」：测试 → 补记录 → 清理
@@ -603,6 +649,7 @@ git tag v0.5.3 && git push origin v0.5.3                        # 合并记录�
 
 **分支与工作树留到合并记录写成功之后再删。** 这是「先合并、后清理」在发布单上的样子：删早了 `auto_merge` 连源分支都找不到，那时能做的只有 `--record-only`，而它要求的等式已经被删掉的分支带走了。
 
+
 ### 别的项目怎么告诉闸门「我的测试怎么跑」
 
 缺省是 `python tools/run_tests.py`（本工作区的约定，`ai-workspace` 与 `cindy-dashboard` 都有这一份）。没有这一份的项目在 `tools/merge-projects.json` 里按 `project_id` 登记一条，`cindy-harmony` 就是这么登记的：
@@ -625,7 +672,7 @@ git tag v0.5.3 && git push origin v0.5.3                        # 合并记录�
 
 **老提交（`head_sha` 为 NULL）怎么合。** schema 9 之前写下的提交没有这一列，库里有 140 多条这样的提交与几十张已验收未合并的老单。它们不能静默放行（那等于把「没核对过」写成「核对过」），也不能全堵死（那样老单永远合不了），所以留了一个明文出口：`reviewed_sha` 传字面量 `unverified`，它按原样写进 `merges.reviewed_sha`，于是「这单没记录过 sha」在库里查得到。`tools/auto_merge.py` 遇到这种单会自己这么传，并在输出里打一条警告；有 `head_sha` 的单传 `unverified` 会被拒（INVALID_INPUT）——那是把一个可核对的事自称没核对。历史合并记录不追溯：已有的 `merges` 行 `reviewed_sha` 就是 NULL，它如实表示那时还没有这一列。
 
-`--record-only` 也做同一道比对，它比的是那次合并合进来的那一支（`parent2` 指向的源分支 tip）：不等同样拒绝收口，由人决定这张单怎么算。它的拒绝理由会点名「分支 tip」与「被验收的 sha」并把两个完整 sha 都打出来——这种现场多半是落点错了（提交直接落在目标分支上），处置见上面的「发布类工单的提交落在哪里」。
+`--record-only` 也做同一道比对，它比的是那次合并合进来的那一支（`parent2` 指向的源分支 tip）：不等同样拒绝收口，由人决定这张单怎么算。
 
 ### 合并动了 schema 的工单：先对齐库，再写记录
 
@@ -673,7 +720,7 @@ python tools/auto_merge.py --ticket AW-058 --record-only
 
 接着三件事：
 
-1. **找到那次合并提交。** 在目标的祖先里按 `parent2 == 源分支 tip` 逐行比对 `git rev-list --parents <目标>`。找不到（当时是快进合并，根本没有合并提交）就非零退出、不写记录——记录里的那个 `commit` 必须是真合过的那一个，不能拿 HEAD 顶替；输出里同时给出要找的分支 tip 与目标分支当前的提交。
+1. **找到那次合并提交。** 在目标的祖先里按 `parent2 == 源分支 tip` 逐行比对 `git rev-list --parents <目标>`。找不到（当时是快进合并，根本没有合并提交）就非零退出、不写记录——记录里的那个 `commit` 必须是真合过的那一个，不能拿 HEAD 顶替。
 2. **在当前检出跑一遍全量测试**，绿了才写记录，`tests` 就是这次实跑的汇总行。红就非零退出，不写记录、不清理工作树与分支；回退点写在输出里：`pre-merge-<工单号>`，没有这个 tag 时就是合并提交的第一个父提交。
 3. **记录写成功之后清理**：`git worktree remove .worktrees/<工单号>`（存在才删）、`git branch -d ticket/<工单号>`。清理失败只报告、不改退出码——那时该做的是人工收拾，不是重跑（重跑会被第 1 步的 `ALREADY_MERGED` 挡回来）。工具不会 `--force` 删工作树：里面还有未提交改动时，该保留的正是那部分。
 
@@ -724,6 +771,7 @@ python tools/auto_merge.py --ticket AW-058 --record-only
 后两列的时间来自 `attempts.created_at` 与这张单 `events` 的最大 `created_at`（一条事件都没有时用尝试开始时间兜底），都是带时区的 ISO 8601，能直接算间隔。stdout 只有这张表：汇总行「共 N 张在途，其中 M 张最后落库超过 45 分钟」与停住判红都走 stderr，所以按行解析不会被最后一行绊倒。
 
 - `--json`：同一份清单打成一整块 JSON（`result.items` 每条都带 `started_at` 与 `last_event_at`，另有 `stalled_count` / `stalled_minutes` / `stalled`）。stdout 上不会再有表格行。
+- **一张单读不出来，不再让整份清单读不出来（AW-163）。** 分两层：库本身读不了（schema 版本不对、文件损坏、连不上）仍按上面的口径打「读库失败」并非零退出；只是某一张单的详情读不出来时，表格照旧打印其余在途单，stderr 逐条点名「读不出来：单 <单号>（<项目>）<错误码>：<报文>」，汇总行末尾补一句「另有 M 张读不出来，已逐条点名」，并因此非零退出——`--json` 的 `result.unreadable` 与 `reason` 里同样有它。判据是「少掉的单不能变成一片空白，也不能变成没事」：以前任何一张单的 `get_ticket` 失败都会抛 `CenterUnreadable`，一行 `INVALID_INPUT` 就让整张在途清单消失（`HSE-007` 的一条旧提交把 `evidence` 存成了一句纯文本，走的就是这条路）。
 - `--stalled-minutes N`：给定额外阈值并按它判红。有在途单最后事件时间超过 N 分钟时打印「疑似停住」并以退出码 1 结束；没超过退 0。不传这个参数时只统计（汇总行照旧按 45 分钟报数）而不判红：这条命令同时是「开工前查有没有人在做」，它一旦因为别人在跑就恒为 1，钩子和日常流程会把它当噪声跳过。
 
 ### `python tools/project_doctor.py`
@@ -820,10 +868,12 @@ git -c core.hooksPath=<某工作树>/.githooks commit -m "..."
 
 - DB_NOT_INITIALIZED：数据库不存在，核对唯一中心位置，不自动新建备用库。
 - PROJECT_MISMATCH / SESSION_MISMATCH：核对项目或会话绑定。
-- ROOT_MISMATCH：给的 root 与已登记的不一致（同一个 project_id 指向第二个目录，或 root 已属于另一个 project_id）。root 是身份，改不靠开单，先 `unregister_project` 再重登；这次调用不改任何已有记录。（只是显示名写错了不走这条路：用 `rename_project`，有工单的项目撤不掉。）
+- ROOT_MISMATCH：给的 root 与已登记的不一致（同一个 project_id 指向第二个目录，或 root 已属于另一个 project_id）。root 是身份，改不靠开单：搬了目录用 `relocate_project` 迁登记（有工单也能迁），项目下还没有工单时也可以 `unregister_project` 再重登；这次调用不改任何已有记录。（只是显示名写错了用 `rename_project`。）
 - STALE_REVISION / STALE_ATTEMPT：读取当前状态，不能提交旧执行结果。
 - STALE_SUBMISSION / ALREADY_REVIEWED：`review_dispatched` 只认最新那条提交，且已经判过的提交不再派第二个验收人；按 `get_ticket` 的 `submissions[-1]` 与 `reviews` 重读一遍再标。
-- STALE_PRD / ARTIFACT_CHANGED：需求或成果改变（成果被删除或移出项目也统一报 ARTIFACT_CHANGED）；明确修订或核对后恢复再提交。
+- STALE_PRD / ARTIFACT_CHANGED：需求或成果改变（成果被删除或移出项目也统一报 ARTIFACT_CHANGED）；明确修订或核对后恢复再提交。`ARTIFACT_CHANGED` 的消息点名是哪份文件、哪个键变了（`sha256` / `size`）；成果文件在检出里找不到时报的是同一条消息，带内层原因（`FILE_NOT_FOUND` 之类）。
+- ARTIFACT_KEYS：`submissions.artifacts` 的某一项键集合不是 `path` / `sha256` / `size` 三键（多一个 `role` 也算），或整项不是对象。消息点名哪条提交、第几项、多出/缺少哪个键。**它是形状错，不是成果被改过**——不要照着 `ARTIFACT_CHANGED` 的处置去「恢复后重新提交」，先看那一行是怎么来的（正常提交产不出这种形状）。存量行用 `python tools/invariants.py` 一次点名。
+- TICKET_CANCELLED：这张单已经取消，`claim_ticket` / `submit_result` / `recover_ticket` 都不接受，一行不写。取消是单向门（不产生新尝试、不推 `revision`、不收结果、不能恢复或重开）；要把这件事接着做就新建一张单，取消原因读 `events` 里最后一条成功 `cancel_ticket` 的 `result.reason`。这条判据**排在 `STALE_REVISION` / `STALE_ATTEMPT` 之前**，所以带着旧编号或旧版本号来也会拿到它。
 - REQUEST_CONFLICT：请求编号被用于不同参数，查清原请求，不随意换编号重做副作用。
 - CONFLICT / INVALID_STATE：任务已被领取、已提交、已结束，或存在唯一性冲突。
 - SELF_REVIEW：换用没有执行过该工单的独立验收会话。

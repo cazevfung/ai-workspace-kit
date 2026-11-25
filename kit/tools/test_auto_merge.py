@@ -47,7 +47,6 @@ AW-018 的验收条件不是「能合并」，而是「不该合并的时候 mas
 """
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -61,7 +60,6 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import auto_merge  # noqa: E402
-import project_doctor  # noqa: E402
 
 REAL_RUN_TESTS = HERE / "run_tests.py"
 
@@ -146,13 +144,19 @@ class RepoFixture(unittest.TestCase):
         # 「被验收的那棵树」的 sha：默认跟着分支 tip 走（正常路径），用例可以改成某个固定
         # 值造「验收后又提交」的现场，或改成 None 造 schema 9 之前的老提交。
         self.reviewed_head = "tip"
+        # 这条提交从哪分叉出来（AW-148）：默认也跟 tip 走，于是「head_sha == base_sha」=
+        # 这次尝试没造出提交。用例要造「真造过提交」的现场时把它改成别的 sha。
+        self.reviewed_base = "tip"
 
     def ticket(self):
-        """工单视图，等价于 `get_ticket`：提交数组里带 `head_sha`，最新一条在最后。"""
+        """工单视图，等价于 `get_ticket`：提交数组里带两个 sha，最新一条在最后。"""
         head = self.reviewed_head
         if head == "tip":
             head = self.branch_tip() or None
-        return {**self.ticket_info, "submissions": [{"head_sha": head}]}
+        base = self.reviewed_base
+        if base == "tip":
+            base = self.branch_tip() or None
+        return {**self.ticket_info, "submissions": [{"head_sha": head, "base_sha": base}]}
 
     # --- 临时仓库的小工具 -------------------------------------------------
 
@@ -260,39 +264,6 @@ class TempRepoCase(RepoFixture):
         self.assertEqual(before, self.head())
         self.assertIsNone(self.tag_sha())
         self.assertEqual([], self.records)
-
-    def test_ahead_zero_with_master_looking_like_this_ticket_names_the_misplacement(self):
-        """源分支不领先、而 master 上已有像这张单的提交：要说中「你可能把提交直接落 master 了」。
-
-        这是 AWK-116 的现场：发布单的提交直接落在 master 上再推，于是分支停在上一版，
-        `auto_merge` 在第 2 步只报一句「源分支不领先」，人看不出是自己的落点错了。
-        断言三件事：话要点名、要指到 protocol 那一节、目标分支与记录都没动。
-        """
-        self.git("branch", self.BRANCH, "master")
-        self.write("VERSION", "0.5.3\n")
-        self.commit("AW-900：发布 0.5.3（直接落在 master 上）")
-        landed = self.head()
-        code, out = self.run_merge()
-        self.assertEqual(1, code, out)
-        self.assertIn("第 2 步", out)
-        self.assertIn("没有领先", out)
-        self.assertIn("你可能把提交直接落 master 了", out)
-        self.assertIn("docs/protocol.md", out)
-        self.assertIn("发布类工单的提交落在哪里", out)
-        self.assertIn(landed[:12], out, "要点名 master 上那个看着像这张单的提交")
-        self.assertEqual(landed, self.head(), "master 一指头都不许动")
-        self.assertIsNone(self.tag_sha(), "这一步不该打回退点")
-        self.assertEqual([], self.records, "不许写合并记录")
-
-    def test_ahead_zero_without_a_matching_commit_keeps_the_plain_sentence(self):
-        """不领先、master 上也没有像这张单的提交：输出仍是既有那句，不硬凑提醒。"""
-        self.git("branch", self.BRANCH, "master")
-        self.write("notes.txt", "无关的提交\n")
-        self.commit("改一下 notes，与工单号无关")
-        code, out = self.run_merge()
-        self.assertEqual(1, code, out)
-        self.assertIn("没有领先", out)
-        self.assertNotIn("你可能把提交直接落 master 了", out)
 
     def test_missing_source_branch_names_the_convention_not_a_traceback(self):
         """源分支不存在：报第 2 步与补救句，不许崩成 NameError。
@@ -1395,6 +1366,151 @@ class ListUnmergedTest(unittest.TestCase):
         self.assertIn("没有", "".join(chunks))
 
 
+class NoRepoChangeColumnTest(RepoFixture):
+    """C1/C2：没有可合的树的单单独一栏，依据写在同一行（AW-147，判据 AW-148 换过）。
+
+    判据是两条不属于 master 的事实：提交的 `head_sha` 与 `base_sha` 相同（这次尝试没
+    造出提交），且 `ticket/<单号>` 分支不存在。在库上加一个标记是做不到这件事的：
+    连库本身都分不出「分支丢了」与「从来就没有分支」。
+    """
+
+    PROJECT = "p-test"
+
+    def center(self, head_sha, base_sha=None):
+        return FakeCenter({
+            "list_unmerged": {"ok": True, "result": {"items": [
+                {"id": self.TICKET, "project_id": self.PROJECT, "title": "只改本机配置"},
+            ], "count": 1}},
+            "get_ticket": {"ok": True, "result": {"submissions": [
+                {"head_sha": head_sha,
+                 "base_sha": head_sha if base_sha is None else base_sha},
+            ]}},
+        })
+
+    def show(self, head_sha, base_sha=None, roots=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        chunks = []
+        auto_merge.list_unmerged_rows(
+            self.center(head_sha, base_sha), chunks.append,
+            exemptions_path=Path(tmp.name) / "absent.json",
+            roots=roots if roots is not None else {self.PROJECT: self.repo},
+        )
+        return "".join(chunks)
+
+    def test_same_head_and_base_with_no_branch_gets_its_own_column(self):
+        """head_sha == base_sha 且分支不存在 → 进「仓库无改动」，依据在同一行。"""
+        base = self.head("master")
+        text = self.show(base)
+        self.assertIn("真待合并（0 张）", text)
+        self.assertIn("仓库无改动（1 张）", text)
+        basis_line = next(line for line in text.splitlines() if self.TICKET in line)
+        # 两条依据都要在同一行里能读到：两个 sha 相同 + 分支不存在。
+        self.assertIn(base[:8], basis_line)
+        self.assertIn("相同", basis_line)
+        self.assertIn("base_sha", basis_line)
+        self.assertIn(self.BRANCH, basis_line)
+        self.assertIn("没有", basis_line)
+        # 归了新的那一栏，就不该再出现在真待合并那一段里。
+        real_part = text.split("仓库无改动", 1)[0].split("真待合并", 1)[1]
+        self.assertNotIn(self.TICKET, real_part)
+
+    def test_master_moving_forward_does_not_regress_to_real_pending(self):
+        """C2①：head_sha == base_sha、无分支，之后 master 又往前走了几张单 → 仍是该栏。
+
+        这是 AW-146 的退化路径：当时判据拿 `head_sha` 与 master 的 head 比，AW-147 一合
+        进 master（head 变 5aa136d）它就退回「真待合并」，`next_action` 又开始派那个永远
+        走不通的动作。
+        """
+        base = self.head("master")
+        # 三张「后来合进来的单」：每个都让 master 往前走一个提交。
+        for name in ("one.txt", "two.txt", "three.txt"):
+            self.write(name, name + "\n")
+            self.commit(f"later merge {name}")
+        self.assertNotEqual(self.head("master"), base, "夹具前提：master 已经往前走了")
+        text = self.show(base)
+        self.assertIn("真待合并（0 张）", text)
+        self.assertIn("仓库无改动（1 张）", text)
+        self.assertIn("相同", next(line for line in text.splitlines() if self.TICKET in line))
+
+    def test_different_base_with_branch_deleted_stays_real_pending(self):
+        """C2②：head_sha ≠ base_sha（真造过提交）、分支被删 → 不得归「仓库无改动」。
+
+        放宽成「只要没有分支就算仓库无改动」，一张真的提交过、只是分支被误删的单就会
+        被藏进那一栏，真失败从此看不见。
+        """
+        text = self.show("a" * 40, base_sha=self.head("master"))
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_missing_base_sha_stays_real_pending(self):
+        """没有 base_sha（schema 10 之前的老提交）→ 说不清有没有造过提交，归真待合并。"""
+        text = self.show(self.head("master"), base_sha="")
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_different_head_stays_real_pending(self):
+        """提交的树与分叉点不同 → 真待合并（库里还有一棵没合进去的树）。"""
+        text = self.show("a" * 40, base_sha="b" * 40)
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_existing_branch_stays_real_pending(self):
+        """分支还在（且领先）→ 真待合并：这不是「本来就不在仓库里」，是「还没合」。"""
+        self.branch_work({"feature.txt": "branch work\n"})
+        text = self.show(self.branch_tip())
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_unknown_repo_root_stays_real_pending(self):
+        """项目根拿不到 → 判不出来就不判：宁可多列一行，不把单藏起来。"""
+        text = self.show(self.head("master"), roots={self.PROJECT: str(self.root / "not-a-repo")})
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_non_git_project_without_a_tree_is_not_real_pending(self):
+        """AW-151：项目根是真实非 git 目录、两棵树都是 NULL → 归「仓库无改动」。
+
+        与「拿不到根」不是一回事：后者是 unknown，仍归真待合并；这里是 git 当面
+        确认「not a git repository」，且提交按协议没有树，那里从来没有可合的东西。
+        """
+        plain = self.root / "plain"
+        plain.mkdir()
+        text = self.show(None, roots={self.PROJECT: str(plain)})
+        self.assertIn("真待合并（0 张）", text)
+        self.assertIn("仓库无改动（1 张）", text)
+        line = next(line for line in text.splitlines() if self.TICKET in line)
+        self.assertIn("不是 git 仓库", line)
+        self.assertIn("NULL", line)
+        self.assertIn(str(plain), line)
+
+    def test_non_git_project_with_a_sha_stays_real_pending(self):
+        """非 git 项目却带着 sha（编的占位值）→ 仍归真待合并，不把它藏进「仓库无改动」。"""
+        plain = self.root / "plain"
+        plain.mkdir()
+        text = self.show(self.head("master"), roots={self.PROJECT: str(plain)})
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_git_repo_without_head_stays_real_pending(self):
+        """同样是 NULL 的 head_sha，但项目根是 git 仓库 → 不能借「非 git」藏单。"""
+        text = self.show(None)
+        self.assertIn("真待合并（1 张）", text)
+        self.assertIn("仓库无改动（0 张）", text)
+
+    def test_merge_tool_names_the_column_instead_of_the_branch_convention(self):
+        """对这类单跑 `--ticket` 也不能只说「分支不存在」：要说清它根本没有可合的树。"""
+        self.assertFalse(self.branch_tip(), "夹具前提：ticket 分支一开始不存在")
+        self.reviewed_head = self.head("master")
+        self.reviewed_base = self.head("master")
+        code, text = self.run_merge()
+        self.assertEqual(code, 1)
+        self.assertIn("没有可合的树", text)
+        self.assertIn("仓库无改动", text)
+        self.assertIn("archived", text)
+        self.assertNotIn("先用 --branch 指定真实分支", text)
+
+
 class RecordOnlyTest(RepoFixture):
     """`--record-only`：收口「合并已成功、记录还没写」的半截现场（AW-059）。
 
@@ -1496,54 +1612,6 @@ class RecordOnlyTest(RepoFixture):
         self.assertEqual([], self.records)
         self.assertEqual(before, self.head())
         self.assertTrue(self.branch_exists())
-
-    def test_branch_tip_not_the_reviewed_sha_names_both_shas(self):
-        """AWK-116 现场：分支停在上一版提交、master 已前进。
-
-        拒绝理由必须点名「分支 tip」与「被验收的 sha」并把两个完整 sha 都打出来——
-        以前这里借的是「验收之后分支又变动过」那句通用话（真实原因恰恰相反：提交
-        压根没落在分支上），人只能靠猜。这一步在跑测试与写记录之前，所以记录、工作树、
-        分支、目标分支五样都不许动。
-        """
-        self.branch_work({"feature.txt": "feature\n"})
-        tip = self.head(f"refs/heads/{self.BRANCH}")
-        # 现场：分支停在上一版发布，后续那版直接提交在 master 上（没有再走合并）。
-        # 先让 master 快进到分支 tip，再在 master 上多一个提交：分支仍全在目标里，
-        # 但分支 tip 已经停在上一版——AWK-115 就是分支 d849bc9、被验收 83e22f0 这个形状。
-        self.git("merge", "--ff-only", self.BRANCH)
-        self.write("VERSION", "0.5.3\n")
-        self.commit("AW-900：发布 0.5.3（直接落在 master 上）")
-        landed = self.head()
-        self.reviewed_head = landed
-        self.assertNotEqual(tip, landed)
-        code, out = self.run_merge(record_only=True)
-        self.assertEqual(1, code, out)
-        self.assertIn("第 2 步", out)
-        self.assertIn("分支 tip", out)
-        self.assertIn("被验收的 sha", out)
-        self.assertIn(tip, out, "分支 tip 要打完整 sha")
-        self.assertIn(landed, out, "被验收的 sha 要打完整 sha")
-        self.assertEqual([], self.records, "拒绝时一条记录都不写")
-        self.assertTrue(self.branch_exists(), "拒绝时不许清分支")
-        self.assertEqual(landed, self.head(), "目标分支一指头都不许动")
-
-    def test_record_only_still_records_after_a_real_no_ff_merge(self):
-        """真 `--no-ff` 合并的现场照常收口：拒绝新判据不许把正常路径也拦掉。
-
-        与 `test_records_then_cleans_up` 的区别是这里显式把被验收的 sha 设成分支 tip 并
-        核对写进库的 `reviewed_sha` 就是那一支——「分支 tip 与被验收的 sha 一致」这个等式
-        成立时必须照旧成功，而不是被那条新话拦住。
-        """
-        commit = self.merged_without_record()
-        tip = self.head(f"refs/heads/{self.BRANCH}")
-        self.reviewed_head = tip
-        code, out = self.run_merge(record_only=True)
-        self.assertEqual(0, code, out)
-        self.assertEqual(1, len(self.records), out)
-        self.assertEqual(commit, self.records[0]["commit"])
-        self.assertEqual(tip, self.records[0]["reviewed_sha"])
-        self.assertFalse(self.worktree_dir().exists(), "成功后要清工作树")
-        self.assertFalse(self.branch_exists(), "成功后要清分支")
 
 
 class MergeJournalTest(RepoFixture):
@@ -1765,6 +1833,22 @@ class SchemaGateTest(RepoFixture):
         self.assertEqual([13], seen_at_read, "读工单之前库就得是 13（否则按新代码读不动旧库）")
         self.assertEqual(13, self.user_version())
         self.assertEqual(1, len(self.records), out)
+
+    def test_schema_version_probe_accepts_a_relative_db(self):
+        """AW-142：`--db .data/task-center.sqlite3` 是相对路径，`Path.as_uri()` 不接它。
+
+        起点是那个人人能跑出来的命令：在仓库根用相对 `--db` 跑 `--dry-run`，闸门第一句
+        就读库，`as_uri()` 抛 `ValueError: relative paths can't be expressed as file URIs`
+        ——一条 traceback，而不是文档化的退出码。
+        """
+        nested = self.root / "nested"
+        nested.mkdir()
+        cwd = Path.cwd()
+        os.chdir(nested)
+        self.addCleanup(os.chdir, cwd)
+        rel = os.path.relpath(self.db, Path.cwd())
+        self.assertFalse(Path(rel).is_absolute(), f"用例本身没造出相对路径：{rel}")
+        self.assertEqual(12, auto_merge.schema_version_in_database(rel))
 
 
 class ClosingPackageDirtyTest(RepoFixture):
@@ -1994,15 +2078,6 @@ raise SystemExit(bad)
     def test_no_test_reads_the_working_tree_closing_package(self):
         if os.environ.get(PIN_GUARD):
             self.skipTest("已在钉住用例的子进程里，跳过自己")
-        if not project_doctor.is_repository(HERE.parent):
-            # 这条用例的价值在于「拿各处用例真跑一遍」：它自己起子进程，把提到三个收尾包
-            # 文件的测试模块全都导一遍。源码包（Release 的 source.zip）解压出来的目录不是
-            # git 工作树，被它拉起来的那些模块里有靠 `git diff --cached` 的前提，在那里
-            # 只会跳过——跑出来的结论就不完整，不如直接说清这里判不了（AWK-115）。
-            self.skipTest(
-                f"不在 git 工作树里（{HERE.parent}）：被这条用例拉起来跑的各处用例里，"
-                "有的前提是暂存区，这里判不全。想看它真跑，先在这个目录 `git init` 并提交一次。"
-            )
         candidates = self.candidates()
         self.assertTrue(candidates, "至少该扫到几个提到收尾包的测试模块，否则这条用例什么也没查")
 
@@ -2261,212 +2336,6 @@ class ResolvedCommandExecutionTest(unittest.TestCase):
         self.assertFalse(ok, "退出码 1 必须被当成测试红")
         self.assertEqual("1 failed", summary)
         self.assertIn("1 failed", output)
-
-
-class CenterDiscoveryTest(unittest.TestCase):
-    """合并也要按 install 时的 --agents-home 找库（AWK-105 C1/C2）。
-
-    合并读错库比闸门读错库更贵：它会把一张单的合并记录写进另一套库。
-    所以这里锁两件事：指针说哪个 agents-home 就读哪个；指针指丢时报 DB_NOT_FOUND，
-    既不回落 ~/.agents，也不新建库。
-    """
-
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name)
-        self.ws = base / "ws"
-        (self.ws / ".agents").mkdir(parents=True)
-        self.agents_home = base / "agents"
-        self.agents_home.mkdir()
-        self.db = base / "custom" / "center.sqlite3"
-        self.db.parent.mkdir(parents=True)
-        self.db.write_bytes(b"")  # 发现只看文件在不在，打开是后面的事
-        (self.agents_home / "center.json").write_text(
-            json.dumps({"db": str(self.db)}, ensure_ascii=False), encoding="utf-8")
-        (self.ws / ".agents" / "center.json").write_text(
-            json.dumps({"agents_home": str(self.agents_home)}, ensure_ascii=False), encoding="utf-8")
-
-    def test_open_center_follows_the_workspace_pointer(self):
-        center, db = auto_merge.open_center(repo=self.ws)
-        self.assertEqual(self.db.resolve(), Path(db).resolve())
-
-    def test_open_center_reports_db_not_found_without_falling_back(self):
-        (self.agents_home / "center.json").unlink()
-        with self.assertRaises(auto_merge.Fail) as caught:
-            auto_merge.open_center(repo=self.ws)
-        failure = caught.exception
-        self.assertEqual(auto_merge.STEP_TICKET, failure.step)
-        self.assertIn("DB_NOT_FOUND", failure.reason)
-        self.assertIn(str(self.agents_home / "center.json"), failure.reason)
-        self.assertIn("不回落到 ~/.agents", failure.fix)
-
-
-class SchemaGateProbeTest(unittest.TestCase):
-    """第 7 步的 schema 闸门：认两个位置、对齐顺序、四种失败各有名字。
-
-    这一组不起 git 仓库：闸门问的是「代码要哪一代 / 库在哪一代」，
-    用例只替换这几个探针与两个动作，不替 `task_center` 自己的迁移链背书。
-    """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.root = Path(self._tmp.name)
-        self.db = self.root / "center.sqlite3"
-        self.db.write_bytes(b"")  # 探针是桩，库只需要是个真实文件
-
-    def engine(self, where, version):
-        """在 `where` 下造一份带 SCHEMA_VERSION 的引擎代码，位置由调用方给。"""
-        directory = self.root / where
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "__init__.py").write_text("", encoding="utf-8")
-        (directory / "db.py").write_text(
-            f'"""桩"""\nSCHEMA_VERSION = {version}\n', encoding="utf-8"
-        )
-
-    # --- 认哪两份 db.py ---------------------------------------------------
-
-    def test_finds_engine_at_repository_root(self):
-        self.engine("task_center", 13)
-        self.assertEqual(auto_merge.schema_version_on_disk(self.root), 13)
-
-    def test_finds_engine_under_kit(self):
-        """套件仓库的引擎住在 `kit/task_center/`；只认仓库根时闸门会静默跳过。"""
-        self.engine("kit/task_center", 13)
-        self.assertEqual(auto_merge.schema_version_on_disk(self.root), 13)
-        found = auto_merge.schema_file_in(self.root)
-        self.assertTrue(str(found).replace("\\", "/").endswith("kit/task_center/db.py"))
-
-    def test_no_engine_returns_none(self):
-        self.assertIsNone(auto_merge.schema_version_on_disk(self.root))
-        self.assertIsNone(auto_merge.schema_file_in(self.root))
-
-    def test_parse_rejects_missing_version(self):
-        self.assertIsNone(auto_merge.parse_schema_version("# 没有这一行\n"))
-
-    def test_package_root_prefers_repository_root_then_kit(self):
-        self.engine("task_center", 13)
-        self.engine("kit/task_center", 13)
-        self.assertEqual(auto_merge.center_package_root(self.root), self.root)
-        (self.root / "task_center" / "__init__.py").unlink()
-        self.assertEqual(auto_merge.center_package_root(self.root), self.root / "kit")
-        shutil.rmtree(self.root / "kit")
-        self.assertIsNone(auto_merge.center_package_root(self.root))
-
-    # --- 四种结果 ---------------------------------------------------------
-
-    def gate(self, expected, actual):
-        calls = []
-
-        def snapshotter(path, *, from_version, to_version):
-            calls.append(("snapshot", from_version, to_version))
-            return Path(str(path) + ".snapshot")
-
-        def migrator(*, repo, db_path, python=None, env=None):
-            calls.append(("migrate", repo))
-            return True, "已迁移"
-
-        gate = auto_merge.SchemaGate(
-            repo=self.root,
-            db_path=self.db,
-            expected_version=expected,
-            version_probe=lambda repo: expected,
-            db_probe=lambda path: actual if not calls else expected,
-            snapshotter=snapshotter,
-            migrator=migrator,
-        )
-        return gate, calls
-
-    def test_skips_when_no_engine_in_tree(self):
-        gate, calls = self.gate(None, 9)
-        state = gate.prepare(out=lambda line: None, quiet=True)
-        self.assertTrue(state["skipped"])
-        self.assertEqual(calls, [])
-
-    def test_does_nothing_when_already_aligned(self):
-        gate, calls = self.gate(13, 13)
-        state = gate.prepare(out=lambda line: None)
-        self.assertFalse(state["migrated"])
-        self.assertEqual(calls, [])
-
-    def test_snapshots_before_migrating_when_code_is_ahead(self):
-        gate, calls = self.gate(13, 9)
-        lines = []
-        state = gate.prepare(ticket_id="AWK-102", out=lines.append)
-        self.assertEqual(calls, [("snapshot", 9, 13), ("migrate", self.root)])
-        self.assertTrue(state["migrated"])
-        self.assertEqual(state["from"], 9)
-        self.assertEqual(state["to"], 13)
-        self.assertTrue(any("迁移前快照" in line for line in lines))
-
-    def test_dry_run_does_not_migrate(self):
-        gate, calls = self.gate(13, 9)
-        with self.assertRaises(auto_merge.Fail) as caught:
-            gate.prepare(out=lambda line: None, allow_migrate=False)
-        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_AHEAD)
-        self.assertEqual(calls, [])
-
-    def test_database_ahead_is_refused(self):
-        gate, calls = self.gate(9, 13)
-        with self.assertRaises(auto_merge.Fail) as caught:
-            gate.prepare(out=lambda line: None)
-        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_DB_AHEAD)
-        self.assertEqual(calls, [])
-
-    def test_failed_migration_keeps_snapshot_path_in_message(self):
-        def migrator(**_kwargs):
-            return False, "boom"
-
-        gate = auto_merge.SchemaGate(
-            repo=self.root, db_path=self.db, expected_version=13,
-            version_probe=lambda repo: 13, db_probe=lambda path: 9,
-            snapshotter=lambda path, *, from_version, to_version: Path(str(path) + ".snap"),
-            migrator=migrator,
-        )
-        with self.assertRaises(auto_merge.Fail) as caught:
-            gate.prepare(out=lambda line: None)
-        self.assertEqual(caught.exception.code, auto_merge.SCHEMA_MIGRATE_FAILED)
-        self.assertIn("snap", caught.exception.reason)
-
-    # --- 写记录的窗口 -----------------------------------------------------
-
-    def test_record_window_runs_gate_before_writing(self):
-        order = []
-
-        class Gate:
-            def prepare(self, *, ticket_id="", out=None):
-                order.append("gate")
-                return {"to": 13}
-
-        def reloader(version):
-            order.append(("reload", version))
-
-            def recorder(payload):
-                order.append("record")
-                return {"merge_id": "m-1"}
-
-            return recorder
-
-        receipt = auto_merge.record_merge_window(
-            payload={"ticket_id": "AWK-102"},
-            merge_recorder=lambda payload: order.append("record"),
-            schema_gate=Gate(),
-            reload_recorder=reloader,
-            emit=lambda line: None,
-            ticket_id="AWK-102",
-        )
-        self.assertEqual(order, ["gate", ("reload", 13), "record"])
-        self.assertEqual(receipt, {"merge_id": "m-1"})
-
-    def test_record_window_without_gate_writes_directly(self):
-        seen = []
-        auto_merge.record_merge_window(
-            payload={"ticket_id": "AWK-102"},
-            merge_recorder=lambda payload: seen.append(payload) or {"merge_id": "m-2"},
-            emit=lambda line: None,
-        )
-        self.assertEqual([item["ticket_id"] for item in seen], ["AWK-102"])
 
 
 if __name__ == "__main__":

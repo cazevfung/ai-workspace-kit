@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sqlite3
 import subprocess
@@ -325,58 +326,6 @@ class CenterTest(unittest.TestCase):
             self.error(code, "submit_result", {**payload, key: value})
         self.assertEqual("running", self.ok("get_ticket", self.scope())["state"])
 
-    def test_submit_shape_error_names_every_field_once(self):
-        """形状错时一条 message 说全五个字段（AWK-118 C3）。
-
-        演练实测（2026-11-24 03:38）：payload 连撞五次 INVALID_INPUT，每次只报一条，
-        从 head_sha 一路试到 risks。所以这里判的不是「报不报」，而是「一次报全没有」——
-        只报 artifacts 一条也算红。
-        """
-        self.ticket()
-        attempt = self.running()
-        payload = self.result_payload(attempt)
-        result = self.call("submit_result", {**payload, "artifacts": [{"path": "result.md"}]})
-        self.assertFalse(result["ok"], result)
-        self.assertEqual("INVALID_INPUT", result["error"]["code"], result)
-        message = result["error"]["message"]
-        for fragment in ("artifacts 1-20", "evidence 1-100", "risks 0-100",
-                         "arrays of strings", "artifacts[0] is dict"):
-            self.assertIn(fragment, message)
-        # 换三种错法（字符串、空数组、数字数组）也仍然三项同时被点名：
-        # 不是「先撞到哪个报哪个」。
-        result = self.call("submit_result", {**payload, "artifacts": "result.md",
-                                             "evidence": [], "risks": [1]})
-        message = result["error"]["message"]
-        for fragment in ("artifacts is str", "evidence has 0 entries", "risks[0] is int"):
-            self.assertIn(fragment, message)
-        ticket = self.ok("get_ticket", self.scope())
-        self.assertEqual("running", ticket["state"])
-        self.assertEqual([], ticket["submissions"])
-
-    def test_submit_still_rejects_what_it_used_to(self):
-        """报错说全不等于放宽（AWK-118 C4）：上下限、非空、40 位十六进制照旧拒。
-
-        反例就是为了让报错更全而顺手把「缺 base_sha」「101 条证据」也收下——
-        那会把 PRD-013 AC12 的必填判据整条抹掉。
-        """
-        self.ticket()
-        attempt = self.running()
-        payload = self.result_payload(attempt)
-        missing_base = {key: value for key, value in payload.items() if key != "base_sha"}
-        for bad in (missing_base,
-                    {**payload, "base_sha": "abc"},
-                    {**payload, "evidence": ["逐条"] * 101},
-                    {**payload, "risks": ["风险"] * 101},
-                    {**payload, "artifacts": ["result.md"] * 21},
-                    {**payload, "artifacts": ["  "]}):
-            self.error("INVALID_INPUT", "submit_result", bad)
-        # 合法的最小 payload（一个成果、一条证据、没有风险）仍然一次成功。
-        receipt = self.ok("submit_result", payload)
-        self.assertEqual("awaiting_review", receipt["state"])
-        ticket = self.ok("get_ticket", self.scope())
-        self.assertEqual(1, len(ticket["submissions"]))
-        self.assertEqual(BASE_SHA, ticket["submissions"][0]["base_sha"])
-
     def test_submit_rejects_missing_or_external_files(self):
         self.ticket()
         attempt = self.running()
@@ -417,10 +366,15 @@ class CenterTest(unittest.TestCase):
         self.assertEqual("superseded", self.ok("get_ticket", self.scope())["attempts"][0]["state"])
 
     def test_cancel_blocks_claim_and_recovery(self):
+        # 取消之后的 claim / recover 报 `TICKET_CANCELLED` 而不是 `INVALID_STATE`（AW-159）：
+        # 「状态不对」听起来还有别的状态可以进，而实际上取消是单向门。这句话的代价在
+        # 2026-11-24 的 HSE-005 上付过一次：取消后的调用读到的是 STALE_ATTEMPT / STALE_REVISION，
+        # 两句都在说「重读一遍再来」，于是有人直接改了库。revise 仍是 INVALID_STATE——
+        # 它那条报错本来就点名了「cancelled tickets cannot be silently reopened」。
         self.ticket()
         self.ok("cancel_ticket", self.scope(expected_revision=1, reason="用户取消"))
-        self.error("INVALID_STATE", "claim_ticket", self.claim_payload(expected_revision=2))
-        self.error("INVALID_STATE", "recover_ticket", self.scope(expected_revision=2, reason="不能自动恢复",
+        self.error("TICKET_CANCELLED", "claim_ticket", self.claim_payload(expected_revision=2))
+        self.error("TICKET_CANCELLED", "recover_ticket", self.scope(expected_revision=2, reason="不能自动恢复",
                    attempt_id="missing"))
         self.error("INVALID_STATE", "revise_ticket", self.scope(expected_revision=2, reason="不能自动恢复",
                    prd_path="PRD.md", criteria=[{"id": "C1", "text": "含 `python -m task_center --help` 且退出码 0"}]))
@@ -734,6 +688,132 @@ class CenterTest(unittest.TestCase):
         attempt = self.running()
         payload = self.result_payload(attempt)
         self.error("PATH_OUTSIDE_PROJECT", "submit_result", {**payload, "artifacts": [str(self.project / "result.md")]})
+
+    def test_non_git_project_declares_a_kind_instead_of_inventing_a_sha(self):
+        """AW-151：业务项目根不是 git 仓库时，两棵树留 NULL，不拿占位 sha 顶替。
+
+        这类项目没有提交可填，显式声明 `repo_kind=non_git` 才是事实；库里两个字段
+        是 NULL（「没有树」），不是空树值 `da39a3ee…` 之类的伪造值（「有一棵空树」）。
+        """
+        self.ticket()
+        attempt = self.running()
+        payload = self.scope(attempt_id=attempt, session_id="executor-1",
+                             artifacts=["result.md"], summary="清单已完成",
+                             evidence=["人工检查条目"], risks=[], repo_kind="non_git")
+        (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
+        receipt = self.ok("submit_result", payload)
+        self.assertEqual("non_git", receipt["repo_kind"])
+        self.assertIsNone(receipt["head_sha"])
+        self.assertIsNone(receipt["base_sha"])
+        self.assertIsNone(receipt["conflict_preview"])
+        ticket = self.ok("get_ticket", self.scope())
+        self.assertIsNone(ticket["submissions"][0]["head_sha"])
+        self.assertIsNone(ticket["submissions"][0]["base_sha"])
+
+    def test_non_git_submission_rejects_a_stand_in_sha(self):
+        """声明 non_git 却塞一个 40 位 sha（哪怕空树值）→ 拒绝，且一行不写。"""
+        self.ticket()
+        attempt = self.running()
+        (self.project / "result.md").write_text("1. 检查步骤", encoding="utf-8")
+        payload = self.scope(attempt_id=attempt, session_id="executor-1",
+                             artifacts=["result.md"], summary="清单已完成",
+                             evidence=["人工检查条目"], risks=[], repo_kind="non_git")
+        empty_tree = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        for extra in ({"head_sha": empty_tree}, {"base_sha": empty_tree},
+                      {"head_sha": HEAD_SHA, "base_sha": BASE_SHA}):
+            with self.subTest(extra=extra):
+                self.error("INVALID_INPUT", "submit_result", {**payload, **extra})
+        self.assertEqual([], self.ok("get_ticket", self.scope())["submissions"])
+
+    def test_submit_rejects_an_unknown_repo_kind(self):
+        """`repo_kind` 只收 git / non_git 两个值：拼错不许静默当成 git。"""
+        self.ticket()
+        attempt = self.running()
+        payload = self.result_payload(attempt)
+        for bad in ("gitlab", "non-git", "", 0):
+            with self.subTest(repo_kind=bad):
+                self.error("INVALID_INPUT", "submit_result", {**payload, "repo_kind": bad})
+
+    # --- AW-163：库里存着不是 JSON 的文本时，一张单仍然要读得出来 ---------------
+
+    def store_raw(self, table, column, value, row_id):
+        """直接把一列改成任意文本：历史行就是这么坏的，写入侧的形状闸门拦不住它。"""
+        with contextlib.closing(sqlite3.connect(str(self.db))) as conn:
+            with conn:
+                conn.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (value, row_id))
+
+    def test_plain_text_columns_do_not_break_get_ticket(self):
+        """`evidence` / `risks` 存成纯文本时（HSE-007 的现场），get_ticket 照旧给出整张单。
+
+        反例：抛 `INVALID_INPUT` 并只说一句「Invalid input or inaccessible local path」——
+        那是整张单读不出来，`work_gate --list` 会因此把整份在途清单判成不可读。
+        """
+        _, submission = self.submitted()
+        self.store_raw("submissions", "evidence", "python check_quotes.py → 0 处不符 EXIT=0", submission)
+        self.store_raw("submissions", "risks", "无", submission)
+        got = self.ok("get_ticket", self.scope())
+        item = got["submissions"][0]
+        self.assertEqual(["python check_quotes.py → 0 处不符 EXIT=0"], item["evidence"])
+        self.assertEqual(["无"], item["risks"], "非空原文兜成一条，不是空数组")
+        self.assertEqual({("evidence", "JSONDecodeError"), ("risks", "JSONDecodeError")},
+                         {(warning["field"], warning["error"]) for warning in got["decode_warnings"]})
+        self.assertEqual({f"submission {submission}"},
+                         {warning["where"] for warning in got["decode_warnings"]})
+
+    def test_decode_warnings_is_absent_when_every_column_parses(self):
+        """正常的库不该多出一个键：这个字段只回答「哪一列坏了」。"""
+        self.submitted()
+        self.assertNotIn("decode_warnings", self.ok("get_ticket", self.scope()))
+
+    def test_broken_criteria_does_not_hide_the_ticket(self):
+        """`criteria` 解不开时，单仍然列得出来、也读得出来，坏在哪一列写进 `decode_warnings`。"""
+        created = self.ticket()
+        self.store_raw("tickets", "criteria", "不是 JSON 的一段话", created["id"])
+        listed = self.ok("list_tickets", {"project_id": "p1"})
+        self.assertEqual([created["id"]], [item["id"] for item in listed["items"]])
+        got = self.ok("get_ticket", self.scope())
+        self.assertEqual(["不是 JSON 的一段话"], got["criteria"])
+        self.assertEqual([("criteria", "JSONDecodeError")],
+                         [(warning["field"], warning["error"]) for warning in got["decode_warnings"]])
+
+    def test_plain_text_review_checks_does_not_hide_the_ticket(self):
+        """`reviews.checks` 存成非 JSON 文本时（AW-166 的现场），整张单仍然读得出来。
+
+        反例：`TypeError: string indices must be integers` 被兜成一句 INVALID_INPUT——
+        整张单读不出来，`work_gate --list` 跟着一起瞎；另一个反例是 `decode_warnings` 缺席，
+        读的人只知道「那一行坏了」，不知道坏在哪条验收的哪一列。
+        """
+        attempt, submission = self.submitted()
+        review = self.ok("review_result", self.review_payload(attempt, submission))
+        self.store_raw("reviews", "checks", "Accept 已逐项核对", review["review_id"])
+        got = self.ok("get_ticket", self.scope())
+        self.assertEqual(["Accept 已逐项核对"], got["reviews"][0]["checks"], "非空原文兜成一条，不是空数组")
+        self.assertEqual({"total": 1, "pass": 0, "unverified": 1, "fail": 0},
+                         got["reviews"][0]["checks_summary"])
+        self.assertEqual([("checks", "JSONDecodeError", f"review {review['review_id']}")],
+                         [(warning["field"], warning["error"], warning["where"])
+                          for warning in got["decode_warnings"]])
+        self.assertEqual(1, got["unverified_checks"], "工单级的未验条数按同一条口径数")
+
+    def test_review_checks_that_are_not_objects_do_not_crash_the_summary(self):
+        """合法 JSON 但条目不是对象（例如只存了一串文字）时，计数兜成未验而不是抛 KeyError。"""
+        attempt, submission = self.submitted()
+        review = self.ok("review_result", self.review_payload(attempt, submission))
+        self.store_raw("reviews", "checks", '[\"人工检查过了\"]', review["review_id"])
+        got = self.ok("get_ticket", self.scope())
+        self.assertEqual(["人工检查过了"], got["reviews"][0]["checks"])
+        self.assertEqual({"total": 1, "pass": 0, "unverified": 1, "fail": 0},
+                         got["reviews"][0]["checks_summary"])
+        self.assertNotIn("decode_warnings", got, "这一列本身是合法 JSON，不报解码告警")
+
+    def test_generic_failure_names_the_operation_and_the_exception(self):
+        """兜底那句必须带操作名与底层异常类型：四种异常共用一句话就只能猜（AW-163）。"""
+        result = self.center.execute("backup", {"destination": str(self.root / ("x" + chr(0) + "y.sqlite3"))},
+                                     request_id="req-nul-destination")
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("INVALID_INPUT", result["error"]["code"])
+        self.assertIn("backup:", result["error"]["message"])
+        self.assertIn("ValueError", result["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ class CheckerCase(unittest.TestCase):
     def test_real_tree_passes(self) -> None:
         code, payload, output = self.run_check()
         self.assertEqual(code, 0, output)
-        self.assertEqual(payload["node_count"], 30, output)
+        self.assertEqual(payload["node_count"], 31, output)
         self.assertEqual(payload["problems"], [], output)
 
     # —— 第一类：skill 名不存在 ——————————————————————————————
@@ -135,6 +135,16 @@ class CheckerCase(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("uncovered-node", self.kinds(payload), output)
         self.assertIn("N28", output)
+
+    def test_deleting_node_31_fails(self) -> None:
+        """N31（发现的问题落在哪张单）删掉之后必须当场红：节点表不齐就不能算过。"""
+        text = (self.root / "nodes.md").read_text(encoding="utf-8")
+        kept = "\n".join(line for line in text.splitlines() if not line.startswith("| N31 |"))
+        (self.root / "nodes.md").write_text(kept + "\n", encoding="utf-8")
+        code, payload, output = self.run_check()
+        self.assertEqual(code, 1, output)
+        self.assertIn("orphan-node", self.kinds(payload), output)
+        self.assertIn("N31", output)
 
 
 if __name__ == "__main__":

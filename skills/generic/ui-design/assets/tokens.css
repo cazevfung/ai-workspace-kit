@@ -1,0 +1,138 @@
+/* UI 设计 token：本文件是整套设计里唯一允许出现色值的地方。
+ *
+ * 用法：把这个文件整体拷进项目，页面与组件只写 var(--color-*)、var(--space-*)、
+ * var(--radius-*)、var(--text-*)、var(--duration-*)，不写十六进制与档外数字。
+ * 浅色放在 :root，深色放在 :root[data-theme="dark"]，两套的键集合完全一致。
+ *
+ * 数值来源：鸿蒙版 Cindy 的 docs/设计系统.md（§2 颜色、§3 间距、§4 圆角、§5 字阶、§6 动效，
+ * 2026-11-21 定稿）。要改数值，先改那份文档，再回来改这里。
+ */
+
+:root {
+  /* 一，颜色：语义名 → 浅色取值 */
+  --color-surface: #F9F9F6;
+  --color-surface-elevated: #FFFFFC;
+  --color-surface-chip: #EAEAE6;
+  --color-surface-chip-strong: #E2E2DC;
+  --color-surface-sunken: #F1F1EC;
+  --color-selected-surface: #FFFFFF;
+  --color-bubble-own-surface: rgba(29, 78, 216, 0.10);
+  --color-divider: rgba(60, 60, 60, 0.14);
+  --color-press-tint: rgba(0, 0, 0, 0.045);
+  --color-border: #CCCCC8;
+  --color-border-strong: #858581;
+  --color-text-primary: #0F0F0F;
+  --color-text-secondary: #4D4D4A;
+  --color-text-tertiary: #686864;
+  --color-link: #1D4ED8;
+  --color-cta: #0F0F0F;
+  --color-cta-text: #FFFFFF;
+  --color-inverse-surface: #0F0F0F;
+  --color-inverse-ink: #FFFFFF;
+  --color-inverse-border: rgba(255, 255, 255, 0.18);
+  --color-success: #2AAE5B;
+  --color-warning: #F3A115;
+  --color-danger: #D91F37;
+  --color-running: #EA6B17;
+  --color-danger-text: #D91F37;
+  --color-danger-surface: rgba(217, 31, 55, 0.08);
+  --color-warning-surface: rgba(243, 161, 21, 0.14);
+  --color-overlay: rgba(38, 38, 38, 0.35);
+  --color-glass-surface: rgba(249, 249, 246, 0.86);
+  --color-glass-sheet: rgba(250, 250, 247, 0.86);
+  --color-glass-highlight: rgba(255, 255, 255, 0.92);
+  --color-bar-solid: #F9F9F6;
+  --color-grabber: #C2C2BE;
+
+  /* 二，间距：六档，档外不出现数字 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* 三，圆角：四档 + 胶囊，一页最多用三种 */
+  --radius-micro: 4px;
+  --radius-card: 16px;
+  --radius-bubble: 20px;
+  --radius-sheet: 24px;
+  --radius-pill: 9999px;
+
+  /* 四，字阶：完整阶梯，组件按角色取档，档外不写字面量 */
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-15: 15px;
+  --text-16: 16px;
+  --text-17: 17px;
+  --text-18: 18px;
+  --text-20: 20px;
+  --text-24: 24px;
+
+  /* 行高：四档层级各配一条，对话正文单独一条 */
+  --leading-h1: 30px;
+  --leading-h2: 26px;
+  --leading-body: 22px;
+  --leading-caption: 18px;
+  --leading-conversation: 26px;
+
+  /* 五，动效：CSS 里只能给 spring 的近似曲线；原生支持 spring 时优先用 spring */
+  --duration-tap: 120ms;
+  --duration-standard: 250ms;
+  --duration-panel: 320ms;
+  --duration-breath: 900ms;
+  --duration-shimmer: 1100ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  /* spring(0.4, 0.8)：按压、面板、展开收起这类「有回弹但不甩」的动作 */
+  --spring-soft: cubic-bezier(0.22, 1.12, 0.36, 1);
+  /* spring(0.35, 0.85)：标准进出场，回弹比 soft 收一档 */
+  --spring-standard: cubic-bezier(0.26, 1.06, 0.4, 1);
+  /* spring(0.42, 0.9)：浮空控件吸附，过冲最小 */
+  --spring-snap: cubic-bezier(0.3, 1.04, 0.44, 1);
+
+  /* 六，层级：只给这五层，不现编数字 */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-bar: 20;
+  --z-sheet: 30;
+  --z-toast: 40;
+  --z-overlay: 50;
+}
+
+/* 深色不是把浅色调暗：两套各自定值，键集合与上面完全一致。 */
+:root[data-theme="dark"] {
+  --color-surface: #121212;
+  --color-surface-elevated: #1E1E1E;
+  --color-surface-chip: #2A2A2A;
+  --color-surface-chip-strong: #2E2E2E;
+  --color-surface-sunken: #1A1A1A;
+  --color-selected-surface: #3A3A3A;
+  --color-bubble-own-surface: rgba(147, 197, 253, 0.20);
+  --color-divider: rgba(255, 255, 255, 0.12);
+  --color-press-tint: rgba(255, 255, 255, 0.06);
+  --color-border: #383838;
+  --color-border-strong: #8A8A8A;
+  --color-text-primary: #EDEDED;
+  --color-text-secondary: #BDBDBD;
+  --color-text-tertiary: #999999;
+  --color-link: #93C5FD;
+  --color-cta: #EDEDED;
+  --color-cta-text: #121212;
+  --color-inverse-surface: #EDEDED;
+  --color-inverse-ink: #121212;
+  --color-inverse-border: rgba(0, 0, 0, 0.10);
+  --color-success: #2AAE5B;
+  --color-warning: #F3A115;
+  --color-danger: #D91F37;
+  --color-running: #EA6B17;
+  --color-danger-text: #FF667A;
+  --color-danger-surface: rgba(217, 31, 55, 0.18);
+  --color-warning-surface: rgba(243, 161, 21, 0.20);
+  --color-overlay: rgba(0, 0, 0, 0.45);
+  --color-glass-surface: rgba(24, 24, 24, 0.62);
+  --color-glass-sheet: rgba(30, 30, 30, 0.80);
+  --color-glass-highlight: rgba(255, 255, 255, 0.14);
+  --color-bar-solid: #121212;
+  --color-grabber: #5C5C5C;
+}

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>反例页：九条规则各犯一次</title>
+<!-- icon-mix：混进第二套图标库 -->
+<link rel="stylesheet" href="font-awesome.css">
+<style>
+  /* color：裸色值写在 :root 之外 */
+  body { background: #FFFFFF; color: #333333; font-size: 14px; }
+
+  /* color + space + radius：色值、间距、圆角都不在档上 */
+  .card { padding: 10px; border-radius: 12px; background: rgb(245, 245, 245); }
+
+  /* space + radius：6 与 14 不在间距档上，18 不在圆角档上 */
+  .bubble { margin: 6px; padding: 14px; border-radius: 18px; }
+
+  /* motion + focus：transition: all、200ms 不在时长档上、outline 被去掉且没有替代 */
+  .btn { transition: all 200ms ease; outline: none; }
+
+  /* motion + reduced-motion：400ms 不在档上，并且整份文件没有 prefers-reduced-motion */
+  .fade { animation: fade 400ms linear infinite; }
+
+  @keyframes fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <!-- glyph：字符图标当图标用 -->
+  <button class="btn">打开菜单 ›</button>
+  <div class="row"><span>更多</span><span>⋯</span></div>
+
+  <!-- glyph：emoji 当图标用 -->
+  <p>状态：✅ 已完成</p>
+</body>
+</html>
