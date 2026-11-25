@@ -18,9 +18,11 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -401,6 +403,83 @@ class InstallRunTest(unittest.TestCase):
         self.assertIn(other, output)
         self.assertIn("--allow-user-config", output)
         self.assertFalse(self.ws.exists())
+
+
+@unittest.skipUnless(INSTALL.is_file(), "装出来的工作区里没有仓库根的 install.py")
+class GitattributesInstallTest(unittest.TestCase):
+    """装出来的工作区里必须有仓库根那份 `.gitattributes`（AWK-120）。
+
+    现场：2026-11-24 06:18 从 `git archive master` 解压装一遍，装出来的工作区里
+    `python tools/run_tests.py` 约 3 项——`test_eol_check` 的 `FreshCloneTest` 两条
+    与 `MissingRuleTest` 一条。原因是 `install.py` 只装 `kit/` 那棵树，仓库根的
+    `.gitattributes` 没跟着走，346 个受管文件报「eol 属性是 unspecified」，
+    而 README 说装完应全绿色。
+
+    三件事分开验，因为它们不是同一件事：文件在、字节相同、规则真的生效。
+    第三条只能拿装出来的工作区自己跑一次 `test_eol_check` 证明——
+    把几条 eol 用例 skip 掉也能让 `run_tests` 变绿，那不是修好。
+    用例只断言「装出来的那棵树能不能过」，不碰 `check_eol` 的判据与 `.gitattributes` 的内容。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        # resolve()：Windows 上临时目录名可能是 8.3 短名，install.py 打印的是长名。
+        cls.root = Path(tmp.name).resolve()
+        cls.ws = cls.root / "ws"
+        cls.agents = cls.root / "agents"
+        cls.git_available = shutil.which("git") is not None
+        cls.git_config = cls.root / "gitconfig"
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        args = [sys.executable, str(INSTALL), "--workspace", str(cls.ws),
+                "--agents-home", str(cls.agents), "--no-skills"]
+        if cls.git_available:
+            # 首次提交要 user.name / user.email，而这条用例不能依赖本机的全局配置：
+            # 用一份临时 gitconfig 顶上，真实的 ~/.gitconfig 一个字节都不动。
+            cls.git_config.write_text(
+                "[user]\n\tname = AWK Test\n\temail = awk@example.com\n", encoding="utf-8")
+            env["GIT_CONFIG_GLOBAL"] = str(cls.git_config)
+        else:
+            args.append("--no-git")
+        cls.result = subprocess.run(args, cwd=str(REPO), capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace", env=env, timeout=600)
+        cls.output = cls.result.stdout + cls.result.stderr
+
+    def test_installed_file_is_byte_identical(self):
+        """文件在，且与仓库根那份同一个 sha256——不是一份长得像的副本。"""
+        self.assertEqual(0, self.result.returncode, self.output[-2000:])
+        source = REPO / ".gitattributes"
+        target = self.ws / ".gitattributes"
+        self.assertTrue(source.is_file(), f"套件根没有 {source}，这条用例失去意义")
+        self.assertIn("行尾声明", self.output, "屏幕上看不出装没装这份文件")
+        self.assertTrue(target.is_file(),
+                        "装出来的工作区里没有 .gitattributes：受管文本的 eol 声明没跟过去")
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),
+                         hashlib.sha256(target.read_bytes()).hexdigest(),
+                         "装过去的 .gitattributes 与套件根那份不是同一份字节")
+
+    def test_installed_workspace_eol_checks_are_green(self):
+        """在装出来的工作区里跑那两组 eol 用例：必须真跑、真绿、不被 skip。"""
+        if not self.git_available:
+            self.skipTest("这台机器上没有 git，装出来的工作区里验不了行尾规则")
+        self.assertEqual(0, self.result.returncode, self.output[-2000:])
+        # 在 <工作区>/tools 下跑：那正是 `run_tests.py` 发现这两组用例的方式
+        # （discover 把 start dir 放上 sys.path），且 `check_eol` 就在同一个目录。
+        process = subprocess.run(
+            [sys.executable, "-m", "unittest",
+             "test_eol_check.FreshCloneTest", "test_eol_check.MissingRuleTest"],
+            cwd=str(self.ws / "tools"), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=900)
+        output = process.stdout + process.stderr
+        self.assertEqual(0, process.returncode, output[-3000:])
+        # 四条：FreshCloneTest 三条 + MissingRuleTest 一条。数目不对时不能说「绿了」——
+        # 少跑一条和修好一条在屏幕上都是 OK。
+        self.assertIn("Ran 4 tests", output, output[-3000:])
+        self.assertIn("OK", output, output[-3000:])
+        self.assertNotIn("skipped", output,
+                         "eol 用例被跳过了：红不是被修的，是被藏起来的")
 
 
 if __name__ == "__main__":

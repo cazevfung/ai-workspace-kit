@@ -18,6 +18,7 @@
 装了什么：
   1. 工作区本体（task_center、tools、docs、tests、PRD 模板、tasks 起步文件）
      以及能拿工作区当参数直接跑的校验脚本（verify/verify_receipt.py）
+     和仓库根的 `.gitattributes`（行尾声明，装到 <工作区>/.gitattributes）
   2. 项目内技能 → <工作区>/.agents/skills
   3. 全部技能 → <agents-home>/skills（已存在的默认跳过，不覆盖）
   4. <agents-home>/center.json（指向本工作区唯一的中心库）
@@ -51,6 +52,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 KIT = HERE / "kit"
+# 仓库根的行尾声明，装到 <工作区>/.gitattributes（AWK-120）。
+# 为什么它必须跟着走：`kit/tools/check_eol.py` 核的是「另一次检出」——`test_eol_check`
+# 克隆一份、用 `core.autocrlf=true` 再检出。声明不装过去，git 眼里就没有这条规则，
+# 那份检出全是 CRLF，346 个文件当场报「eol 属性是 unspecified」。装出来的工作区里
+# `python tools/run_tests.py` 因此红 3 项，而 README 说装完应全绿。
+ROOT_GITATTRIBUTES = HERE / ".gitattributes"
 SKILLS = HERE / "skills"
 VERSION = (HERE / "VERSION").read_text(encoding="utf-8").strip() if (HERE / "VERSION").is_file() else "0.0.0"
 PROJECT_ID = "ai-workspace"
@@ -163,6 +170,23 @@ def copy_tree(src: Path, dst: Path, workspace: str, dry: bool) -> int:
                 pass
         shutil.copy2(path, target)
     return count
+
+
+def copy_gitattributes(workspace: Path, dry: bool) -> Path | None:
+    """把仓库根的 `.gitattributes` 装到工作区根；源文件不在就返回 None。
+
+    按字节复制，不走 `copy_tree` 的模板替换：这份文件里没有 `{{WORKSPACE}}` 占位符，
+    用 `read_text` + `write_bytes` 只会多一层「万一有占位就换了」的解释，也让
+    「装过去的和源文件逐字节相同」这件事不再显然。要改规则仍是改仓库根那一份。
+    """
+    source = ROOT_GITATTRIBUTES
+    if not source.is_file():
+        return None
+    target = workspace / source.name
+    if not dry:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return target
 
 
 def python_ok() -> bool:
@@ -395,6 +419,16 @@ def main(argv=None) -> int:
     step("1/7 复制工作区本体")
     copied = copy_tree(KIT, workspace, workspace_str, dry)
     say(f"   已复制 {copied} 个文件")
+    # 行尾声明与工作区本体同一步：它也得在首次提交之前落盘（第 6 步 `git add -A`），
+    # 否则装出来的仓库第一次提交里就没有这条规则，`test_eol_check` 照样红。
+    attrs = copy_gitattributes(workspace, dry)
+    if attrs is None:
+        warn(f"没有找到 {ROOT_GITATTRIBUTES}；工作区里不会有行尾声明，"
+             "装完跑 run_tests 会报 eol 属性缺失")
+        summary.skip(workspace / ".gitattributes", "套件根没有 .gitattributes",
+                     note="受管文本的换行声明没装，行尾自检会红")
+    else:
+        say(f"   已复制行尾声明：{attrs.relative_to(workspace).as_posix()}（与套件根逐字节相同）")
     summary.did("工作区本体")
     verifiers = copy_workspace_verifiers(workspace, workspace_str, dry)
     say(f"   已复制校验脚本 {len(verifiers)} 个：{', '.join(f'verify/{n}' for n in verifiers)}")

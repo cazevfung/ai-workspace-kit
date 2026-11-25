@@ -49,7 +49,9 @@ echo '{"project_id":"ai-workspace","title":"第一张工单","deliverable":"..."
 `.gitattributes` 把全仓文本钉成 LF（`* text=auto eol=lf`）。只有 `skills/**` 保持 `-text`
 （连「按 LF 存」都不做，一律原字节进出，因为它要与 live 技能目录逐字节一致）。二进制文件由
 `text=auto` 按内容判定，不受转换影响。手工安装的工作区里还多一处 `.agents/skills/skill-routing/index/**`
-快照，同样标 `-text`。
+快照，同样标 `-text`。工作区里这份声明由 `install.py` 从套件仓库根装过来（装完它就在
+`<工作区>/.gitattributes`，与仓库根那份逐字节相同）：漏装的结果是装完跑 `python tools/run_tests.py`
+时 `test_eol_check` 必红——受管文件在另一次检出里全是 CRLF、属性的读出来是 `unspecified`。
 
 这么钉是为了让「检出的字节」等于「库里的 blob」：`task_center/artifacts.py` 记的 sha256
 是**工作树字节**算出来的，同一份内容在 `core.autocrlf=true` 与 `false` 的机器上一个是
