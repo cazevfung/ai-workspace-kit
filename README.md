@@ -27,7 +27,7 @@ English version: [README.en.md](README.en.md)
 
 ## 它是什么
 
-它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 27 个技能，7 个工作区技能加 20 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
+它扮演一个项目经理的角色，做四件事：拆活、派活、盯活、收活。实现上由四部分组成：`task_center/` 是工单核心（纯标准库 + SQLite），管项目、工单、提交、验收与合并记录；`tools/` 是闸门与合并脚本；`AGENTS.md` 是写给 agent 的行为契约；`skills/` 是 29 个技能，7 个工作区技能加 22 个通用技能。它不提升模型能力，它把「谁做、做到什么算完、谁验、凭什么合」变成可查询的记录和会失败的检查。
 
 ### 拆活
 
@@ -129,6 +129,10 @@ graph LR
 | `auto_merge.py` | 手工合并、跳过测试直接合并、有冲突时强行合并 | 合并时 |
 | `wait_audit.py` | 谁在等谁而没人知道：等在验收超 4 小时、**提交后 15 分钟还没有 `sent` 回执**、`done` 没回执、`done` 没合并、`running` 的单执行会话 10 分钟没活动 | 派完活之后的一次只读巡检 |
 | `idle_watch.py` | 主任务里「我在等你一句话」而你不知道：末条是问句或提问卡、之后没人说话 | 想知道哪条会话悬着的时候 |
+| `invariants.py` | 库里那几条不能破的规矩被悄悄破了：同一会话同时挂两张活跃单、`done` 却有开放问题、合并记录指向不存在的提交 | 想确认「库还是对的」时候，随时只读跑一次 |
+| `sleep_audit.py` | 定时任务不是真的在睡：两次运行的间隔与 cron 不匹配、上一次还没跑完就被叫醒 | 配了定时派单之后隔一天回头看 |
+| `dispatch_payload.py` | 派单消息的五块骨架靠人抄：owner、项目根、判据版本、三圈（Why / How / What）漏一节 | 每次派活之前，用它打印 `send_to_session` 的入参 |
+| `unmerged_scan.py` | 「验收过了但没合并」分不清是真待合并、仓库无改动，还是提交直接落在了目标分支上 | `auto_merge.py --list` 拿它做判定，也可以单独只读跑 |
 | `project_doctor.py` | 项目登记了、钩子却没装：`core.hooksPath` 不指向本仓库 `.githooks`、`.worktrees/` 没被忽略、根上没有 `AGENTS.md` | 接一个新项目之后 |
 
 `auto_merge.py` 还有一条容易忽略的规矩：合并提交是「没有工单也能提交」的唯一例外，因为合并发生在验收之后，那一刻工单已经是 `done`。其它提交一字不放。
@@ -208,14 +212,14 @@ python install.py --allow-user-config         # 允许写用户级配置（沙�
 ```bash
 cd ~/ai-workspace
 python tools/work_gate.py --list     # 开工第一条命令
-python tools/run_tests.py            # 应全部通过：tests/ 354 + tools/ 696 = 1050 项，失败 0
+python tools/run_tests.py            # 应全部通过：tests/ 396 + tools/ 739 = 1135 项，失败 0
 python tools/doc_gate.py --all       # 应退出 0
 ```
 
 **从源码包跑测试要先知道一件事。** Release 里的 `*-source.zip` 解压出来**不是 git 工作树**，
 直接 `python tools/run_tests.py` 会看到两项 skip：`test_work_gate` 与 `test_auto_merge` 各有一条
 要读 `git diff --cached`（暂存区），非仓库目录里 git 自己就报错，所以它们跳过并写明原因。
-skip 不等于失败——汇总行仍是「全部通过」。想把 1050 项一条不落地跑完，先在这个目录
+skip 不等于失败——汇总行仍是「全部通过」。想把 1135 项一条不落地跑完，先在这个目录
 `git init` 并提交一次，再跑同一条命令。
 
 装完还要把工作区接进宿主、把业务仓库接进工作区：
@@ -288,14 +292,14 @@ python tools/add_project.py D:/my-project
 
 **为什么这一步不能省**：`tools/auto_merge.py` 的测试命令按三层解——`tools/merge-projects.json` 里按 `project_id` 登记的那一条（优先）→ 目标仓库自己的 `.agents/ticket-config.json`（就是 `add_project.py` 写的这份）→ 缺省的 `python tools/run_tests.py`。所以不配不会静默通过：缺省这一层跑的是本工作区的测试入口，而仓库里没有那份脚本时它报的是 `NO_TEST_COMMAND`（「这个项目没配测试命令」），不是「测试通过」。项目的测试入口与工作区不一样（鸿蒙客户端的 `node tests/*.test.mjs`、抠图实验室的 `pytest tests`）就必须配进去；「没跑测试」长得像「跑过了」才是这一步真正要防的事。
 
-用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1050 项（`tests/` 354、`tools/` 696）。
+用例数以 `run_tests.py` 的汇总行为准，每个 tag 会变；当前套件在隔离的用户级目录（`--agents-home`）下装出来是 1135 项（`tests/` 396、`tools/` 739）。
 这句话是在装出来的现场实测的，不是只在源码树里跑绿的：
 
 ```bash
 # 临时工作区 + 隔离的用户级目录（--agents-home），不碰您自己的 ~/.agents
 DRILL=/tmp/awk104-drill
 python install.py --workspace "$DRILL/ws" --agents-home "$DRILL/home/.agents" --allow-user-config
-cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1050 项
+cd "$DRILL/ws" && python tools/run_tests.py      # 末行应写「结果：全部通过」，合计 1135 项
 python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作区里，不用回源码树找
 ```
 
@@ -305,7 +309,7 @@ python verify/verify_receipt.py --workspace .    # 装完 verify/ 就在工作�
 
 #### 与上游工作区的已知差异
 
-引擎与工具已经同步到工作区当前的状态（中心库 schema 16）：迁移 9–16、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version`、谁开的单（`tickets.requester_session_id`）与回执的消息 id（`notices.message_id`）、现在谁负责收尾（`tickets.owner_session_id`，配套 `take_over_ticket` / `report_notice_failure`）、合并记录的出处四列（`merges.source` / `verified_by` / `verified_at` / `note`，含 `manual` 与 `backfill` 两档当场核对祖先关系）、两个新操作 `archive_ticket`（第十个终态 `archived`）与 `rename_project`、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件，都跟工作区一致，`python kit/tools/auto_merge.py --list` 读同一个库不再报 `SCHEMA_MISMATCH`。工具的缺口也补齐了：`next_action`（含池子报告那一档 `fix_pool`：宽限期内不催、退避 2h→6h→24h、报到第 3 轮升级）、`pool_report`（点名之后落一笔台账）、`check_eol`（行尾自检）、`receipt_payload`、`handover_owner`、`coordinator_state`、`archive_legacy`、`backfill_merges` 与 `tools/merge-projects.json`（按项目配测试命令）都在，`work_gate` 有池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动的背书判据，`close_gate` 按「每条」判第 5 节的落点，`docs/无人值守派单.md`、`docs/schema-shift.md`、`docs/unmerged-exemptions.md`（与 `.json`）也随包，`docs/protocol.md` 整份是工作区那一份（操作表与表下面各节一起搬，只保留套件的 `{{WORKSPACE}}` 占位与 `INPUT_UNREADABLE` 那段）。下面五条是**刻意留着的不一致**：
+引擎与工具已经同步到工作区当前的状态（中心库 schema 16）：迁移 9–16、发号（`projects.next_number`）、`planned` 与依赖边、车次（`batches`）、提交时的冲突预演、`criteria_version`、谁开的单（`tickets.requester_session_id`）与回执的消息 id（`notices.message_id`）、现在谁负责收尾（`tickets.owner_session_id`，配套 `take_over_ticket` / `report_notice_failure`）、合并记录的出处四列（`merges.source` / `verified_by` / `verified_at` / `note`，含 `manual` 与 `backfill` 两档当场核对祖先关系）、两个新操作 `archive_ticket`（第十个终态 `archived`）与 `rename_project`、`review_dispatched`、三档验收（`pass` / `unverified` / `fail`）、`planned` 允许空条件，都跟工作区一致，`python kit/tools/auto_merge.py --list` 读同一个库不再报 `SCHEMA_MISMATCH`。工具的缺口也补齐了：`next_action`（含池子报告那一档 `fix_pool`：宽限期内不催、退避 2h→6h→24h、报到第 3 轮升级）、`pool_report`（点名之后落一笔台账）、`check_eol`（行尾自检）、`receipt_payload`、`handover_owner`、`coordinator_state`、`archive_legacy`、`backfill_merges` 与 `tools/merge-projects.json`（按项目配测试命令）都在，`work_gate` 有池子年龄线（`PLANNED_MAX_DAYS`）与收尾包改动的背书判据，`close_gate` 按「每条」判第 5 节的落点，`docs/无人值守派单.md`、`docs/schema-shift.md`、`docs/unmerged-exemptions.md`（与 `.json`）也随包，`docs/protocol.md` 整份是工作区那一份（操作表与表下面各节一起搬，只额外保留套件的 `{{WORKSPACE}}` 占位、`INPUT_UNREADABLE` 那段、schema 16 命令面的说明，以及「发布类工单的提交落在哪里」那一节——最后这一节写的是套件自己的合并与发版顺序，工作区那份还没有）。下面五条是**刻意留着的不一致**：
 
 1. **PRD 正文只同步了一部分。** 包里现在有 `kit/PRD/PRD-001-工作区使用与工单体系.md` 与 `PRD-010`~`PRD-015` 六份正文（路径与示例已改成套件视角，`kit/PRD/` 下搜不到上游那台机器的本机路径，逐行清单见 `CHANGELOG.md` 的「公开仓库里剩下的本机路径」）。`PRD-002`~`PRD-009` 是这套工具自己的设计史，正文在 `design/PRD/` 下，不进 `kit/PRD/`；引擎注释里出现这些编号时指的是那一份。与工作区仍有一处差别：`PRD-015` 里两条复算命令原来指向工作区的历史轮次表与收尾包，套件不带这些文件，所以那两处写成了「原工作区的第 N 行」而不是可点的 `文件:行号`——否则 `ref_gate` 会把它们当成断链。
 2. **`auto_merge.py` 的测试命令按三层解，比工作区多一层。** 顺序是 `tools/merge-projects.json`（工作区侧一张表）→ 目标仓库自己的 `.agents/ticket-config.json`（`tools/add_project.py` 写的那一份，套件保留了这个入口）→ 缺省的 `python tools/run_tests.py`；三层都没有才报 `NO_TEST_COMMAND`。工作区只有前两层里的第一层。写记录前那道 schema 闸门也在，且**认两个位置**——`task_center/db.py` 与 `kit/task_center/db.py` 都算，因为套件的引擎住在 `kit/` 下，只按仓库根找会让闸门在这个仓库上永远静默跳过（AWK-101 就是这样把 schema 从 9 推到 13 而闸门没响）。
@@ -357,15 +361,16 @@ ai-workspace/
 └── .githooks/             # commit 钩子
 ```
 
-技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.5.1` 共 27 个：
+技能同时装在 `~/.agents/skills`，所以在任何项目里都能被 agent 读到；`v0.6.0` 共 29 个：
 
 - **工作区技能（7）**：`prd-authoring`、`pdsa-workflow`、`ticket-dispatch`、`plan-gate`、`skill-routing`、`shared-resource-identity`、`bootstrap-workspace`
-- **通用技能（20）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
+- **通用技能（22）**：`brainstorming`、`writing-plans`、`executing-plans`、`test-driven-development`、
   `systematic-debugging`、`verification-before-completion`、`code-review-and-quality`、
   `requesting-code-review`、`receiving-code-review`、`merge-latest-branches`、`writing-skills`、
   `shuo-ren-hua`、`dispatching-parallel-agents`、`subagent-driven-development`、
   `resumable-implementation-contracts`、`using-git-worktrees`、`doubt-driven-development`、
-  `planning-and-task-breakdown`、`project-routing`、`handoff-to-workspace`
+  `planning-and-task-breakdown`、`project-routing`、`handoff-to-workspace`、`ui-design`、
+  `video-jerky-repair`
 
 工作区技能里最该先读的是 `skill-routing`：它把每个判断节点归口到一个技能或一条固定动作，归口缺失或引用了不存在的技能，`scripts/check_routing.py` 会当场失败。
 
@@ -437,7 +442,7 @@ python tools/schedule_plan.py --workspace /path/to/你的工作区 --json  # 交
 
 ### 插件：装、启动、它会报出五步计划
 
-仓库里的 `dist/ai-workspace-kit-0.5.1.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
+仓库里的 `dist/ai-workspace-kit-0.6.0.cindy` 是已经打好的包；`python tools/test_plugin_pack.py` 会拆开验：清单、`main.js`、真实图标（1024×1024 PNG）都在包里，图标与清单跟源码一致。
 
 1. **装** —— 在 Cindy 侧边栏「插件」里导入本地包，选中这个文件，确认。**这一步必须由人点**：导入会把插件写进用户目录并启用，Agent 不代点，也不在你没看权限清单时替你确认。装上是本地开发副本，不经过市场审核。
 2. **启动** —— 在任意会话里敲 `$ai-workspace <你的工作区绝对路径>`，或者说「把这条路径加成项目、开一个协调会话」。它会调 `bootstrap`。

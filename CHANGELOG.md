@@ -1,5 +1,38 @@
 # 更新记录
 
+## 0.6.0（2026-11-25）
+
+2026-11-25 发布。**这一版把套件追到工作区源码的当前状态：`D:/AI工作区` 已经又合了二十来张单，而套件停在 0.5.2，`relocate_project`、`invariants`、`sleep_audit`、`dispatch_payload` 这些能力用户一次装都装不到。**
+
+「拿 GitHub 链接一次装完」这句话要重新成立，就得不靠人抄。所以这一版没有逐条搬文件，而是在同步脚本上重跑一遍：`python maintainer/sync_from_origin.py --origin <原工作区>`，它自己把本机路径换成 `{{WORKSPACE}}` 占位符；跑完再跑 `python maintainer/redact_for_public.py`，把同步带进来的真实用户名与会话 id 清掉。两个脚本都能重复跑，结果一样。
+
+### 同步了什么
+
+- **框架代码（`kit/`）**：`task_center` 9 个文件、`tools` 51 个、`tests` 40 个、`examples` 2 个、`docs` 9 份、`.githooks` 1 个，全部换成工作区当前 master 的那一份。对外看得见的新能力：`relocate_project`（换项目根不再需要先撤销登记，有工单也迁得成）、`invariants.py`（库里那几条不能破的规矩只读自检）、`sleep_audit.py`（定时任务是不是真的在睡）、`dispatch_payload.py`（派单消息的五块骨架）、`unmerged_scan.py`（「验收过了但没合并」分三类）、`record_pool_report`、`merge_ticket` 的 `source` / `verified_by` / `verified_at` / `note` 四列、`archive_ticket` 与 `rename_project`、三档验收、`planned` 允许空条件。中心库 schema 仍是 16，这一版不改 schema、不改任何闸门的判定逻辑。
+- **技能（`skills/`）**：通用技能 20 → **22**（新增 `ui-design` 与 `video-jerky-repair`），40 个工作区技能文件按工作区当前版本同步；`bootstrap-workspace` 仍只有套件这一份。合计 29 个技能（22 通用 + 7 工作区）。
+- **设计史（`design/`）**：`design/README.md.origin`、`design/AGENTS.md.origin` 与 `design/PRD/` 下 16 份 PRD 同步到工作区当前版本（`PRD-000` 到 `PRD-015`）；`kit/PRD/` 里套件自己的七份 PRD 不在同步范围（面板那两份归 AWK-122）。
+- **面板（`panel/`）**：**这一版没有改它的内容。** 逐文件核过一遍（`git ls-files` 两边的跟踪清单对撞，40 个文件）：26 个字节相同，10 个只差 `{{WORKSPACE}}` 占位符与行尾，`README.md` 是两份不同的说明（面板那份写的是「装到 `<工作区>/panel` 之后怎么跑」，面板仓库那份写的是那个仓库自己），`app/run-tests.mjs` 与 `app/test/package.json` 是套件侧的测试入口。结论与逐文件比对方式记在 AWK-121 的提交证据里。面板仓库那份 `verify-session-targets.mjs` 写死了本机账号路径，套件这一份把用户目录算成 `%APPDATA%`，所以没有拿面板仓库覆盖它。
+
+### 同步之后手工改回来的四件
+
+同步是「原工作区 → 套件」单向覆盖，而套件有几处改动只存在于套件一侧。直接覆盖会把它们一起抹掉，所以这一版逐件改回来（方向不变，仍是原工作区为准）：
+
+1. `kit/tools/auto_merge.py` 的三层测试命令解析（`tools/merge-projects.json` → 目标仓库自己的 `.agents/ticket-config.json` → 缺省脚本）、`default_target`、`test_timeout_in`，以及「源分支不领先而目标分支上已有像这张单的提交」时那句「你可能把提交直接落 master 了」。工作区那份没有这些，因为它没有 `add_project.py`。
+2. `kit/task_center/__main__.py` 的 `INPUT_UNREADABLE`（读不到 `--input` 指的文件时单独报，带原样的路径）与「直接跑文件」的入口。
+3. `kit/tools/test_eol_check.py` 在套件仓库里的适配：用例克隆的是 git 检出根，扫的是内容根，而在套件仓库里那是两个目录（内容住在 `kit/` 下）。没有这段适配，`kit/` 不是 git 检出这条用例就红。
+4. `kit/docs/protocol.md` 里「发布类工单的提交落在哪里」整节、`INPUT_UNREADABLE` 那段与 schema 16 命令面的说明——`auto_merge` 的那句提示就指向这一节。
+
+### 用例数
+
+`tests/ 396` + `tools/ 739` = **1135 项**，末行「结果：全部通过」。比 0.5.2 的 1012 项多 123 项，全部来自同步进来的用例；新增的四件改动没有自带用例（工作区那份没有对应实现，也就没有对应断言）。
+
+### 发布件
+
+- `VERSION` 与 `plugin/draft/ghost.json` → `0.6.0`。
+- `dist/` 只留 `ai-workspace-kit-0.6.0.cindy`（`0.5.2` 的旧包用 `git rm` 删掉）与源码包 `ai-workspace-kit-0.6.0-source.zip`（由 tag 点的树 `git archive` 生成）。
+- 源码包在非 git 目录里跑测试会看到两条 skip（`test_work_gate` 与 `test_auto_merge` 各一条要读暂存区），skip 不算失败；`test_eol_check` 与 `test_project_config` 现在两种目录都成立。
+- `v0.5.0` / `v0.5.1` / `v0.5.2` 三个已发的 tag 与 Release 都没动：不 `push -f`、不 `tag -f`。
+
 ## 0.5.2（2026-11-24）
 
 2026-11-24 发布。**这一版只修一件事：陌生人拿到源码包跑测试会看到红。**
