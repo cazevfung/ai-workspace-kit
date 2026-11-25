@@ -60,9 +60,13 @@ python -m task_center --db <绝对路径> <operation> --request-id <id> --input 
 '{"project_id":"ai-workspace"}' | Out-File -Encoding utf8 payload.json
 ```
 
+**路指错了不是参数错。** `--input` 指向的文件不存在、是个目录、或没权限读时，命令行层报 `INPUT_UNREADABLE`，`message` 里带**原样的那条路**与系统原因（例如 `读不到输入文件：/tmp/payload.json（No such file or directory）`）；这比「参数不合格」能多告诉你一件事：要改的是路径，不是 JSON 内容。编码、语法、未知字段这三类仍是 `INVALID_INPUT`。核心已经返回的 `error` 由命令行**原句**打印，不再套一层通用文案——冒烟时看到的 `500`、「at most 4000 characters」这类具体数字，就是核心原话。
+
 ## 操作与字段
 
 下表中的字段除明确标注外均为必填。未知字段拒绝，避免拼错后静默忽略。
+
+> **本表是 schema 16 的命令面**（`task_center/db.py` 的 `SCHEMA_VERSION`）。它只讲操作与字段，不搬 PRD 正文：判据为什么这样定、每个错误码背后的现场，在 `PRD-005` / `PRD-013` / `PRD-014` / `PRD-015` 里（那几份还没进套件，见 `README.md` 的「已知差异」）。表与代码不一致时以代码为准：`task_center/core.py` 的 `FIELDS` 是字段闭集，`get_ticket` 实际回的字段就是回执形状。
 
 | 操作 | 输入字段 | 结果与边界 |
 | --- | --- | --- |
@@ -618,6 +622,33 @@ python tools/auto_merge.py --ticket AW-xxx
 ```
 
 工具在临时 worktree 里先合一次并跑**这个项目的测试命令**，绿了才 `git merge --no-ff`；红了一律中止，此时目标分支一动未动。真实合并后还会再跑一次同一个命令，再红就 `git reset --hard pre-merge-<工单号>` 回滚——回退点在合并前就打好了。回退点已存在时看它指向哪里：指向**当前目标分支 head**（上一轮停在第 5 步测试红或第 6 步回滚）就沿用，直接重跑；指向别处才拒，不覆盖旧回退点（`AW-131`）。合并成功后的清理按主检出根算 `.worktrees/<工单号>`，`--repo` 指向工作树时也不拼成 `<工作树>/.worktrees/<工单号>`。
+
+### 发布类工单的提交落在哪里
+
+**一句话：先在 `ticket/<工单号>` 上提交，由 `auto_merge` 合入 master，由合并那一步推，最后才打 tag。**
+
+发布单（发版、打包、改 `VERSION` 与 `CHANGELOG.md` 的那一类）跟普通单走同一条路，一步不少：
+
+```bash
+cd {{WORKSPACE}}
+git worktree add .worktrees/AWK-0xx -b ticket/AWK-0xx master   # 开工
+git -C .worktrees/AWK-0xx commit -m "AWK-0xx：发布 0.5.3"       # 提交落在工单分支上
+python tools/auto_merge.py --ticket AWK-0xx                     # 预演 → 测试 → --no-ff 合入 master → 写合并记录
+git -C {{WORKSPACE}} push origin master                         # 由合并那一步推，推进的是带合并提交的 master
+git tag v0.5.3 && git push origin v0.5.3                        # 合并记录写成功之后才打 tag
+```
+
+**直接落 master 会让两条记录路径同时失效。** 把提交直接 `git commit` 在主检出上再推，看起来更快，代价是「这张单到底合过没有」在库里永远补不上：
+
+1. **`auto_merge --ticket` 停在第 2 步。** 它要「源分支领先目标」，而改动根本没进分支，`rev-list --count master..ticket/AWK-0xx` 是 0，命令还没跑到测试就退出。
+2. **`--record-only` 也拒。** 它要「源分支 tip == 被验收的 sha」，而分支停在上一个版本的提交上，这条等式不成立。2026-11-23 的 AWK-115 就是这个现场：分支停在 `d849bc9960f89711b75daa01c94fa295780d8b34`（0.5.1），被验收的是 `83e22f0b1be7e4bbb9f6bc5d136fbed200597f37`（0.5.2，直接提交在 master 上），两个 sha 都不是同一棵树（`git rev-parse d849bc9 83e22f0` 可核），收口因此一条记录也写不了。0.5.0 / 0.5.1 / 0.5.2 三张单都是这么补记的：只能由人在 `merge_ticket` 的 `manual` 档里写清「哪几步跑了、哪几步没跑」，而这一档每次都要人现场判断「这到底算不算合过」。
+
+工具现在会当面说这件事：源分支不领先、而目标分支上已经有看着像这张单的提交时，`auto_merge` 第 2 步会打出「你可能把提交直接落 master 了」并点名那几个提交、指向本节；`--record-only` 则会点名「分支 tip」与「被验收的 sha」这两个完整 sha。看到哪一种都不是重试能过去的，要做的是把改动重新落在 `ticket/<工单号>` 上再合一次。
+
+**打 tag 之前必须已经有一条 `merges` 行。** tag 与 Release 一旦推出去就收不回来，而 `merges` 是唯一能查「这一版是哪次合并进来的」的记录；先打 tag 再补记录，等于把「没合过」印在版本号上，事后只能靠 tag 的时间戳去反推。`git tag` 之后别急着推：先 `echo '{"project_id":"<项目>","ticket_id":"AWK-0xx"}' | python -m task_center --db {{WORKSPACE}}/.data/task-center.sqlite3 get_ticket`，看一眼 `merges` 非空。
+
+**分支与工作树留到合并记录写成功之后再删。** 这是「先合并、后清理」在发布单上的样子：删早了 `auto_merge` 连源分支都找不到，那时能做的只有 `--record-only`，而它要求的等式已经被删掉的分支带走了。
+
 
 ### 别的项目怎么告诉闸门「我的测试怎么跑」
 

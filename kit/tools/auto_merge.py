@@ -226,13 +226,91 @@ def load_merge_config(config_path=None) -> dict:
     return {"projects": data.get("projects", {})}
 
 
-def resolve_test_plan(project_id: str, config_path=None) -> TestPlan:
-    """按 project_id 查一次「这个项目的测试命令」。没登记就用缺省。"""
+# 项目自己那份配置：`tools/add_project.py` 写进业务仓库的 `.agents/ticket-config.json`。
+# 它比 `merge-projects.json` 早，两边的分工是「工作区侧一张表」与「仓库自己带一份」：
+# 表里登记了就以表为准（新的一层）；没登记时不能把它当不存在——旧安装的项目
+# 只写过这一份，丢掉它等于把已经配好的项目抛回缺省。
+TICKET_CONFIG = Path(".agents") / "ticket-config.json"
+
+
+def ticket_config_in(repo):
+    """读目标仓库自己的 `.agents/ticket-config.json`；没这份文件就返回 None。
+
+    它存在却读不动、或 `test_cmd` 形状不对时当场报，不静默回缺省：那会让人以为
+    登记的测试命令生效了，而实际跑的是另一条。
+    """
+    if repo is None:
+        return None
+    path = Path(repo) / TICKET_CONFIG
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Fail(
+            STEP_PREVIEW,
+            f"读不动项目自己的测试配置 {path}：{exc}。",
+            "把它改回合法 JSON（形状见 `tools/add_project.py`），或删掉它改用缺省。",
+            code=MERGE_CONFIG_INVALID,
+        )
+    if not isinstance(data, dict):
+        raise Fail(
+            STEP_PREVIEW,
+            f"项目自己的测试配置 {path} 顶层必须是对象。",
+            "重跑一次 `python tools/add_project.py <项目>` 重新写一份；闸门不从坏文件往下猜。",
+            code=MERGE_CONFIG_INVALID,
+        )
+    return data
+
+
+def test_timeout_in(repo, fallback: int = 1800) -> int:
+    """项目自己配的测试超时秒数；没配就用 1800（与 `run_tests_in` 的缺省一致）。
+
+    `add_project.py` 写的 `test_timeout` 就是给这一步用的：一跑几分钟的项目
+    不传超时，会在「测试卡住」与「测试真的很久」之间分不开。
+    """
+    local = ticket_config_in(repo) or {}
+    value = local.get("test_timeout")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else fallback
+
+
+def default_target(repo) -> str:
+    """没传 `--target` 时用哪个目标分支：项目配置写了的就用它，否则 `master`。
+
+    这一层是为「不改默认行为」而留的：以前目标分支也是 `ticket-config.json` 里的一项，
+    且 `add_project.py` 仍在写它。读得到就用，读不到整个工具退回以前那个 `master`。
+    """
+    local = ticket_config_in(repo) or {}
+    target = local.get("target_branch")
+    return target if isinstance(target, str) and target.strip() else "master"
+
+
+def resolve_test_plan(project_id: str, config_path=None, repo=None) -> TestPlan:
+    """按 project_id 查一次「这个项目的测试命令」。三层，前面的没有才看后面的。
+
+    1. `tools/merge-projects.json` 的 `projects.<project_id>`（工作区侧一张表）；
+    2. 目标仓库自己的 `.agents/ticket-config.json` 里的 `test_cmd`（add_project 写的）；
+    3. 缺省的 `python tools/run_tests.py`——仓库里没这份脚本时算 `NO_TEST_COMMAND`，不是缺省空跑。
+    """
     origin = "缺省" if not project_id else f"未在 {MERGE_CONFIG.name} 登记"
     config = load_merge_config(config_path)
     entry = config["projects"].get(project_id)
     if entry is None:
-        return TestPlan(project_id, "default", origin=origin)
+        local = ticket_config_in(repo)
+        command = (local or {}).get("test_cmd")
+        if command is None:
+            return TestPlan(project_id, "default", origin=origin)
+        where = f"{Path(repo) / TICKET_CONFIG}"
+        if isinstance(command, str) and command.strip():
+            return TestPlan(project_id, "command", origin=where, command=command)
+        if isinstance(command, list) and command and all(isinstance(part, str) and part for part in command):
+            return TestPlan(project_id, "command", origin=where, command=list(command))
+        raise Fail(
+            STEP_PREVIEW,
+            f"{where} 的 test_cmd 只收非空字符串，或非空且每段都是字符串的数组。",
+            "别写空数组：那样跑起来的是一条空命令，等于没有闸门。",
+            code=MERGE_CONFIG_INVALID,
+        )
     where = f"{MERGE_CONFIG.name} 的 projects.{project_id}"
     if not isinstance(entry, dict):
         raise Fail(
@@ -374,6 +452,30 @@ def git_out(repo, *args, step, env=None) -> str:
 
 def exists(repo, ref, env=None) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", ref, step="", check=False, env=env).returncode == 0
+
+
+def landed_like_this_ticket(repo, target, branch, ticket_id, env=None) -> list[tuple[str, str]]:
+    """目标分支独有的提交里，哪些看着像这张单的（消息含工单号）。
+
+    只读，不写任何东西。用来区分「源分支不领先」的两种现场：改动还没提交，还是提交
+    直接落在了目标分支上。判据只用 git 事实与工单号本身，不去猜作者的意图：
+    消息里出现 `AWK-121` 这种字面量才算，命中不了就返回空列表，调用方照旧报原话。
+    返回 [(完整 sha, 首行标题), ...]，按 git log 的顺序（新的在前）。
+    """
+    if not ticket_id:
+        return []
+    proc = git(repo, "log", "--format=%H%x1f%s", f"{branch}..{target}",
+               step=STEP_CHECKS, check=False, env=env)
+    if proc.returncode != 0:
+        # 两个 ref 有一个读不出来时不该把「不领先」变成另一句话：交给上游判。
+        return []
+    needle = str(ticket_id).casefold()
+    hits = []
+    for line in proc.stdout.splitlines():
+        sha, _, subject = line.partition("\x1f")
+        if sha and needle in subject.casefold():
+            hits.append((sha.strip(), subject.strip()))
+    return hits
 
 
 def _summarise(output: str) -> str:
@@ -1573,6 +1675,21 @@ def _step_checks(repo, target, branch, env, emit, *, ticket_id, require_ahead=Tr
 
     if require_ahead:
         if ahead == 0:
+            landed = landed_like_this_ticket(repo, target, branch, ticket_id, env=env)
+            if landed:
+                detail = "\n".join(f"    {sha[:12]} {subject}" for sha, subject in landed[:5])
+                raise Fail(
+                    STEP_CHECKS,
+                    f"{branch} 没有领先 {target} 的提交（rev-list --count {target}..{branch} = 0），"
+                    f"而 {target} 上已经有看着像这张单的提交：\n{detail}\n"
+                    f"你可能把提交直接落 {target} 了。",
+                    f"发布/改动类工单要先在 ticket/<工单号> 上提交，再由 auto_merge 合入 {target}、"
+                    "由合并那一步推、最后才打 tag（见 docs/protocol.md 的「发布类工单的提交落在哪里」）。"
+                    f"此刻 --record-only 也过不去：它要求 {branch} 的 tip 与被验收的 sha 是同一个提交，"
+                    f"而提交落在 {target} 上时那条等式永远不成立。要把这次改动重新提交到 ticket 分支上"
+                    "再合，不要用 --record-only 顶替一次真实合并。"
+                    f"此时 {target}、回退点、journal、工作树与分支都没有动过。",
+                )
             raise Fail(
                 STEP_CHECKS,
                 f"{branch} 没有领先 {target} 的提交（rev-list --count {target}..{branch} = 0）。",
@@ -2141,7 +2258,7 @@ def _record_only_steps(
 ):
     """`--record-only`：已合并且无记录的现场，跑测试 → 写记录 → 清理。锁由 run_merge 管。"""
     ticket = _step_ticket(ticket_id, ticket_reader, emit)
-    plan = test_plan or resolve_test_plan(ticket.get("project_id") or "", config_path=test_config)
+    plan = test_plan or resolve_test_plan(ticket.get("project_id") or "", config_path=test_config, repo=repo)
     emit(f"分支：{branch} → {target}（--record-only：不碰目标分支）")
 
     checks = _step_checks(repo, target, branch, env, emit, ticket_id=ticket_id, require_ahead=False)
@@ -2161,7 +2278,10 @@ def _record_only_steps(
     emit(f"合并提交：{commit[:12]}（{target} 的祖先；parent2 是 {branch} 的 tip {tip[:12]}）")
     emit(f"测试命令：{plan.describe()}")
 
-    passed, summary, output = run_tests_in(repo, plan=plan, python=python, env=env, step=STEP_RECORD_TESTS)
+    passed, summary, output = run_tests_in(
+        repo, plan=plan, python=python, env=env, step=STEP_RECORD_TESTS,
+        timeout=test_timeout_in(repo),
+    )
     emit(output.rstrip())
     if not passed:
         tag = f"pre-merge-{ticket_id}"
@@ -2295,7 +2415,8 @@ def _merge_steps(
             )
 
         passed, summary, output = run_tests_in(
-            worktree, plan=plan, python=python, env=env, step=STEP_PREVIEW
+            worktree, plan=plan, python=python, env=env, step=STEP_PREVIEW,
+            timeout=test_timeout_in(repo),
         )
         emit(output.rstrip())
         if not passed:
@@ -2345,7 +2466,10 @@ def _merge_steps(
     }
     write_journal(repo, ticket_id, journal, emit)
 
-    passed, summary, output = run_tests_in(repo, plan=plan, python=python, env=env, step=STEP_MERGE)
+    passed, summary, output = run_tests_in(
+        repo, plan=plan, python=python, env=env, step=STEP_MERGE,
+        timeout=test_timeout_in(repo),
+    )
     emit(output.rstrip())
     if not passed:
         git(repo, "reset", "--hard", tag, step=STEP_MERGE, env=env)
@@ -2409,7 +2533,8 @@ def main(argv, out=None):
     parser = argparse.ArgumentParser(description="验收通过后自动合并，失败自动回滚")
     parser.add_argument("--ticket", default=os.environ.get("TASK_CENTER_TICKET"))
     parser.add_argument("--branch", default=None, help="源分支，默认 ticket/<ticket>")
-    parser.add_argument("--target", default="master", help="目标分支，默认 master")
+    parser.add_argument("--target", default=None,
+                        help="目标分支；不传就取项目配置的 target_branch，再没有就 master")
     parser.add_argument("--dry-run", action="store_true", help="跑到预演与测试就停，不碰目标分支")
     parser.add_argument(
         "--record-only",
@@ -2439,7 +2564,7 @@ def main(argv, out=None):
             repo,
             args.ticket,
             branch=args.branch,
-            target=args.target,
+            target=args.target or default_target(repo),
             dry_run=args.dry_run,
             record_only=args.record_only,
             out=emit,
